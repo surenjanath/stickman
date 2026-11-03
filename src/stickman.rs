@@ -144,8 +144,47 @@ const FOOT_LIFT: f32 = 0.10 * LEG_LEN;
 /// Body speed (source px/s) at which planted feet don't slide, for a gait cycle of
 /// `period` seconds (shorter period = faster cadence = run).
 pub fn gait_speed_for(period: f32) -> f32 {
-    2.0 * HALF_STANCE / (DUTY * period)
+    WALK.speed(period)
 }
+
+/// Shape of a gait. All lengths in source px.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Gait {
+    /// Planted foot travels from +stride to -stride relative to the hip.
+    pub stride: f32,
+    /// Peak height of the swinging foot.
+    pub lift: f32,
+    /// Hip height above the ankles, and its bob.
+    pub hip: f32,
+    pub bob: f32,
+    /// Fraction of the cycle each foot is planted.
+    pub duty: f32,
+}
+
+impl Gait {
+    /// Body speed (source px/s) at which planted feet don't slide.
+    pub fn speed(&self, period: f32) -> f32 {
+        2.0 * self.stride / (self.duty * period)
+    }
+}
+
+pub const WALK: Gait = Gait {
+    stride: HALF_STANCE,
+    lift: FOOT_LIFT,
+    hip: HIP_HEIGHT,
+    bob: HIP_BOB,
+    duty: DUTY,
+};
+/// Running: long stride, high knees, low hips. Duty 0.5 keeps one foot down
+/// (the figure is placed by its lowest point, so a flight phase would read as
+/// the body dropping).
+pub const RUN: Gait = Gait {
+    stride: 0.36 * LEG_LEN,
+    lift: 0.3 * LEG_LEN,
+    hip: 0.9 * LEG_LEN,
+    bob: 0.03 * LEG_LEN,
+    duty: 0.5,
+};
 
 /// Walking speed (source px/s).
 pub fn gait_speed() -> f32 {
@@ -154,15 +193,20 @@ pub fn gait_speed() -> f32 {
 
 /// Ankle position relative to the hip for a foot at local phase `q` ∈ [0, 1):
 /// (forward offset, height above the ground).
+#[cfg(test)]
 pub(crate) fn foot_track(q: f32) -> (f32, f32) {
-    if q < DUTY {
-        let u = q / DUTY;
-        (HALF_STANCE * (1.0 - 2.0 * u), 0.0)
+    foot_track_for(q, &WALK)
+}
+
+pub(crate) fn foot_track_for(q: f32, g: &Gait) -> (f32, f32) {
+    if q < g.duty {
+        let u = q / g.duty;
+        (g.stride * (1.0 - 2.0 * u), 0.0)
     } else {
-        let u = (q - DUTY) / (1.0 - DUTY);
+        let u = (q - g.duty) / (1.0 - g.duty);
         // Ease the foot forward; lift peaks a bit early so the toe clears.
-        let x = -HALF_STANCE + 2.0 * HALF_STANCE * smoothstep(u);
-        let lift = FOOT_LIFT * (PI * u.powf(0.8)).sin().max(0.0);
+        let x = -g.stride + 2.0 * g.stride * smoothstep(u);
+        let lift = g.lift * (PI * u.powf(0.8)).sin().max(0.0);
         (x, lift)
     }
 }
@@ -186,18 +230,23 @@ pub(crate) fn leg_ik(target: [f32; 2]) -> (f32, f32) {
 
 /// Walk pose at gait phase `p` ∈ [0, 1). Leg A plants at p = 0, leg B at p = 0.5.
 pub fn walk_pose(p: f32) -> Pose {
+    gait_pose(p, &WALK)
+}
+
+/// Legs (IK on the gait's foot tracks) and walking arms at phase `p`.
+pub fn gait_pose(p: f32, g: &Gait) -> Pose {
     let p = p.rem_euclid(1.0);
-    let bob = (2.0 * TAU * (p - DUTY / 2.0)).cos(); // +1 over a planted foot
-    let hip = HIP_HEIGHT + HIP_BOB * bob;
+    let bob = (2.0 * TAU * (p - g.duty / 2.0)).cos(); // +1 over a planted foot
+    let hip = g.hip + g.bob * bob;
     let mut pose = [0.0; BONES];
     for (side, offset) in [0.0f32, 0.5].into_iter().enumerate() {
-        let (fx, lift) = foot_track((p + offset).rem_euclid(1.0));
+        let (fx, lift) = foot_track_for((p + offset).rem_euclid(1.0), g);
         let (thigh, shin) = leg_ik([fx, hip - lift]);
         pose[THIGH[side]] = thigh;
         pose[SHIN[side]] = shin;
         // Arm swings opposite to the leg on the same side; elbow bends more
         // on the forward swing.
-        let n = (fx / HALF_STANCE).clamp(-1.0, 1.0);
+        let n = (fx / g.stride).clamp(-1.0, 1.0);
         pose[UPPER_ARM[side]] = FRAC_PI_2 + 0.38 * n;
         pose[FOREARM[side]] = pose[UPPER_ARM[side]] - 0.18 - 0.32 * (-n).max(0.0);
     }

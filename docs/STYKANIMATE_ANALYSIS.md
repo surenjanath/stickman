@@ -79,36 +79,28 @@ wrong: the planted foot slides back and forth, and the knee bends backwards on t
 front leg. **The overlay doesn't use it.** `src/stickman.rs` has its own procedural
 gait on the same rig (see below).
 
-## What the overlay implements (Phase 1 + first rendering pass)
+## What the overlay implements
 
-- **Rig:** StykAnimate's Walker, verbatim (lengths, thicknesses, colour, head ring).
-- **Walk:** our own gait.
-  - **Planted feet:** each foot stays planted for 60% of the cycle, and the body moves
-    at exactly the speed that keeps it still.
-  - **Knees:** two-bone IK always bends them forward.
-  - **Swing foot:** lifts and eases forward.
-  - **Hips:** bob highest over the planted foot.
-  - **Arms:** each swings opposite its leg, with more elbow bend on the forward swing.
-  - **Lean:** a slight forward torso lean.
-  - **Timing and size:** 1.05 s per cycle; ~140 pt tall at scale 0.55, walking ~58 pt/s.
-- **Idle:** subtle breathing and weight shift.
-- **Behaviour:** Walk ⇄ Idle on random timers. At a screen edge the figure stops briefly
-  and turns around. The turn blends a mirrored pose, so nothing snaps.
-- **Ground:** the top of the Dock (`NSScreen.visibleFrame`), or the bottom of the screen
-  if the Dock is hidden or on the side.
-- **Renderer:** wgpu/Metal, one instanced draw. Each bone is a quad shaded as an SDF
-  capsule (or ring, for the head), with a light outline so the figure reads on dark
-  wallpapers. Surface `Bgra8Unorm` + `PostMultiplied`, cleared to transparent.
-- **Frame pacing:**
-  - **Rates:** 60 fps while walking, 20 fps wakeups while idle.
-  - **Skipped frames:** a frame is skipped when no joint moved ≥ 0.25 pt. Each Metal
-    present costs ~2 ms of CPU, which is fixed overhead that doesn't depend on surface size.
-  - **Measured:** idle ≈ 2.5–4% CPU (PRD budget 5%); walking ≈ 12–21% of one core.
-  - **No `request_redraw`:** frames are drawn from the timer, not via
-    `window.request_redraw()`. That call ran a full-screen AppKit display pass every
-    frame and cost ~14% CPU by itself.
+See the README for the full feature list. Relative to the source repository:
+- **Rig:** StykAnimate's Walker, used verbatim.
+- **Motion:** our own. A planted-foot IK gait (walk and run), 15+ action poses
+  (rendered in `docs/poses.png`), and continuous pose blending.
+- **State machine:** our own. It has the PRD's four macro modes (from the AI
+  director) and the actions below. The source has no state machine at all.
 
-## Mapping to the wgpu pipeline (original proposal)
+  | Action | Triggered by |
+  |---|---|
+  | Stand / Think | idle, observe |
+  | Walk / Run | wander, follow, chase |
+  | Crouch → Air → Land | jumps onto windows/text, leaps at the cursor |
+  | Fall | walked off an edge, platform vanished |
+  | Punch / Kick | combat, cursor in reach (aimed at the cursor) |
+  | Dodge | fast swipe toward the figure outside combat |
+  | Tumble → GetUp / KO | user clicked the figure |
+  | Stomp | sabotage, standing on the active window |
+  | Taunt | combat at range, or a window out of reach |
+
+## Mapping to the wgpu pipeline (original Phase 1 proposal)
 
 
 The repo doesn't dictate a renderer, so this is a recommendation:

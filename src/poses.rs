@@ -7,8 +7,8 @@
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use crate::stickman::{
-    idle_pose, leg_ik, lerp_pose, smoothstep, walk_pose, Pose, BONES, FOREARM, HEAD, HIP_HEIGHT,
-    LEG_LEN, SHIN, THIGH, TORSO, UPPER_ARM,
+    gait_pose, idle_pose, leg_ik, lerp_pose, smoothstep, Pose, BONES, FOREARM, HEAD, HIP_HEIGHT,
+    LEG_LEN, RUN, SHIN, THIGH, TORSO, UPPER_ARM,
 };
 
 const H: f32 = FRAC_PI_2;
@@ -57,13 +57,14 @@ pub fn stance(t: f32) -> Pose {
 
 /// Running: the walk cycle with a forward lean and pumping, bent arms.
 pub fn run_pose(phase: f32) -> Pose {
-    let mut p = walk_pose(phase);
-    p[TORSO] += 0.14;
-    p[HEAD] += 0.08;
+    let mut p = gait_pose(phase, &RUN);
+    p[TORSO] = -H + 0.24;
+    p[HEAD] = -H + 0.18;
     for side in [A, B] {
-        let swing = p[UPPER_ARM[side]] - H;
-        p[UPPER_ARM[side]] = H + swing * 1.6;
-        p[FOREARM[side]] = p[UPPER_ARM[side]] - 1.5;
+        // Arms pump opposite the legs, elbows bent ~90°.
+        let n = ((p[UPPER_ARM[side]] - H) / 0.38).clamp(-1.0, 1.0);
+        p[UPPER_ARM[side]] = H + 0.75 * n;
+        p[FOREARM[side]] = p[UPPER_ARM[side]] - 1.45;
     }
     p
 }
@@ -76,8 +77,11 @@ pub fn punch(k: f32, aim: f32) -> Pose {
     arm(&mut windup, A, 2.1, -0.4);
     let mut strike = base;
     plant(&mut strike, 0.84 * LEG_LEN, 48.0, 0.0, -34.0, 0.0);
-    strike[TORSO] = -H + 0.3;
-    strike[HEAD] = -H + 0.25;
+    // Lean into straight punches, but back for upward ones so the arm clears
+    // the head.
+    let up = aim.min(0.0);
+    strike[TORSO] = -H + 0.3 + 0.9 * up;
+    strike[HEAD] = -H + 0.25 + 0.9 * up;
     arm(&mut strike, A, aim, aim);
     arm(&mut strike, B, 1.4, -1.2);
     sequence(
@@ -142,8 +146,8 @@ pub fn air(vy: f32) -> Pose {
     rise[SHIN[A]] = 1.3;
     rise[THIGH[B]] = 0.35;
     rise[SHIN[B]] = 1.9;
-    arm(&mut rise, A, -1.25, -1.45);
-    arm(&mut rise, B, -1.0, -1.3);
+    arm(&mut rise, A, -0.25, -0.55);
+    arm(&mut rise, B, -2.8, -3.0);
     let mut fall = [0.0; BONES];
     fall[TORSO] = -H + 0.04;
     fall[HEAD] = -H;
@@ -197,8 +201,8 @@ pub fn dodge() -> Pose {
     p[SHIN[A]] = 1.85;
     p[THIGH[B]] = 0.95;
     p[SHIN[B]] = 2.1;
-    arm(&mut p, A, -0.45, -2.0);
-    arm(&mut p, B, -0.15, -1.75);
+    arm(&mut p, A, 0.15, -1.25);
+    arm(&mut p, B, 0.5, -1.05);
     p
 }
 
@@ -210,8 +214,8 @@ pub fn stomp(k: f32) -> Pose {
     raise[THIGH[A]] = -0.45;
     raise[SHIN[A]] = 1.05;
     raise[TORSO] = -H - 0.05;
-    arm(&mut raise, A, -1.9, -2.3);
-    arm(&mut raise, B, -0.9, -1.4);
+    arm(&mut raise, A, -0.45, -0.7);
+    arm(&mut raise, B, -2.65, -2.9);
     let mut slam = base;
     plant(&mut slam, 0.82 * LEG_LEN, 22.0, 0.0, -16.0, 0.0);
     slam[TORSO] = -H + 0.3;
@@ -278,7 +282,11 @@ mod tests {
             ("think", think(1.0)),
             ("land", land(0.0)),
         ];
+        for q in [0.0, 0.2, 0.4, 0.6, 0.8] {
+            v.push(("run", run_pose(q)));
+        }
         for k in [0.0, 0.3, 0.45, 0.7, 1.0] {
+            v.push(("uppercut", punch(k, -0.75)));
             v.push(("punch", punch(k, -0.2)));
             v.push(("kick", kick(k, 0.2)));
             v.push(("stomp", stomp(k)));
@@ -335,6 +343,43 @@ mod tests {
                 assert!(
                     (foot - d).abs() < 1.5,
                     "{name}: foot {side} at {foot}, ground {d}"
+                );
+            }
+        }
+    }
+
+    /// Fists and elbows must never end up inside the head ring.
+    #[test]
+    fn hands_stay_out_of_the_head() {
+        for (name, p) in all_poses() {
+            let s = forward_kinematics(&p, [0.0, 0.0], 1.0, 1.0);
+            let h = s[HEAD];
+            let c = [(h.start[0] + h.end[0]) / 2.0, (h.start[1] + h.end[1]) / 2.0];
+            let r = 22.0 + 4.0;
+            let dist = |a: [f32; 2], b: [f32; 2]| {
+                // Distance from the head centre to segment a-b.
+                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                let t = (((c[0] - a[0]) * dx + (c[1] - a[1]) * dy) / (dx * dx + dy * dy).max(1e-6))
+                    .clamp(0.0, 1.0);
+                ((a[0] + t * dx - c[0]).powi(2) + (a[1] + t * dy - c[1]).powi(2)).sqrt()
+            };
+            for side in [A, B] {
+                let u = s[UPPER_ARM[side]];
+                // The shoulder touches the head ring; the rest of the upper arm must not.
+                let mid = [(u.start[0] + u.end[0]) / 2.0, (u.start[1] + u.end[1]) / 2.0];
+                let d = ((mid[0] - c[0]).powi(2) + (mid[1] - c[1]).powi(2)).sqrt();
+                assert!(
+                    d > r,
+                    "{name}: upper arm {side} crosses the head ({d:.1} < {r})"
+                );
+                let elbow = u.end;
+                let d = ((elbow[0] - c[0]).powi(2) + (elbow[1] - c[1]).powi(2)).sqrt();
+                assert!(d > r, "{name}: elbow {side} inside the head ({d:.1} < {r})");
+                let f = s[FOREARM[side]];
+                let d = dist(f.start, f.end);
+                assert!(
+                    d > r,
+                    "{name}: forearm {side} crosses the head ({d:.1} < {r})"
                 );
             }
         }

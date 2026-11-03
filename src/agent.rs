@@ -12,14 +12,14 @@
 //! Coordinates are overlay points, y down. `pos` is the figure's ground contact
 //! point: hip x, feet y.
 
-use std::f32::consts::{FRAC_PI_2, PI};
+use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use crate::geom::{v2, Rect, V2};
 use crate::physics::{Platform, PlatformKind, World};
 use crate::poses;
 use crate::stickman::{
-    depth_below_root, forward_kinematics, gait_speed_for, idle_pose, lerp_angle, lerp_pose,
-    mirror_pose, smoothstep, walk_pose, Pose, Segment, BONES, FOREARM, GAIT_PERIOD, SHIN,
+    depth_below_root, forward_kinematics, gait_speed_for, idle_pose, mirror_pose, smoothstep,
+    walk_pose, Pose, Segment, BONES, FOREARM, GAIT_PERIOD, SHIN,
 };
 
 /// Physics tick (claude.md rule 3: fixed 60 Hz step).
@@ -206,6 +206,8 @@ pub struct Agent {
     hip_anchored: bool,
     /// Pose as last drawn; new actions blend from here.
     shown: (Pose, f32),
+    /// Current action's target pose, angle-unwrapped to stay continuous.
+    target: (Pose, f32),
 }
 
 impl Agent {
@@ -237,6 +239,7 @@ impl Agent {
             root_correction: 0.0,
             hip_anchored: false,
             shown: (idle_pose(0.0), 0.0),
+            target: (idle_pose(0.0), 0.0),
         }
     }
 
@@ -255,12 +258,14 @@ impl Agent {
     }
 
     fn walk_speed(&self, run: bool) -> f32 {
-        gait_speed_for(if run { RUN_PERIOD } else { GAIT_PERIOD }) * self.scale
+        if run {
+            crate::stickman::RUN.speed(RUN_PERIOD) * self.scale
+        } else {
+            gait_speed_for(GAIT_PERIOD) * self.scale
+        }
     }
 
     fn set_action(&mut self, a: Action) {
-        self.blend_from = self.shown;
-        self.blend_left = BLEND_SECONDS;
         if matches!(a, Action::Punch { .. } | Action::Kick { .. }) {
             self.hit_landed = false;
         }
@@ -272,6 +277,7 @@ impl Agent {
         }
         self.action = a;
         self.t = 0.0;
+        self.start_blend();
     }
 
     fn face(&mut self, dir: f32) {
@@ -280,9 +286,8 @@ impl Agent {
             // any action started this tick continue from the drawn pose.
             let (p, s) = self.shown;
             self.shown = (mirror_pose(&p), -s);
-            self.blend_from = self.shown;
-            self.blend_left = BLEND_SECONDS;
             self.facing = dir.signum();
+            self.start_blend();
         }
     }
 
@@ -338,13 +343,37 @@ impl Agent {
         (p, spin)
     }
 
+    /// Re-evaluate the action's target pose, unwrapping every angle to the
+    /// representative nearest the previous target. The target path is then
+    /// continuous, so blends can interpolate linearly: a shortest-arc lerp would
+    /// flip direction whenever an animated target swings past the antipode of
+    /// the blend's start (an arm snapping round mid-blend).
+    fn refresh_target(&mut self) {
+        let (raw, raw_spin) = self.target_pose();
+        let near = |prev: f32, a: f32| a + TAU * ((prev - a) / TAU).round();
+        for (cont, raw) in self.target.0.iter_mut().zip(raw) {
+            *cont = near(*cont, raw);
+        }
+        self.target.1 = near(self.target.1, raw_spin);
+    }
+
+    /// Start a blend from what's on screen: unwrap the new target next to it so
+    /// the transition takes the short way round.
+    fn start_blend(&mut self) {
+        self.blend_from = self.shown;
+        self.blend_left = BLEND_SECONDS;
+        self.target = self.shown;
+        self.refresh_target();
+    }
+
     fn pose_and_spin(&self) -> (Pose, f32) {
-        let (p, s) = self.target_pose();
+        let (p, s) = self.target;
         if self.blend_left > 0.0 {
             let k = smoothstep(1.0 - self.blend_left / BLEND_SECONDS);
+            let from = &self.blend_from;
             (
-                lerp_pose(&self.blend_from.0, &p, k),
-                lerp_angle(self.blend_from.1, s, k),
+                std::array::from_fn(|i| from.0[i] + (p[i] - from.0[i]) * k),
+                from.1 + (s - from.1) * k,
             )
         } else {
             (p, s)
@@ -442,6 +471,7 @@ impl Agent {
         self.clock += dt;
         self.t += dt;
         self.blend_left = (self.blend_left - dt).max(0.0);
+        self.refresh_target();
         self.attack_cooldown -= dt;
         self.decide_left -= dt;
         self.since_hit += dt;
@@ -470,6 +500,7 @@ impl Agent {
             self.root_correction = before_root + moved - new_root;
             self.hip_anchored = anchor;
         }
+        self.refresh_target();
         self.shown = self.pose_and_spin();
         self.root_correction *= (-dt / 0.08).exp();
         if self.root_correction.abs() < 0.01 {
@@ -557,8 +588,10 @@ impl Agent {
                 aim: self.aim_at(target, -0.4, 1.0),
             }
         } else {
+            // Steeper than ~43° up would swing the arm through the head; higher
+            // targets get a jump attack instead.
             Action::Punch {
-                aim: self.aim_at(target, -1.3, 0.9),
+                aim: self.aim_at(target, -0.75, 0.9),
             }
         };
         self.attack_cooldown = 0.35;
@@ -985,6 +1018,38 @@ mod tests {
     }
 
     #[test]
+    fn planted_foot_does_not_slide_while_running() {
+        let w = world(vec![]);
+        let mut a = agent();
+        a.walk_to(1700.0, true);
+        let s = senses(Mode::Idle);
+        let mut ev = vec![];
+        run(&mut a, &w, &s, 0.5, &mut ev);
+        let duty = crate::stickman::RUN.duty;
+        let mut worst = 0.0f32;
+        let mut prev = a.segments();
+        let mut prev_phase = a.gait_phase;
+        for _ in 0..60 {
+            a.update(&s, &w, &mut ev);
+            let now = a.segments();
+            for side in 0..2 {
+                let q0 = (prev_phase + side as f32 * 0.5).rem_euclid(1.0);
+                let q1 = (a.gait_phase + side as f32 * 0.5).rem_euclid(1.0);
+                if q0 < duty && q1 < duty && q1 > q0 {
+                    worst = worst.max((prev[SHIN[side]].end[0] - now[SHIN[side]].end[0]).abs());
+                }
+            }
+            prev = now;
+            prev_phase = a.gait_phase;
+        }
+        assert!(matches!(a.action, Action::Walk { run: true, .. }));
+        assert!(
+            worst < 0.05,
+            "planted foot slid {worst} pt per tick while running"
+        );
+    }
+
+    #[test]
     fn click_knocks_back_then_recovers() {
         let w = world(vec![]);
         let mut a = agent();
@@ -1214,8 +1279,11 @@ mod tests {
             owner: 9,
         };
         let w = world(vec![top]);
-        for mode in [Mode::Idle, Mode::Observe, Mode::Sabotage, Mode::Combat] {
-            let mut a = agent();
+        for (mode, seed) in [Mode::Idle, Mode::Observe, Mode::Sabotage, Mode::Combat]
+            .into_iter()
+            .flat_map(|m| [1234u64, 7, 99, 31337].map(|s| (m, s)))
+        {
+            let mut a = Agent::new(900.0, Platform::ground(1800.0, GROUND_Y), SCALE, seed);
             let mut s = senses(mode);
             s.active_window = Some((
                 9,
@@ -1247,7 +1315,7 @@ mod tests {
                     .sqrt();
                     assert!(
                         d < 45.0,
-                        "{mode:?}: bone {b} jumped {d} pt at t={t:.2} in {:?}",
+                        "{mode:?}/seed {seed}: bone {b} jumped {d} pt at t={t:.2} in {:?}",
                         a.action
                     );
                 }
