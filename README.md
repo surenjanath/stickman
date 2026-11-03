@@ -38,6 +38,9 @@ Written in Rust for Apple Silicon:
 | **Throwing windows** | With telekinesis it can lift your active window, wobble it in the air and hurl it at your cursor (or fling it aside); it bounces off the screen edges and slides to a stop, always kept on screen. |
 | **Dock icons and swords** | Standing on the Dock it rips app icons up from under its feet and throws them (copies; your Dock is untouched). In combat it rips a scrollbar off your window and fights with it as a sword, then hurls it. |
 | **Rival duels** | Every 6–12 minutes (or via **Summon a Rival**), a red ninja stick figure drops in on the far side: "You! Me! Now!" The two fight each other with the full combat moveset (punches, kicks, leaps, super jumps); no healing mid-duel. Click either one to join in. Knock the rival out for a big experience bonus; then it limps off screen ("I'll be back!"). |
+| **Boss fights** | Now and then in a fight (from level 3), or with **Start a Boss Fight**, it declares "BOSS FIGHT!": a banner and a big red health bar for your cursor appear at the top of the screen. Every punch, sword hit, thrown word or icon, and cursor toss knocks the bar down; you fight back by clicking the figure. Empty the cursor's bar and it wins (explosion, "I AM THE CHAMPION!", double experience); knock it out first and you win. 90 s, then it's a draw. |
+| **Minion army** | From level 6 it sometimes yells "Minions! ATTACK!" and three small allies (blue, green, orange) drop in to gang up on your cursor for 25 s, then walk home. One or two clicks knock a minion out in a puff of smoke. Or press **Call the Minions**. |
+| **Piles** | Thrown words and icons that land settle flat and become tiny platforms: later throws land on top, piles grow, and the figure can climb them. Best with "Thrown words stay: Forever". |
 | **Levels & grudges** | Experience from fights levels it up (Doodle → Scrapper → Brawler → Champion → Legend) for more health and a quicker step. Hitting it builds a grudge that fades slowly, makes it fiercer, and is remembered between launches ("Remember me? I remember YOU."). |
 | **Draw for it** | **Draw Platforms** (⌘D): sketch lines with the mouse to make platforms; hold Shift for a trampoline that bounces it high. Right-click to finish. |
 | **Dances to music** | When your Mac is playing audio, it dances along. |
@@ -117,7 +120,7 @@ tabs with headed sections:
 |---|---|
 | Mind | Live: its mood and level; bars for resentment, fear, grudge, affection, pride, health and experience (yellow, then red when they get bad); what it's thinking right now, its scheme, beliefs and next note; a log of its thoughts and memories; its diary; achievements earned and what to go for next; Reflect Now, Leave Me a Note, Write Diary Now, Wipe Its Memory, Forgive & Reset Level. |
 | Personality | Name, colour, size, hat; temper and chattiness sliders, language, bleeping, losing its temper; behaviour (Auto or one pinned mood), quiet during video calls, sleepy at night, earn moves by levelling up. |
-| Abilities | Your cursor (pushes, grabs), your windows (shakes, shoves, throws), your screen (walking on text, ripping words and how long they stay, Dock icons, scrollbar swords), powers and events (super powers, jail-break intro, rival visits). |
+| Abilities | Your cursor (pushes, grabs), your windows (shakes, shoves, throws), your screen (walking on text, ripping words and how long they stay, Dock icons, scrollbar swords, piles), powers and events (super powers, jail-break intro, rival visits, minions, boss fights, with Start a Boss Fight and Call the Minions buttons). |
 | Fun & Sound | Naps, dancing, dancing to music, doodles, sitting on edges, speech bubbles, sound effects and their volume. |
 
 Everything is saved and restored on the next launch. Environment variables
@@ -180,7 +183,7 @@ launching terminal.
 | `STICKMAN_CLICK_THROUGH=0` | Debug: the overlay catches every click (blocks the screen). |
 | `STICKMAN_DEBUG_OPEN_MENU=1` | Debug: pop the menu bar menu open once at startup. |
 | `STICKMAN_DEBUG_SAY="…"` | Debug: say this line at startup. |
-| `STICKMAN_DEBUG_DO=sleep\|dance\|cheer\|doodle\|superjump\|mindwords\|throwwindow\|rival\|draw\|sketch\|note\|reflect\|rage\|diary` | Debug: do that 3 s after launch. |
+| `STICKMAN_DEBUG_DO=sleep\|dance\|cheer\|doodle\|superjump\|mindwords\|throwwindow\|rival\|draw\|sketch\|note\|reflect\|rage\|diary\|boss\|minions` | Debug: do that 3 s after launch. |
 | `STICKMAN_DEBUG_OPEN_SETTINGS=1` | Debug: open the Settings window at launch (or `=Mind`, `=Abilities`, … for that tab). |
 | `STICKMAN_DEBUG_HAT=Crown` | Debug: wear that hat even if it's locked (`Bandana`, `TopHat`, `Pirate`, `Party`, `Wizard`, `Horns`, `Viking`). |
 | `STICKMAN_DEBUG_GRAB=1` | Debug: in combat, always grab a slow cursor in reach (instead of 30% of the time). |
@@ -199,7 +202,7 @@ cargo run --release --example pose_sheet -- docs/poses.png   # re-render the pos
 cargo run --release --example sfx_demo     # hear every sound effect
 ```
 
-**Unit tests (185).**
+**Unit tests (190).**
 - **Collision:** one-way landings, no tunnelling, window-edge occlusion clipping.
 - **Walking and running:** feet never slide; feet always on the ground.
 - **Poses:** IK accuracy and knee direction; hands and arms never cross the head.
@@ -363,7 +366,8 @@ Engineering rules (from `claude.md`):
 | 6 | OCR text traversal (Vision) | ✅ |
 | 7 | Speech bubbles, sound effects, grabbing and throwing the cursor, multiple displays | ✅ |
 | 8 | A mind (memories, feelings, reflection), ransom notes, rage, a diary, achievements, hats, unlockable moves, politeness on calls | ✅ |
-| Next | Boss fights, a minion army, piles of thrown words and icons that stay physical, climbing up to a higher neighbouring screen | — |
+| 9 | Boss fights against the cursor, a minion army, piles of thrown words and icons | ✅ |
+| Next | Climbing up to a higher neighbouring screen, a spoken voice, a face that shows its mood | — |
 
 ## Credits
 

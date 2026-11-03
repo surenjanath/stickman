@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use stickman::agent::{Agent, Event, Mind, Mode, Senses, FIXED_DT};
+use stickman::boss::{Blow, Boss, Outcome};
 use stickman::director::{self, Directive, Observation};
 use stickman::doodle::Doodles;
 use stickman::draw::Sketchpad;
@@ -41,6 +42,7 @@ use stickman::macos::{
 };
 use stickman::menubar::{MenuBar, Status};
 use stickman::mind::{Kind as Memory, Mind as Psyche};
+use stickman::minions::{self, Squad};
 use stickman::note::{self as notes, Note};
 use stickman::ocr;
 use stickman::particles::Particles;
@@ -297,6 +299,13 @@ struct Scene {
     doodles: Doodles,
     /// A rival visiting for a duel, its speech bubble, and when the next comes.
     rival: Option<Rival>,
+    /// A minion army on the attack, and when it may come next.
+    squad: Option<Squad>,
+    next_minions: Instant,
+    /// A boss fight against the cursor, its banner sprite, and the next one.
+    boss: Option<Boss>,
+    boss_banner: Option<(u32, V2)>,
+    next_boss: Instant,
     rival_speech: Speech,
     rival_click: bool,
     next_rival: Instant,
@@ -427,6 +436,9 @@ impl Scene {
         ps.extend(window_platforms(&wins, &self.layout.frames(), 40.0));
         ps.extend(self.text.iter().copied());
         ps.extend(self.sketch.platforms());
+        if self.settings.piles {
+            ps.extend(self.words.pile_platforms());
+        }
         ps
     }
 
@@ -541,8 +553,8 @@ impl Scene {
             self.mode = Mode::Observe;
             self.mode_since = Instant::now();
         }
-        // Enraged (and left to its own devices): it's war.
-        if self.mind.enraged
+        // Enraged, or in a boss fight (and left to its own devices): it's war.
+        if (self.mind.enraged || self.boss.is_some())
             && !self.on_call
             && forced.is_none()
             && self.rival.is_none()
@@ -733,6 +745,172 @@ impl Scene {
                 self.sfx(Sfx::Babble, 0.2, r.agent.head());
             }
         }
+    }
+
+    /// The ground of the screen the figure is on, and that screen's frame.
+    fn screen_ground(&self) -> (Platform, Rect) {
+        let screen = self.layout.screen_at(self.agent.pos - v2(0.0, 1.0));
+        let f = screen.frame;
+        (
+            Platform {
+                x0: f.x as f32,
+                x1: f.right() as f32,
+                y: screen.ground_y,
+                kind: stickman::physics::PlatformKind::Ground,
+                owner: 0,
+            },
+            f,
+        )
+    }
+
+    /// Call in the minion army around the figure.
+    fn call_minions(&mut self) {
+        if self.squad.is_some() || self.jail.is_some() || !self.settings.visible || self.on_call {
+            return;
+        }
+        let (ground, f) = self.screen_ground();
+        let (lo, hi) = (f.x as f32 + 80.0, f.right() as f32 - 80.0);
+        let x = self.agent.pos.x;
+        let xs: Vec<f32> = [-260.0, 200.0, 420.0]
+            .iter()
+            .take(minions::SQUAD)
+            .map(|dx| (x + dx).clamp(lo, hi))
+            .collect();
+        self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(11);
+        self.squad = Some(Squad::new(
+            &xs,
+            f.y as f32,
+            ground,
+            self.agent.scale,
+            self.seed,
+        ));
+        log::info!("minions: called in at {xs:?}");
+        self.deed(Deed::Minions);
+        let head = self.agent.head();
+        self.particles.stars(head);
+        self.sfx(Sfx::Whoosh, 0.7, head);
+        let lines = self.speech.say("Minions! ATTACK!", Priority::Event);
+        self.speak(lines);
+    }
+
+    fn handle_minions(&mut self, cues: &[minions::Cue]) {
+        let area = self.layout.bounds();
+        for c in cues {
+            match *c {
+                minions::Cue::Landed { at } => {
+                    self.particles.dust(at, 0.6);
+                    self.sfx(Sfx::Thud, 0.4, at);
+                }
+                minions::Cue::StruckCursor { at, dir } => {
+                    self.particles.sparks(at, dir, 10);
+                    self.sfx(Sfx::Punch, 0.45, at);
+                    if self.cursor_fx() {
+                        self.cursor.push(dir * CURSOR_PUSH * 0.4, area);
+                    }
+                    self.boss_hit(Blow::Minion);
+                }
+                minions::Cue::Poofed { at } => {
+                    log::info!("minions: one knocked out");
+                    self.particles.explosion(at, v2(0.0, -1.0));
+                    self.sfx(Sfx::Pop, 0.8, at);
+                }
+                minions::Cue::Other(Event::Dust { at, strength }) => {
+                    self.particles.dust(at, strength * 0.6)
+                }
+                minions::Cue::Other(Event::Jumped { at }) => self.particles.dust(at, 0.15),
+                minions::Cue::Other(_) => {}
+            }
+        }
+        if self.squad.as_ref().is_some_and(|s| s.done()) {
+            self.squad = None;
+            log::info!("minions: gone home");
+        }
+    }
+
+    /// Challenge the cursor to a boss fight.
+    fn start_boss(&mut self) {
+        if self.boss.is_some() || self.jail.is_some() || !self.settings.visible || self.on_call {
+            return;
+        }
+        log::info!("boss: fight starts");
+        self.boss = Some(Boss::default());
+        self.agent.health = self.agent.traits.max_health;
+        let name = self.settings.name.to_uppercase();
+        let scale = self.renderer.scale_factor();
+        if let Some((id, _)) = self.boss_banner.take() {
+            self.renderer.free_sprite(id);
+        }
+        self.boss_banner = stickman::text::render_lines(
+            &[
+                "BOSS FIGHT!".to_string(),
+                format!("{name}  vs  YOUR CURSOR"),
+            ],
+            24.0,
+            [0.95, 0.15, 0.12],
+            scale,
+        )
+        .and_then(|img| {
+            let id = self
+                .renderer
+                .create_sprite(&img.rgba, img.width, img.height)?;
+            Some((id, v2(img.size_pt.0, img.size_pt.1)))
+        });
+        let head = self.agent.head();
+        self.particles.shockwave(self.agent.pos);
+        self.sfx(Sfx::Boom, 0.7, head);
+        let lines = self
+            .speech
+            .say("BOSS FIGHT! Your cursor is going DOWN!", Priority::Event);
+        self.speak(lines);
+    }
+
+    /// A blow landed on the cursor: it counts in a boss fight.
+    fn boss_hit(&mut self, b: Blow) {
+        if let Some(boss) = &mut self.boss {
+            boss.hit(b);
+        }
+    }
+
+    fn boss_over(&mut self, o: Outcome) {
+        if let Some((id, _)) = self.boss_banner.take() {
+            self.renderer.free_sprite(id);
+        }
+        let head = self.agent.head();
+        match o {
+            Outcome::Won => {
+                log::info!("boss: the figure beat the cursor");
+                let at = self.cursor.pos;
+                self.particles.explosion(at, v2(0.0, -1.0));
+                self.particles.shockwave(at);
+                self.particles.stars(head);
+                self.sfx(Sfx::Boom, 1.0, at);
+                self.deed(Deed::BossWon);
+                self.remember(Memory::WonDuel);
+                self.earn(Feat::WonDuel);
+                self.earn(Feat::WonDuel);
+                let lines = self
+                    .speech
+                    .say("I AM THE CHAMPION! Bow before me, cursor!", Priority::Event);
+                self.speak(lines);
+                let mut ev = Vec::new();
+                self.agent.perform("cheer", &mut ev);
+            }
+            Outcome::Lost => {
+                log::info!("boss: the user won");
+                self.deed(Deed::BossLost);
+                self.remember(Memory::LostDuel);
+                let lines = self.speech.say("Ugh… you win. This time.", Priority::Event);
+                self.speak(lines);
+            }
+            Outcome::Draw => {
+                log::info!("boss: time ran out");
+                let lines = self
+                    .speech
+                    .say("Time! We'll finish this later.", Priority::Event);
+                self.speak(lines);
+            }
+        }
+        self.save_stats();
     }
 
     /// Bring in a rival on the far side of the figure's screen.
@@ -1513,6 +1691,7 @@ impl Scene {
                         self.cursor.push(dir * CURSOR_PUSH, area);
                     }
                     log::info!("event: a thrown word hit the cursor");
+                    self.boss_hit(Blow::Word);
                     self.earn(Feat::WordHit);
                 }
                 WordEvent::Landed { at } => {
@@ -1550,6 +1729,7 @@ impl Scene {
                     }
                     log::info!("event: struck cursor");
                     self.deed(Deed::CursorHit);
+                    self.boss_hit(Blow::Punch);
                     self.remember(Memory::StruckCursor);
                     self.earn(Feat::HitCursor);
                     self.quip(Moment::StruckCursor);
@@ -1645,6 +1825,7 @@ impl Scene {
                     }
                     log::info!("event: sword hit the cursor");
                     self.deed(Deed::SwordHit);
+                    self.boss_hit(Blow::Sword);
                     self.earn(Feat::HitCursor);
                     self.quip(Moment::Slash);
                 }
@@ -1872,6 +2053,8 @@ impl Scene {
                 }
                 Command::OpenSettings => self.open_settings(),
                 Command::SummonRival => self.summon_rival(),
+                Command::StartBoss => self.start_boss(),
+                Command::CallMinions => self.call_minions(),
                 Command::WriteNote => {
                     let roll = ((self.seed >> 29) % 1000) as f32 / 1000.0;
                     let text = self.mind.note_for(self.mode, roll);
@@ -2349,6 +2532,14 @@ impl Scene {
                 self.mind.feelings.resentment = 90.0;
                 return;
             }
+            if what.trim() == "boss" {
+                self.start_boss();
+                return;
+            }
+            if what.trim() == "minions" {
+                self.call_minions();
+                return;
+            }
             if what.trim() == "diary" {
                 for _ in 0..4 {
                     self.remember(Memory::Hit);
@@ -2625,6 +2816,50 @@ impl Scene {
                 }
             }
         }
+        // A click meant for a minion.
+        if self.pending_click && !self.agent.hit_test(self.cursor.pos) {
+            if let Some(sq) = &mut self.squad {
+                if let Some(i) = sq.hit_test(self.cursor.pos) {
+                    self.pending_click = false;
+                    sq.click(i);
+                }
+            }
+        }
+        // In a fight, now and then: the minions (level 6), or a boss fight.
+        let around = self.last_mouse_move.elapsed() < Duration::from_secs(20);
+        let free = self.rival.is_none()
+            && self.jail.is_none()
+            && !self.on_call
+            && self.settings.behaviour == Behaviour::Auto;
+        if free && around && self.mode == Mode::Combat {
+            let now = Instant::now();
+            if self.settings.minions
+                && self.unlocked(6)
+                && self.squad.is_none()
+                && now >= self.next_minions
+            {
+                self.call_minions();
+                let wait = 300.0 + 240.0 * ((self.seed >> 41) % 1000) as f32 / 1000.0;
+                self.next_minions = now + Duration::from_secs_f32(wait);
+            }
+            if self.settings.boss_fights
+                && self.unlocked(3)
+                && self.boss.is_none()
+                && now >= self.next_boss
+            {
+                self.start_boss();
+                let wait = 900.0 + 600.0 * ((self.seed >> 43) % 1000) as f32 / 1000.0;
+                self.next_boss = now + Duration::from_secs_f32(wait);
+            }
+        }
+        if self.on_call {
+            if let Some(sq) = &mut self.squad {
+                let r = self.layout.walk_range(self.agent.pos, EDGE_MARGIN);
+                sq.retreat(r.min_x, r.max_x);
+            }
+        }
+        let mut minion_cues = Vec::new();
+        let mut boss_outcomes = Vec::new();
         // Now and then, a rival comes to fight.
         if self.settings.rival_visits
             && !self.on_call
@@ -2734,6 +2969,25 @@ impl Scene {
                 rival_cues.extend(cues);
                 self.rival_speech.update(FIXED_DT);
             }
+            if let Some(sq) = &mut self.squad {
+                let r = self.layout.walk_range(self.agent.pos, EDGE_MARGIN);
+                let base = Senses {
+                    clicked: false,
+                    min_x: r.min_x,
+                    max_x: r.max_x,
+                    top: r.top,
+                    ..senses
+                };
+                minion_cues.extend(sq.step(&self.world, &base));
+            }
+            if let Some(b) = &mut self.boss {
+                if let Some(o) = b.update(FIXED_DT, self.agent.knocked_out()) {
+                    boss_outcomes.push(o);
+                }
+                if b.done() {
+                    self.boss = None;
+                }
+            }
             self.particles.update(FIXED_DT);
             self.speech.update(FIXED_DT);
             self.update_note(FIXED_DT);
@@ -2765,6 +3019,10 @@ impl Scene {
         }
         self.handle(&events);
         self.handle_rival(&rival_events, &rival_cues);
+        self.handle_minions(&minion_cues);
+        for o in boss_outcomes {
+            self.boss_over(o);
+        }
         self.handle_jail(&jail_cues);
         self.handle_word_events(&word_events, &freed);
         self.move_captive();
@@ -2776,6 +3034,10 @@ impl Scene {
 
         // PRD 3.1: intercept clicks only while the user is aiming at the figure.
         let over = self.agent.hit_test(self.cursor.pos)
+            || self
+                .squad
+                .as_ref()
+                .is_some_and(|s| s.hit_test(self.cursor.pos).is_some())
             || self
                 .rival
                 .as_ref()
@@ -2824,6 +3086,8 @@ impl Scene {
             || self.jail.is_some()
             || self.sketch.stroke.is_some()
             || self.rival.is_some()
+            || self.squad.is_some()
+            || self.boss.is_some()
             || self.flight.is_some()
             || self.sword.is_some()
             || self.note.as_ref().is_some_and(|n| n.animating())
@@ -2888,6 +3152,8 @@ impl Scene {
             || self.jail.is_some()
             || self.sketch.stroke.is_some()
             || self.rival.is_some()
+            || self.squad.is_some()
+            || self.boss.is_some()
             || self.flight.is_some()
             || self.sword.is_some()
             || self.note.as_ref().is_some_and(|n| n.animating());
@@ -2937,6 +3203,15 @@ impl Scene {
                 22.0 * self.agent.scale,
             );
         }
+        if let Some(sq) = &self.squad {
+            for m in sq
+                .minions
+                .iter()
+                .filter(|m| m.phase != minions::Phase::Gone)
+            {
+                self.draw.figure(&m.agent.segments(), m.rgb);
+            }
+        }
         if let Some(r) = &self.rival {
             self.draw.figure(&r.agent.segments(), rival::RIVAL_RGB);
             // A ninja headband with tails flying behind.
@@ -2973,6 +3248,7 @@ impl Scene {
         }
         self.particles.draw(&mut self.draw);
         self.health_bar();
+        self.draw_boss();
         let rival_bar = self.rival.as_ref().map(|r| {
             (
                 r.agent.head(),
@@ -3061,10 +3337,55 @@ impl Scene {
         }
     }
 
+    /// The boss banner and the cursor's health, at the top of the figure's
+    /// screen, and a small bar under the cursor.
+    fn draw_boss(&mut self) {
+        let Some(b) = &self.boss else { return };
+        if matches!(b.phase, stickman::boss::Phase::Over(_)) {
+            return;
+        }
+        let f = self.layout.screen_at(self.agent.pos - v2(0.0, 1.0)).frame;
+        let cx = (f.x + f.width / 2.0) as f32;
+        let mut y = f.y as f32 + 60.0;
+        if let Some((id, size)) = self.boss_banner {
+            let half = size / 2.0;
+            self.draw.rect(
+                v2(cx, y + half.y),
+                half + V2::splat(10.0),
+                10.0,
+                [1.0, 1.0, 1.0, 0.9],
+            );
+            self.draw.sprite(stickman::render::SpriteDraw {
+                id,
+                center: v2(cx, y + half.y),
+                half,
+                rotation: 0.0,
+                alpha: 1.0,
+            });
+            y += size.y + 26.0;
+        }
+        let (w, frac) = (320.0, b.fraction());
+        let left = v2(cx - w / 2.0, y);
+        let flash = b.since_hit < 0.12;
+        self.draw
+            .capsule(left, left + v2(w, 0.0), 9.0, [0.1, 0.1, 0.1, 0.85]);
+        if frac > 0.0 {
+            let c = if flash {
+                [1.0, 1.0, 1.0, 1.0]
+            } else {
+                [0.9, 0.12, 0.1, 1.0]
+            };
+            self.draw.capsule(left, left + v2(w * frac, 0.0), 6.5, c);
+        }
+        let c = self.cursor.pos;
+        Self::bar(&mut self.draw, c + v2(0.0, 62.0), frac, 1.0);
+    }
+
     /// Small health bar over the head for a few seconds after a hit.
     fn health_bar(&mut self) {
         let since = self.agent.since_hit();
-        let dueling = self.rival.as_ref().is_some_and(|r| r.fighting());
+        let dueling = self.rival.as_ref().is_some_and(|r| r.fighting())
+            || self.boss.as_ref().is_some_and(|b| b.fighting());
         if since >= 4.0 && !dueling {
             return;
         }
@@ -3405,6 +3726,11 @@ impl App {
             speech: Speech::new(seed ^ 0x7A11),
             doodles: Doodles::default(),
             rival: None,
+            squad: None,
+            next_minions: now + Duration::from_secs(240),
+            boss: None,
+            boss_banner: None,
+            next_boss: now + Duration::from_secs(600),
             rival_speech: Speech::new(seed ^ 0xBEEF),
             rival_click: false,
             next_rival: now + RIVAL_FIRST,

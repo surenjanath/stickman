@@ -617,6 +617,25 @@ impl SettingsWindow {
             "A rival drops in to duel now and then",
             Command::ToggleRivalVisits,
         );
+        let piles = self.check(
+            "Thrown words & icons pile up (it can climb them)",
+            Command::TogglePiles,
+        );
+        let minions = self.check(
+            "Calls in a minion army now and then",
+            Command::ToggleMinions,
+        );
+        let boss = self.check(
+            "Challenges your cursor to boss fights",
+            Command::ToggleBossFights,
+        );
+        let now = Self::hstack(
+            &[
+                Self::button("Start a Boss Fight", Command::StartBoss),
+                Self::button("Call the Minions", Command::CallMinions),
+            ],
+            8.0,
+        );
         Self::page(vec![
             Row::Section("Your cursor"),
             Row::Under(push),
@@ -633,6 +652,7 @@ impl SettingsWindow {
             Row::Field("Thrown words stay:", stay),
             Row::Under(icons),
             Row::Under(weapons),
+            Row::Under(piles),
             Row::Under(Self::hint(
                 "Words, letters and icons are copies: nothing in your apps changes. Needs \
                  Screen Recording permission.",
@@ -641,6 +661,13 @@ impl SettingsWindow {
             Row::Under(powers),
             Row::Under(intro),
             Row::Under(rival),
+            Row::Under(minions),
+            Row::Under(boss),
+            Row::Under(now),
+            Row::Under(Self::hint(
+                "Boss fight: your cursor gets a health bar; click the figure to fight back. \
+                 Minions (3 small allies) come at level 6; click one to knock it out.",
+            )),
         ])
     }
 

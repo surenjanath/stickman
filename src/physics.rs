@@ -21,6 +21,8 @@ pub enum PlatformKind {
     Drawn,
     /// A trampoline the user drew: bouncy.
     Trampoline,
+    /// The top of a thrown word or icon lying still.
+    Pile,
 }
 
 /// A horizontal surface from `x0` to `x1` at height `y` (overlay points, y down).

@@ -1026,7 +1026,7 @@ impl Agent {
             PlatformKind::Ground => f32::MAX,
             PlatformKind::Window => 400.0,
             PlatformKind::Text => 12.0,
-            PlatformKind::Drawn | PlatformKind::Trampoline => 1.0,
+            PlatformKind::Drawn | PlatformKind::Trampoline | PlatformKind::Pile => 1.0,
         };
         // A window edge of the same width that moved sideways carries the
         // figure along with it.

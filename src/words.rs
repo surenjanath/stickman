@@ -662,6 +662,8 @@ impl WordPlay {
                 if p.vel.y.abs() < 80.0 {
                     p.vel = V2::ZERO;
                     p.spin = 0.0;
+                    // Settle flat (squares on any side), so they stack.
+                    p.rot = settle(p.rot, p.half);
                     p.resting = f32::EPSILON;
                     events.push(WordEvent::Landed { at: p.pos });
                 }
@@ -700,6 +702,29 @@ impl WordPlay {
             keep
         });
         (events, freed)
+    }
+
+    /// The tops of words and icons lying still: platforms, so later throws
+    /// land on them and piles grow (and the figure can climb them).
+    pub fn pile_platforms(&self) -> Vec<Platform> {
+        self.projectiles
+            .iter()
+            .filter(|p| p.resting > 0.0 && p.fade.is_none())
+            .map(|p| {
+                let (hw, hh) = if upright_sideways(p.rot) {
+                    (p.half.y, p.half.x)
+                } else {
+                    (p.half.x, p.half.y)
+                };
+                Platform {
+                    x0: p.pos.x - hw * 0.9,
+                    x1: p.pos.x + hw * 0.9,
+                    y: p.pos.y - hh,
+                    kind: PlatformKind::Pile,
+                    owner: 0,
+                }
+            })
+            .collect()
     }
 
     /// Holes first (under everything), then carried and flying words as sprites.
@@ -765,9 +790,60 @@ impl WordPlay {
     }
 }
 
+/// The nearest resting angle: flat for words, any quarter turn for squares.
+fn settle(rot: f32, half: V2) -> f32 {
+    let q = if (half.x - half.y).abs() < 2.0 {
+        std::f32::consts::FRAC_PI_2
+    } else {
+        std::f32::consts::PI
+    };
+    (rot / q).round() * q
+}
+
+/// Lying on its side (a quarter turn).
+fn upright_sideways(rot: f32) -> bool {
+    ((rot / std::f32::consts::FRAC_PI_2).round() as i64).rem_euclid(2) == 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn landed_words_pile_up() {
+        let ground = Platform::ground(1800.0, 1000.0);
+        let mut w = World::new();
+        let mut play = WordPlay::new(1);
+        play.rest_time = None;
+        let half = v2(30.0, 10.0);
+        play.launch_sprite(1, half, v2(500.0, 700.0), v2(0.0, 0.0));
+        let step = |play: &mut WordPlay, w: &mut World| {
+            let mut ps = vec![ground];
+            ps.extend(play.pile_platforms());
+            w.set_platforms(ps);
+            play.update(1.0 / 60.0, v2(-999.0, -999.0), w, 0.0, 1800.0);
+        };
+        for _ in 0..180 {
+            step(&mut play, &mut w);
+        }
+        assert_eq!(play.pile_platforms().len(), 1);
+        let first = play.projectiles[0].pos.y;
+        assert!((first - 990.0).abs() < 1.0, "on the ground: {first}");
+        // A second word dropped on top lands on the first.
+        play.launch_sprite(2, half, v2(505.0, 600.0), v2(0.0, 0.0));
+        for _ in 0..180 {
+            step(&mut play, &mut w);
+        }
+        let second = play.projectiles[1].pos.y;
+        assert!(
+            (second - (first - 20.0)).abs() < 1.5,
+            "stacked: {second} on {first}"
+        );
+        assert!(play
+            .pile_platforms()
+            .iter()
+            .all(|p| p.kind == PlatformKind::Pile));
+    }
 
     const WIN: u32 = 7;
 

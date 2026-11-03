@@ -3,6 +3,7 @@
 //! event loop.
 
 pub mod agent;
+pub mod boss;
 pub mod director;
 pub mod doodle;
 pub mod draw;
@@ -13,6 +14,7 @@ pub mod jail;
 pub mod macos;
 pub mod menubar;
 pub mod mind;
+pub mod minions;
 pub mod music;
 pub mod note;
 pub mod ocr;
