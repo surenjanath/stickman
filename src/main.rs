@@ -366,6 +366,8 @@ struct Scene {
     screen_letters: Vec<(char, Rect)>,
     note: Option<Note>,
     next_note: Instant,
+    /// A note waiting for a fresh read of the screen (text, asked at).
+    pending_note: Option<(String, Instant)>,
     /// Where the scrollbar being fetched is (waiting for its pixels).
     sword_pending: Option<Rect>,
     /// Don't look for a weapon again before this (no scrollbar there).
@@ -443,6 +445,10 @@ impl Scene {
                         })
                     {
                         self.screen_letters = ocr::letters_in(r.rect, &r.letters);
+                        // A note was waiting for these fresh letters.
+                        if let Some((text, _)) = self.pending_note.take() {
+                            self.compose_note(&text);
+                        }
                         let mut lines = ocr::text_platforms(r.id, r.rect, &r.lines);
                         lines.truncate(120);
                         log::debug!(
@@ -519,6 +525,15 @@ impl Scene {
             forced.is_none() && self.settings.visible && !self.settings.paused,
             Ordering::Relaxed,
         );
+        // Enraged (and left to its own devices): it's war.
+        if self.mind.enraged
+            && forced.is_none()
+            && self.rival.is_none()
+            && self.mode != Mode::Combat
+        {
+            self.mode = Mode::Combat;
+            self.mode_since = Instant::now();
+        }
         // Just broke out of jail: it's personal, go after the cursor first.
         if let Some(until) = self.intro_combat_until {
             if forced.is_some() || Instant::now() >= until {
@@ -994,8 +1009,34 @@ impl Scene {
     }
 
     /// Spell out `text` with letters torn off the screen (and cut-outs).
+    /// Reads the active window afresh first, so the letters are where they
+    /// are now (the page may have scrolled).
     fn write_note(&mut self, text: &str) {
-        if self.note.is_some() || !self.settings.notes || !self.settings.visible {
+        if self.note.is_some()
+            || self.pending_note.is_some()
+            || !self.settings.notes
+            || !self.settings.visible
+        {
+            return;
+        }
+        let active = self.snapshot.active().map(|w| ocr::Request {
+            id: w.id,
+            rect: w.rect,
+        });
+        if let (Some(tx), Some(req), true) = (&self.ocr_tx, active, self.settings.walk_on_text) {
+            if tx.send(ocr::Job::Read(req)).is_ok() {
+                self.ocr_target = Some(req);
+                self.ocr_sent = Instant::now();
+                self.pending_note = Some((text.to_string(), Instant::now()));
+                return;
+            }
+        }
+        self.compose_note(text);
+    }
+
+    /// Lay out and start a note with the letters known now.
+    fn compose_note(&mut self, text: &str) {
+        if self.note.is_some() {
             return;
         }
         let text = if self.settings.bleep {
@@ -1126,6 +1167,13 @@ impl Scene {
     }
 
     fn maybe_write_note(&mut self) {
+        // The fresh read didn't come back in time: use what we have.
+        if let Some((text, at)) = self.pending_note.clone() {
+            if at.elapsed() > Duration::from_secs(2) {
+                self.pending_note = None;
+                self.compose_note(&text);
+            }
+        }
         if self.note.is_some() || Instant::now() < self.next_note || !self.settings.notes {
             return;
         }
@@ -1739,6 +1787,9 @@ impl Scene {
         for cmd in self.menubar.drain_commands() {
             log::info!("menu: {cmd:?}");
             match cmd {
+                Command::ReflectNow => {
+                    self.last_reflection = Instant::now() - REFLECT_EVERY * 2;
+                }
                 Command::ResetMind => {
                     self.mind = Psyche::default();
                     self.save_mind();
@@ -1899,6 +1950,30 @@ impl Scene {
     fn think(&mut self) {
         let dt = self.last_tick.elapsed().as_secs_f32().min(0.1);
         self.mind.fade(dt);
+        match self.mind.update_temper(self.settings.lose_temper) {
+            Some(true) => {
+                log::info!("mind: lost its temper");
+                let head = self.agent.head();
+                self.particles.explosion(head, v2(0.0, -1.0));
+                self.sfx(Sfx::Boom, 0.7, head);
+                let lines = self.speech.say("THAT'S IT! FUCK YOU!", Priority::Event);
+                self.speak(lines);
+                self.write_note("FUCK YOU");
+                self.save_mind();
+            }
+            Some(false) => {
+                log::info!("mind: calmed down");
+                let lines = self
+                    .speech
+                    .say("…Fine. I'm calm. I'm calm.", Priority::Event);
+                self.speak(lines);
+            }
+            None => {}
+        }
+        // Steam from the ears while enraged.
+        if self.mind.enraged && self.frames % 10 == 0 {
+            self.particles.steam(self.agent.head());
+        }
         // Left alone for five minutes: noted (once per absence).
         let idle = self.last_mouse_move.elapsed();
         if idle > Duration::from_secs(300) && !self.ignored_noted {
@@ -1958,6 +2033,67 @@ impl Scene {
         }
         if self.mind_saved.elapsed() > Duration::from_secs(60) {
             self.save_mind();
+        }
+    }
+
+    /// What the Mind tab shows.
+    fn mind_view(&self) -> stickman::settings_window::MindView {
+        let m = &self.mind;
+        let f = &m.feelings;
+        let st = &self.stats;
+        let level = st.level();
+        // Experience toward the next level (levels at 25·n² xp).
+        let this = 25 * (level - 1).pow(2);
+        let next = 25 * level.pow(2);
+        let progress =
+            f64::from(st.xp.saturating_sub(this)) / f64::from((next - this).max(1)) * 100.0;
+        let health =
+            f64::from(self.agent.health.max(0.0) / self.agent.traits.max_health.max(1.0)) * 100.0;
+        let headline = format!(
+            "{}{} · level {} {}",
+            if m.enraged { "ENRAGED · " } else { "" },
+            match f.mood() {
+                "calm" => "Calm",
+                "vengeful" => "Vengeful",
+                "scared" => "Scared",
+                "fond" => "Fond of you",
+                _ => "Cocky",
+            },
+            level,
+            st.title()
+        );
+        let pct = |v: f32| (f64::from(v), format!("{v:.0} / 100"));
+        let mut log: Vec<String> = m
+            .thoughts
+            .iter()
+            .rev()
+            .take(12)
+            .map(|t| format!("💭 {t}"))
+            .collect();
+        log.extend(m.recent(10).into_iter().rev().map(|r| format!("• {r}")));
+        stickman::settings_window::MindView {
+            headline,
+            bars: vec![
+                pct(f.resentment),
+                pct(f.fear),
+                pct(st.grudge),
+                pct(f.affection),
+                pct(f.pride),
+                (
+                    health,
+                    format!(
+                        "{:.0} / {:.0}",
+                        self.agent.health.max(0.0),
+                        self.agent.traits.max_health
+                    ),
+                ),
+                (progress, format!("{} / {} xp", st.xp, next)),
+            ],
+            thought: m.current_thought().to_string(),
+            scheme: m.scheme.clone(),
+            beliefs: m.beliefs.join(" · "),
+            note: m.note.clone(),
+            log: log.join("\n"),
         }
     }
 
@@ -2022,6 +2158,10 @@ impl Scene {
         }
         self.debug_done = true;
         if let Ok(what) = std::env::var("STICKMAN_DEBUG_DO") {
+            if what.trim() == "rage" {
+                self.mind.feelings.resentment = 90.0;
+                return;
+            }
             if what.trim() == "note" {
                 self.write_note("I REMEMBER YOU");
                 return;
@@ -2094,27 +2234,18 @@ impl Scene {
             screen_recording: self.screen_recording,
         };
         self.menubar.sync(&self.settings, &status);
+        // The Mind tab (built only while the window is up and every few frames).
+        let view = (self
+            .settings_window
+            .as_ref()
+            .is_some_and(|w| w.is_visible())
+            && self.ticks % 15 == 0)
+            .then(|| self.mind_view());
         if let Some(w) = &mut self.settings_window {
             w.sync(&self.settings);
-            let m = &self.mind;
-            let f = &m.feelings;
-            let or_dash = |s: String| if s.is_empty() { "—".to_string() } else { s };
-            w.set_mind([
-                format!(
-                    "Mostly {} · resentment {:.0} · fear {:.0} · affection {:.0} · pride {:.0} · {} memories, {} reflection{}",
-                    f.mood(),
-                    f.resentment,
-                    f.fear,
-                    f.affection,
-                    f.pride,
-                    m.memories.len(),
-                    m.reflections,
-                    if m.reflections == 1 { "" } else { "s" }
-                ),
-                or_dash(m.beliefs.join(" · ")),
-                or_dash(m.scheme.clone()),
-                or_dash(m.note.clone()),
-            ]);
+            if let Some(view) = &view {
+                w.set_mind(view);
+            }
         }
         if !self.menubar_logged && self.stats_at.elapsed() > Duration::from_secs(1) {
             // Report once the menu bar has laid the icon out.
@@ -2193,11 +2324,14 @@ impl Scene {
             max_health: self.stats.max_health(),
             speed: self.stats.speed(),
         };
-        // A grudge makes it fiercer; so does resentment (fear calms it).
+        // A grudge makes it fiercer; so does resentment (fear calms it), and
+        // rage most of all.
+        let rage = if self.mind.enraged { 0.4 } else { 0.0 };
         let a = (f32::from(self.settings.aggression) / 100.0
             + self.stats.grudge / 100.0 * 0.35
-            + self.mind.aggression_bias())
-        .clamp(0.0, 1.0);
+            + self.mind.aggression_bias()
+            + rage)
+            .clamp(0.0, 1.0);
         self.think();
         self.maybe_write_note();
         self.agent.traits.aggression = a;
@@ -2213,7 +2347,13 @@ impl Scene {
         } else {
             0.12 + 0.36 * a
         };
-        self.speech.language = self.settings.language;
+        // Enraged, it swears whatever its usual language.
+        self.speech.enraged = self.mind.enraged;
+        self.speech.language = if self.mind.enraged {
+            stickman::settings::Language::Salty
+        } else {
+            self.settings.language
+        };
         self.speech.chattiness = f32::from(self.settings.chattiness) / 100.0;
         self.speech.bleep = self.settings.bleep;
         self.words.rest_time = self.settings.word_stay.seconds();
@@ -2455,7 +2595,8 @@ impl Scene {
             || self.rival.is_some()
             || self.flight.is_some()
             || self.sword.is_some()
-            || self.note.as_ref().is_some_and(|n| n.animating());
+            || self.note.as_ref().is_some_and(|n| n.animating())
+            || self.mind.enraged;
         self.present();
         true
     }
@@ -2538,7 +2679,15 @@ impl Scene {
         if self.drawing.is_some() {
             self.draw_mode_frame();
         }
-        self.draw.figure(&segments, self.settings.color.rgb());
+        // Enraged, it flushes red.
+        let rgb = if self.mind.enraged {
+            let c = self.settings.color.rgb();
+            let red = [215u8, 25, 20];
+            std::array::from_fn(|i| ((u16::from(c[i]) * 2 + u16::from(red[i]) * 3) / 5) as u8)
+        } else {
+            self.settings.color.rgb()
+        };
+        self.draw.figure(&segments, rgb);
         if let Some(r) = &self.rival {
             self.draw.figure(&r.agent.segments(), rival::RIVAL_RGB);
             // A ninja headband with tails flying behind.
@@ -3051,6 +3200,7 @@ impl App {
             sword: None,
             screen_letters: Vec::new(),
             note: None,
+            pending_note: None,
             next_note: now + Duration::from_secs(120),
             sword_pending: None,
             sword_retry: now,

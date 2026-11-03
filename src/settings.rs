@@ -265,6 +265,9 @@ pub struct Settings {
     pub self_reflection: bool,
     /// Spell out messages with letters torn from the screen.
     pub notes: bool,
+    /// Lose its temper when resentment boils over (rage: swearing, red,
+    /// relentless attacks).
+    pub lose_temper: bool,
     pub visible: bool,
     pub paused: bool,
 }
@@ -301,6 +304,7 @@ impl Default for Settings {
             weapons: true,
             self_reflection: true,
             notes: true,
+            lose_temper: true,
             visible: true,
             paused: false,
         }
@@ -343,6 +347,9 @@ pub enum Command {
     ToggleWeapons,
     ToggleReflection,
     ToggleNotes,
+    ToggleTemper,
+    /// Reflect on its memories right now.
+    ReflectNow,
     /// Forget everything it remembers and feels.
     ResetMind,
     /// Spell out a message now.
@@ -393,6 +400,8 @@ impl Command {
             Command::ToggleWeapons => 322,
             Command::ToggleReflection => 323,
             Command::ToggleNotes => 324,
+            Command::ToggleTemper => 325,
+            Command::ReflectNow => 408,
             Command::ResetMind => 406,
             Command::WriteNote => 407,
             Command::SetLanguage(l) => {
@@ -443,6 +452,8 @@ impl Command {
             322 => Command::ToggleWeapons,
             323 => Command::ToggleReflection,
             324 => Command::ToggleNotes,
+            325 => Command::ToggleTemper,
+            408 => Command::ReflectNow,
             406 => Command::ResetMind,
             407 => Command::WriteNote,
             700..=702 => Command::SetLanguage(Language::ALL[(tag - 700) as usize]),
@@ -486,6 +497,7 @@ impl Settings {
             Command::ToggleWeapons => self.weapons = !self.weapons,
             Command::ToggleReflection => self.self_reflection = !self.self_reflection,
             Command::ToggleNotes => self.notes = !self.notes,
+            Command::ToggleTemper => self.lose_temper = !self.lose_temper,
             Command::SetLanguage(l) => self.language = l,
             Command::ToggleBleep => self.bleep = !self.bleep,
             Command::SetColor(c) => self.color = c,
@@ -525,6 +537,7 @@ impl Settings {
             Command::ToggleWeapons => self.weapons,
             Command::ToggleReflection => self.self_reflection,
             Command::ToggleNotes => self.notes,
+            Command::ToggleTemper => self.lose_temper,
             Command::ToggleBleep => self.bleep,
             Command::ToggleVisible => self.visible,
             Command::TogglePaused => self.paused,
@@ -628,6 +641,8 @@ mod tests {
             Command::ToggleWeapons,
             Command::ToggleReflection,
             Command::ToggleNotes,
+            Command::ToggleTemper,
+            Command::ReflectNow,
             Command::ResetMind,
             Command::WriteNote,
             Command::ToggleVisible,

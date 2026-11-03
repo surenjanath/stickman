@@ -388,9 +388,10 @@ pub fn spawn_reflector(
                     "properties": {
                         "beliefs": {"type": "array", "items": {"type": "string"}},
                         "scheme": {"type": "string"},
-                        "note": {"type": "string"}
+                        "note": {"type": "string"},
+                        "thought": {"type": "string"}
                     },
-                    "required": ["beliefs", "scheme", "note"]
+                    "required": ["beliefs", "scheme", "note", "thought"]
                 },
                 "options": {"temperature": 0.9, "num_predict": 200}
             });

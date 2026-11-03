@@ -283,30 +283,6 @@ fn recognize(image: &CGImage) -> (Vec<Rect>, Vec<Word>, Vec<Letter>) {
                     let text = std::ffi::CStr::from_ptr(utf8)
                         .to_string_lossy()
                         .into_owned();
-                    // Single letters (for ransom notes): a few of each.
-                    let mut pos = 0usize;
-                    for ch in text.chars() {
-                        let up = ch.to_ascii_uppercase();
-                        let enough = letters.len() >= MAX_LETTERS
-                            || letters.iter().filter(|l| l.ch == up).count() >= LETTERS_PER_CHAR;
-                        if ch.is_ascii_alphanumeric() && !enough {
-                            let mut err: *mut Object = std::ptr::null_mut();
-                            let r: *mut Object = msg_send![cand, boundingBoxForRange: NSRange { location: pos, length: 1 } error: &mut err];
-                            if !r.is_null() {
-                                let b: NSRect = msg_send![r, boundingBox];
-                                letters.push(Letter {
-                                    ch: up,
-                                    rect: Rect {
-                                        x: b.x,
-                                        y: b.y,
-                                        width: b.w,
-                                        height: b.h,
-                                    },
-                                });
-                            }
-                        }
-                        pos += ch.len_utf16();
-                    }
                     for (loc, len, chars) in word_ranges(&text) {
                         let mut err: *mut Object = std::ptr::null_mut();
                         let r: *mut Object = msg_send![cand, boundingBoxForRange: NSRange { location: loc, length: len } error: &mut err];
@@ -314,6 +290,31 @@ fn recognize(image: &CGImage) -> (Vec<Rect>, Vec<Word>, Vec<Letter>) {
                             continue;
                         }
                         let wb: NSRect = msg_send![r, boundingBox];
+                        // Single letters (for ransom notes): the word's box split
+                        // evenly by its characters. (Vision's per-character boxes
+                        // often land on a neighbour.)
+                        let utf16: Vec<u16> = text.encode_utf16().collect();
+                        let word: String =
+                            String::from_utf16_lossy(utf16.get(loc..loc + len).unwrap_or(&[]));
+                        let n = word.chars().count().max(1);
+                        for (k, ch) in word.chars().enumerate() {
+                            let up = ch.to_ascii_uppercase();
+                            let enough = letters.len() >= MAX_LETTERS
+                                || letters.iter().filter(|l| l.ch == up).count()
+                                    >= LETTERS_PER_CHAR;
+                            if ch.is_ascii_alphanumeric() && !enough {
+                                let cw = wb.w / n as f64;
+                                letters.push(Letter {
+                                    ch: up,
+                                    rect: Rect {
+                                        x: wb.x + cw * k as f64,
+                                        y: wb.y,
+                                        width: cw,
+                                        height: wb.h,
+                                    },
+                                });
+                            }
+                        }
                         words.push(Word {
                             rect: Rect {
                                 x: wb.x,

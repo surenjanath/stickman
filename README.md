@@ -29,6 +29,7 @@ Written in Rust for Apple Silicon:
 | **Jail-break intro** | It starts locked in a steel cell: rattles the bars ("Let me out!"), grumbles, kicks the door off in an explosion of flying bars, then comes for your cursor. Click it while it's locked up to blast the cell open early. Plays again on Respawn. |
 | **Super powers** | **Super jump:** a glowing power-up crouch, then a leap of up to ~1000 pt with a trail and a shockwave, to reach a cursor up high, a far-off window or a word. **Telekinesis:** hand out, purple aura: it lifts your pointer, wobbles it in the air and flings it; or raises a group of up to 6 words off the page, keeps them orbiting overhead, then fires them at your cursor one after another. |
 | **A mind of its own** | It remembers what you do to it (and in which app), and it develops feelings toward you: resentment, fear, affection, pride. Every couple of minutes it reflects on its memories with the local AI and rewrites its own beliefs ("The user hits me most in Safari"), a scheme ("Operation Pointer Doom: …") and the next note it wants to leave you. All of that feeds back into how it decides what to do: a small, local take on self-improving agent harnesses like Google's Harness². Kept in `mind.json`; see it, or wipe it, in Settings → Mind. |
+| **Losing its temper** | Push its resentment past 75 and it snaps ("THAT'S IT! F*** YOU!"): it flushes red, steams from the head, swears whatever its language (bleeped unless you turn bleeping off; never slurs), spells "F*** YOU" in torn-off letters, and attacks relentlessly until its resentment drops below 55 (petting helps). Switch off with "Loses its temper". |
 | **Ransom notes** | It spells messages to you with letters torn off your screen, each one cut out with a scrap of its page; letters that aren't on screen become coloured cut-outs. The message depends on its mood, its mode and its last reflection ("I REMEMBER YOU", "PLEASE STOP", "FIGHT ME"). |
 | **Throwing windows** | With telekinesis it can lift your active window, wobble it in the air and hurl it at your cursor (or fling it aside); it bounces off the screen edges and slides to a stop, always kept on screen. |
 | **Dock icons and swords** | Standing on the Dock it rips app icons up from under its feet and throws them (copies; your Dock is untouched). In combat it rips a scrollbar off your window and fights with it as a sword, then hurls it. |
@@ -52,44 +53,34 @@ Written in Rust for Apple Silicon:
 
 ## Settings window
 
-**Settings…** (⌘,) in the menu bar opens a window with every option:
+**Settings…** (⌘,) in the menu bar opens a window with every option, in four
+tabs with headed sections:
 
 | Tab | What's there |
 |---|---|
-| Personality | Name, Temper and Chattiness sliders, Language, Bleep swear words, Behaviour, Colour, Size. |
-| Abilities | Cursor pushes and grabs, window shakes and shoves, walking on text, ripping words, Dock icons, scrollbar swords, how long thrown words stay (5 s … Forever), super powers, window throwing, jail-break intro, rival visits. |
-| Mind | What it feels, believes and schemes and its next note (live), self-reflection and notes on/off, Leave Me a Note, Wipe Its Memory. |
-| Hobbies & Sound | Naps, dancing, dancing to music, doodles, sitting on edges, speech bubbles, sound effects. |
+| Mind | Live: its mood and level; bars for resentment, fear, grudge, affection, pride, health and experience (yellow, then red when they get bad); what it's thinking right now, its scheme, beliefs and next note; a log of its thoughts and memories; Reflect Now, Leave Me a Note, Wipe Its Memory, Forgive & Reset Level. |
+| Personality | Name, colour, size; temper and chattiness sliders, language, bleeping, losing its temper; behaviour (Auto or one pinned mood). |
+| Abilities | Your cursor (pushes, grabs), your windows (shakes, shoves, throws), your screen (walking on text, ripping words and how long they stay, Dock icons, scrollbar swords), powers and events (super powers, jail-break intro, rival visits). |
+| Fun & Sound | Naps, dancing, dancing to music, doodles, sitting on edges, speech bubbles, sound effects. |
 
-The menu bar keeps quick toggles for the same options; both stay in sync and
-everything is saved.
+Everything is saved and restored on the next launch. Environment variables
+below override settings at startup.
 
 ## Menu bar
 
-A little stickman icon sits in the menu bar, next to Wi-Fi and the clock. Its pose
-shows the figure's mood: standing (idle), hand on chin (observing), knee up
-(sabotage), fists up (combat). It's a template image, so it matches light and dark
-menu bars. Click it for:
+A little stickman icon sits in the menu bar. Its pose shows the figure's mood:
+standing (idle), hand on chin (observing), knee up (sabotage), fists up
+(combat). The menu keeps the essentials:
 
 | Item | What it does |
 |---|---|
-| Mood / Health / AI | Live status: current mood and the director's reason, health, and whether Ollama is online. |
-| **Behaviour ▸** | *Auto (AI director)*, or pin *Idle*, *Observe*, *Sabotage* or *Combat*. Pinning pauses the LLM calls. |
-| **Figure Size ▸** | Small / Medium / Large. |
-| Punches Push My Cursor | Whether combat hits move your real pointer. |
-| Stomps Shake My Windows | Whether stomps jolt your windows and kicks slide them (needs Accessibility). |
-| Walk on Text | Whether to read the active window's text lines (needs Screen Recording). |
-| Rip Words Off the Screen & Throw Them | The word-throwing trick above. |
-| Speech Bubbles | Show what the figure says. |
-| Sound Effects | Play the synthesised sound effects. |
-| Show Figure (⌘H) | Hide or show the figure. Hidden means fully click-through, no simulation and no AI calls. |
-| Pause (⌘P) / Respawn (⌘R) | Freeze the figure / bring it back to the middle of the Dock. |
-| Grant … | Shortcuts to the right System Settings pane, shown only while a permission is missing. |
+| Mood / Health / AI | Live status: mood and the director's reason, health, level and grudge, whether Ollama is online. |
+| Settings… (⌘,) | The Settings window. |
+| Behaviour ▸ | Auto (AI director), or pin Idle, Observe, Sabotage or Combat. |
+| Draw Platforms (⌘D) · Leave Me a Note (⌘N) · Summon a Rival | Quick actions. |
+| Show Figure (⌘H) · Pause (⌘P) · Respawn (⌘R) | Hide, freeze or reset the figure. |
+| Grant … | Shortcuts to System Settings, shown only while a permission is missing. |
 | Quit (⌘Q) | Quit the app. |
-
-Settings are saved to `~/Library/Application Support/Stickman/settings.json`
-(override with `STICKMAN_SETTINGS`) and restored on the next launch. Environment
-variables below override them at startup.
 
 ## Requirements
 
@@ -150,7 +141,7 @@ cargo run --release --example pose_sheet -- docs/poses.png   # re-render the pos
 cargo run --release --example sfx_demo     # hear every sound effect
 ```
 
-**Unit tests (180).**
+**Unit tests (181).**
 - **Collision:** one-way landings, no tunnelling, window-edge occlusion clipping.
 - **Walking and running:** feet never slide; feet always on the ground.
 - **Poses:** IK accuracy and knee direction; hands and arms never cross the head.

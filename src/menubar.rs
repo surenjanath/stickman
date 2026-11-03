@@ -17,7 +17,7 @@ use objc::{class, msg_send, sel, sel_impl, Encode, Encoding};
 
 use crate::agent::Mode;
 use crate::poses;
-use crate::settings::{Behaviour, Change, Command, Settings, Size, WordStay};
+use crate::settings::{Behaviour, Change, Command, Settings};
 use crate::stickman::{forward_kinematics, idle_pose, BoneKind, Pose};
 
 /// Menu picks waiting for the main loop.
@@ -419,19 +419,9 @@ impl MenuBar {
         self.health = self.add(menu, "Health: 100%", None, "");
         self.director = self.add(menu, "AI: —", None, "");
         Self::separator(menu);
+        // Every option lives in the Settings window; the menu keeps the
+        // essentials and quick actions.
         self.add(menu, "Settings…", Some(Command::OpenSettings), ",");
-        self.add(
-            menu,
-            "Draw Platforms (Shift = trampoline)",
-            Some(Command::ToggleDrawMode),
-            "d",
-        );
-        self.add(menu, "Clear Drawings", Some(Command::ClearDrawings), "");
-        self.add(menu, "Summon a Rival", Some(Command::SummonRival), "");
-        self.add(menu, "Leave Me a Note", Some(Command::WriteNote), "");
-        self.add(menu, "Wipe Its Memory", Some(Command::ResetMind), "");
-        Self::separator(menu);
-
         let behaviour = self.submenu(menu, "Behaviour");
         for b in Behaviour::ALL {
             self.add(behaviour, b.label(), Some(Command::SetBehaviour(b)), "");
@@ -439,89 +429,10 @@ impl MenuBar {
                 Self::separator(behaviour);
             }
         }
-        let size = self.submenu(menu, "Figure Size");
-        for s in Size::ALL {
-            self.add(size, s.label(), Some(Command::SetSize(s)), "");
-        }
         Self::separator(menu);
-        self.add(
-            menu,
-            "Punches Push My Cursor",
-            Some(Command::ToggleCursorPush),
-            "",
-        );
-        self.add(
-            menu,
-            "Stomps Shake My Windows",
-            Some(Command::ToggleWindowShake),
-            "",
-        );
-        self.add(
-            menu,
-            "Walk on Text (reads the screen)",
-            Some(Command::ToggleWalkOnText),
-            "",
-        );
-        self.add(
-            menu,
-            "Rip Words Off the Screen & Throw Them",
-            Some(Command::ToggleThrowWords),
-            "",
-        );
-        self.add(
-            menu,
-            "Rip Icons Off the Dock & Throw Them",
-            Some(Command::TogglePeltIcons),
-            "",
-        );
-        self.add(
-            menu,
-            "Fight With Scrollbar Swords",
-            Some(Command::ToggleWeapons),
-            "",
-        );
-        let stay = self.submenu(menu, "Thrown Words Stay");
-        for w in WordStay::ALL {
-            self.add(stay, w.label(), Some(Command::SetWordStay(w)), "");
-        }
-        self.add(menu, "Speech Bubbles", Some(Command::ToggleSpeech), "");
-        self.add(menu, "Sound Effects", Some(Command::ToggleSound), "");
-        Self::separator(menu);
-        let hobbies = self.submenu(menu, "Hobbies");
-        self.add(hobbies, "Naps When I'm Away", Some(Command::ToggleNaps), "");
-        self.add(hobbies, "Dancing", Some(Command::ToggleDancing), "");
-        self.add(hobbies, "Doodles", Some(Command::ToggleDoodles), "");
-        self.add(
-            hobbies,
-            "Sitting on Edges",
-            Some(Command::ToggleSitting),
-            "",
-        );
-        self.add(
-            hobbies,
-            "Dance When Music Plays",
-            Some(Command::ToggleDanceToMusic),
-            "",
-        );
-        self.add(
-            hobbies,
-            "Kick My Windows Around",
-            Some(Command::ToggleWindowShoves),
-            "",
-        );
-        self.add(
-            menu,
-            "Super Powers (super jump, telekinesis)",
-            Some(Command::TogglePowers),
-            "",
-        );
-        self.add(
-            menu,
-            "Telekinesis Can Throw My Windows",
-            Some(Command::ToggleThrowWindows),
-            "",
-        );
-        self.add(menu, "Jail-Break Intro", Some(Command::ToggleJailIntro), "");
+        self.add(menu, "Draw Platforms", Some(Command::ToggleDrawMode), "d");
+        self.add(menu, "Leave Me a Note", Some(Command::WriteNote), "n");
+        self.add(menu, "Summon a Rival", Some(Command::SummonRival), "");
         Self::separator(menu);
         self.add(menu, "Show Figure", Some(Command::ToggleVisible), "h");
         self.add(menu, "Pause", Some(Command::TogglePaused), "p");

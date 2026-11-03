@@ -288,6 +288,25 @@ impl Particles {
         self.dust(at, 1.0);
     }
 
+    /// A puff of steam from an angry head.
+    pub fn steam(&mut self, at: V2) {
+        let side = if self.rand(0.0, 1.0) < 0.5 { -1.0 } else { 1.0 };
+        let vel = v2(side * self.rand(30.0, 70.0), self.rand(-110.0, -70.0));
+        let size = self.rand(4.0, 6.0);
+        self.push(Particle {
+            pos: at + v2(side * 14.0, -10.0),
+            vel,
+            age: 0.0,
+            life: 0.9,
+            size0: size,
+            size1: 13.0,
+            color: [0.85, 0.85, 0.88, 0.7],
+            shape: Shape::Disc,
+            gravity: -40.0,
+            drag: 1.5,
+        });
+    }
+
     /// Hearts floating up from a happy head.
     pub fn hearts(&mut self, at: V2) {
         for i in 0..6 {

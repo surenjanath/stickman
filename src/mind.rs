@@ -18,6 +18,11 @@ use crate::agent::Mode;
 
 /// How many memories it keeps (oldest forgotten first).
 const MAX_MEMORIES: usize = 300;
+/// How many thoughts it keeps.
+const MAX_THOUGHTS: usize = 40;
+/// Resentment at which it loses its temper, and below which it calms down.
+pub const RAGE_AT: f32 = 75.0;
+pub const CALM_AT: f32 = 55.0;
 /// Feelings drift back toward neutral by this much per minute.
 const FADE_PER_MIN: f32 = 0.6;
 
@@ -184,6 +189,9 @@ pub struct Reflection {
     /// A short message to spell out to the user.
     #[serde(default)]
     pub note: String,
+    /// Its inner voice right now, one sentence.
+    #[serde(default)]
+    pub thought: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -198,6 +206,10 @@ pub struct Mind {
     /// The next message it wants to spell out.
     pub note: String,
     pub reflections: u32,
+    /// Its inner monologue, newest last.
+    pub thoughts: VecDeque<String>,
+    /// Lost its temper (resentment crossed RAGE_AT; calms below CALM_AT).
+    pub enraged: bool,
     /// Lifetime counts per kind (memories get forgotten; these don't).
     pub totals: BTreeMap<String, u32>,
     /// Hits by app: where the user is meanest.
@@ -239,6 +251,40 @@ fn tidy(s: &str, max: usize) -> String {
 }
 
 impl Mind {
+    /// Add a line to its inner monologue.
+    pub fn think(&mut self, thought: impl Into<String>) {
+        let t = tidy(&thought.into(), 140);
+        if t.is_empty() || self.thoughts.back() == Some(&t) {
+            return;
+        }
+        self.thoughts.push_back(t);
+        while self.thoughts.len() > MAX_THOUGHTS {
+            self.thoughts.pop_front();
+        }
+    }
+
+    /// What it's thinking right now.
+    pub fn current_thought(&self) -> &str {
+        self.thoughts.back().map_or("…", |s| s.as_str())
+    }
+
+    /// Update the temper. Returns `Some(true)` when it just lost it,
+    /// `Some(false)` when it just calmed down.
+    pub fn update_temper(&mut self, allowed: bool) -> Option<bool> {
+        let r = self.feelings.resentment;
+        if !self.enraged && allowed && r >= RAGE_AT {
+            self.enraged = true;
+            self.think("THAT'S IT. I'VE HAD IT. NO MORE MR. NICE STICK.");
+            return Some(true);
+        }
+        if self.enraged && (r < CALM_AT || !allowed) {
+            self.enraged = false;
+            self.think("Okay. Breathe. I'm calm. I'm calm now.");
+            return Some(false);
+        }
+        None
+    }
+
     /// Remember `what` (while the user was in `app`).
     pub fn record(&mut self, what: Kind, app: &str) {
         let now = now_secs();
@@ -259,6 +305,31 @@ impl Mind {
             what,
             app: app.to_string(),
         });
+        // A quick thought about it, now and then.
+        let n = self.total(what);
+        let in_app = if app.is_empty() {
+            String::new()
+        } else {
+            format!(" in {app}")
+        };
+        let thought = match what {
+            Kind::Hit if n % 5 == 0 => Some(format!("That's {n} hits{in_app}. I'm keeping count.")),
+            Kind::Hit if recent_hits >= 4 => Some("Stop it stop it STOP IT.".to_string()),
+            Kind::Flung => Some("Did they just THROW me?!".to_string()),
+            Kind::Petted if self.feelings.affection > 60.0 => {
+                Some("Okay… that was actually nice.".to_string())
+            }
+            Kind::KnockedOut => Some(format!("Knocked out{in_app}. This will not be forgotten.")),
+            Kind::ThrewCursor => Some("The cursor flew! I am unstoppable.".to_string()),
+            Kind::CursorEscaped => Some("It slipped away. Next time.".to_string()),
+            Kind::WonDuel => Some("Victory! Who's the stick now?".to_string()),
+            Kind::LostDuel => Some("Beaten by a red nobody. Humiliating.".to_string()),
+            Kind::Ignored => Some("They forgot about me. Again.".to_string()),
+            _ => None,
+        };
+        if let Some(t) = thought {
+            self.think(t);
+        }
         while self.memories.len() > MAX_MEMORIES {
             self.memories.pop_front();
         }
@@ -332,6 +403,12 @@ impl Mind {
         if !self.scheme.is_empty() {
             s.push(format!("Your current scheme: {}.", self.scheme));
         }
+        if self.enraged {
+            s.push(
+                "You are ENRAGED: you swear, insult the cursor and attack relentlessly."
+                    .to_string(),
+            );
+        }
         s.join(" ")
     }
 
@@ -377,7 +454,8 @@ impl Mind {
              12 words), \"scheme\": your next cartoonish plan against the cursor or the user's \
              windows (under 18 words, start with 'Operation'), \"note\": a message to spell out to \
              the user with letters torn from the screen, ALL CAPS, at most 20 characters, \
-             matching your mood}}. {style}",
+             matching your mood, \"thought\": your inner voice right now, one vivid sentence}}. \
+             {style}",
             self.summary(),
             self.recent(12).join("\n")
         )
@@ -402,6 +480,9 @@ impl Mind {
         let note = fit_note(&r.note);
         if !note.is_empty() {
             self.note = note;
+        }
+        if !r.thought.trim().is_empty() {
+            self.think(r.thought.clone());
         }
         self.reflections += 1;
     }
@@ -432,10 +513,18 @@ impl Mind {
             "cocky" => ("Operation Pointer Doom: toss the cursor again", "FEAR ME"),
             _ => ("Operation Curious: watch the user closely", "I SEE YOU"),
         };
+        let thought = match f.mood() {
+            "vengeful" => "Every click is written down. Every. Single. One.",
+            "scared" => "Maybe if I stay very still they'll stop.",
+            "fond" => "This human isn't so bad.",
+            "cocky" => "That cursor doesn't stand a chance.",
+            _ => "What is the human doing now?",
+        };
         Reflection {
             beliefs,
             scheme: scheme.into(),
             note: note.into(),
+            thought: thought.into(),
         }
     }
 
@@ -448,6 +537,9 @@ impl Mind {
         let pick = |opts: &[&str]| {
             opts[((roll * 7.3).fract() * opts.len() as f32) as usize % opts.len()].to_string()
         };
+        if self.enraged {
+            return pick(&["FUCK YOU", "YOU ARE DEAD", "I HATE YOU", "DIE CURSOR"]);
+        }
         if f.fear > 60.0 {
             return pick(&["PLEASE STOP", "NO MORE", "TRUCE?"]);
         }
@@ -605,6 +697,32 @@ mod tests {
         scared.feelings.fear = 80.0;
         assert!(["PLEASE STOP", "NO MORE", "TRUCE?"]
             .contains(&scared.note_for(Mode::Combat, 0.9).as_str()));
+    }
+
+    #[test]
+    fn enough_abuse_makes_it_lose_its_temper_then_calm_down() {
+        let mut m = Mind::default();
+        for _ in 0..30 {
+            m.record(Kind::Hit, "Chrome");
+        }
+        assert!(
+            m.thoughts.iter().any(|t| t.contains("hits in Chrome")),
+            "{:?}",
+            m.thoughts
+        );
+        assert_eq!(m.update_temper(false), None, "not allowed to rage");
+        assert_eq!(m.update_temper(true), Some(true));
+        assert!(m.enraged);
+        assert!(m.current_thought().contains("HAD IT"));
+        assert!(m.summary().contains("ENRAGED"));
+        assert!(["FUCK YOU", "YOU ARE DEAD", "I HATE YOU", "DIE CURSOR"]
+            .contains(&m.note_for(Mode::Idle, 0.9).as_str()));
+        // Petting brings it back down below the calm line.
+        for _ in 0..20 {
+            m.record(Kind::Petted, "");
+        }
+        assert_eq!(m.update_temper(true), Some(false));
+        assert!(!m.enraged);
     }
 
     #[test]

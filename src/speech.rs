@@ -60,6 +60,18 @@ pub enum Moment {
     Slash,
 }
 
+/// What it screams when it has lost its temper.
+pub const RAGE_LINES: [&str; 8] = [
+    "Fuck you!",
+    "Fuck you, cursor!",
+    "I'll end you!",
+    "You're dead, arrow!",
+    "AAAARGH!",
+    "Come here, you little shit!",
+    "Screw you and your clicks!",
+    "I HATE YOU!",
+];
+
 /// Words the bleep filter hides (whole words, any case).
 const SWEARS: [&str; 18] = [
     "damn", "dammit", "damned", "hell", "crap", "crappy", "ass", "asshole", "shit", "shitty",
@@ -292,6 +304,8 @@ pub struct Speech {
     pub chattiness: f32,
     /// Hide swear words.
     pub bleep: bool,
+    /// Lost its temper: rage lines, more often.
+    pub enraged: bool,
     bubble: Option<Bubble>,
     since_quip: f32,
     rng: u64,
@@ -305,6 +319,7 @@ impl Speech {
             language: Language::Cheeky,
             chattiness: 0.5,
             bleep: true,
+            enraged: false,
             bubble: None,
             since_quip: f32::MAX / 2.0,
             rng: seed | 1,
@@ -358,14 +373,20 @@ impl Speech {
         let (base, chance) = m.lines();
         let important = matches!(m, Moment::KnockedOut | Moment::Woke | Moment::Yawned);
         // Chattiness scales how often it talks and how long it waits between.
-        let c = self.chattiness.clamp(0.0, 1.0);
+        let c = if self.enraged {
+            (self.chattiness + 0.4).min(1.0)
+        } else {
+            self.chattiness.clamp(0.0, 1.0)
+        };
         let chance = (chance * (0.15 + 1.7 * c)).min(1.0);
         let cooldown = QUIP_COOLDOWN * (2.4 - 2.0 * c);
         if !important && (c <= 0.0 || self.since_quip < cooldown || self.rand() >= chance) {
             return None;
         }
         let roll = self.rand();
+        let rage: &[&str] = &RAGE_LINES;
         let lines = match self.language {
+            _ if self.enraged && roll < 0.6 => rage,
             Language::Polite => m.polite().unwrap_or(base),
             Language::Cheeky => base,
             // Mostly salty, sometimes the usual.
