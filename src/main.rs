@@ -342,6 +342,11 @@ struct Scene {
     /// Memories, feelings, beliefs and scheme (kept between launches).
     mind: Psyche,
     reflect_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    /// Diary entries written by the model: (date, prompt) out, (date, text) in.
+    write_tx: tokio::sync::mpsc::UnboundedSender<(String, String)>,
+    write_rx: Receiver<(String, Option<String>)>,
+    /// Read the opening of the newest entry when the user is around.
+    recap_due: bool,
     reflect_rx: Receiver<Option<stickman::mind::Reflection>>,
     last_reflection: Instant,
     reflecting: bool,
@@ -1824,6 +1829,12 @@ impl Scene {
         for cmd in self.menubar.drain_commands() {
             log::info!("menu: {cmd:?}");
             match cmd {
+                Command::WriteDiary => {
+                    let today = macos::local_date();
+                    let salty = self.settings.language == stickman::settings::Language::Salty;
+                    let prompt = self.mind.diary_prompt(&today, &self.settings.name, salty);
+                    self.write_diary(today, prompt);
+                }
                 Command::ReflectNow => {
                     self.last_reflection = Instant::now() - REFLECT_EVERY * 2;
                 }
@@ -2132,6 +2143,14 @@ impl Scene {
             beliefs: m.beliefs.join(" · "),
             note: m.note.clone(),
             log: log.join("\n"),
+            diary: m
+                .diary
+                .iter()
+                .rev()
+                .take(7)
+                .map(|e| format!("{} — {}", e.date, e.text))
+                .collect::<Vec<_>>()
+                .join("\n\n"),
         }
     }
 
@@ -2185,6 +2204,12 @@ impl Scene {
         }
         if self.night_checked.elapsed() > Duration::from_secs(60) {
             self.night_checked = Instant::now();
+            // A new day: yesterday becomes a diary entry.
+            let today = macos::local_date();
+            let salty = self.settings.language == stickman::settings::Language::Salty;
+            if let Some((date, prompt)) = self.mind.new_day(&today, &self.settings.name, salty) {
+                self.write_diary(date, prompt);
+            }
             let h = macos::local_hour();
             let night = self.settings.sleepy_nights && !(6..23).contains(&h);
             if night && !self.night {
@@ -2193,6 +2218,46 @@ impl Scene {
                 self.speak(lines);
             }
             self.night = night;
+        }
+    }
+
+    /// Ask the model for a diary entry (or write one by rules when offline).
+    fn write_diary(&mut self, date: String, prompt: String) {
+        if self.director_online == Some(false)
+            || self.write_tx.send((date.clone(), prompt)).is_err()
+        {
+            let text = self.mind.diary_offline(&date);
+            self.diary_written(&date, &text);
+        }
+    }
+
+    fn diary_written(&mut self, date: &str, text: &str) {
+        log::info!("diary: entry for {date} ({} chars)", text.len());
+        self.mind.add_diary(date, text);
+        self.mind.think(format!("Wrote in my diary for {date}."));
+        self.recap_due = true;
+        self.save_mind();
+    }
+
+    /// Diary answers, and the morning recap once the user is around.
+    fn diary_tick(&mut self) {
+        while let Ok((date, text)) = self.write_rx.try_recv() {
+            let text = text.unwrap_or_else(|| self.mind.diary_offline(&date));
+            self.diary_written(&date, &text);
+        }
+        if self.recap_due
+            && self.last_mouse_move.elapsed() < Duration::from_secs(10)
+            && !self.on_call
+            && self.rival.is_none()
+            && self.jail.is_none()
+        {
+            self.recap_due = false;
+            if let Some(e) = self.mind.diary.back() {
+                // The opening line or two.
+                let opening: String = e.text.split_inclusive(['.', '!', '?']).take(2).collect();
+                let lines = self.speech.say(opening.trim(), Priority::Director);
+                self.speak(lines);
+            }
         }
     }
 
@@ -2282,6 +2347,16 @@ impl Scene {
         if let Ok(what) = std::env::var("STICKMAN_DEBUG_DO") {
             if what.trim() == "rage" {
                 self.mind.feelings.resentment = 90.0;
+                return;
+            }
+            if what.trim() == "diary" {
+                for _ in 0..4 {
+                    self.remember(Memory::Hit);
+                }
+                self.remember(Memory::Petted);
+                let today = macos::local_date();
+                let prompt = self.mind.diary_prompt(&today, &self.settings.name, false);
+                self.write_diary(today, prompt);
                 return;
             }
             if what.trim() == "note" {
@@ -2481,6 +2556,7 @@ impl Scene {
             + rage)
             .clamp(0.0, 1.0);
         self.think();
+        self.diary_tick();
         self.maybe_write_note();
         if self.ticks % 30 == 0 {
             self.check_achievements();
@@ -3255,6 +3331,14 @@ impl App {
             None
         };
         let (dir_tx, directive_rx) = mpsc::channel();
+        let (write_tx, write_req_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (write_out_tx, write_rx) = mpsc::channel();
+        director::spawn_writer(
+            &self.runtime,
+            director::Config::from_env(),
+            write_req_rx,
+            write_out_tx,
+        );
         let (reflect_tx, reflect_req_rx) = tokio::sync::mpsc::unbounded_channel();
         let (reflect_out_tx, reflect_rx) = mpsc::channel();
         director::spawn_reflector(
@@ -3354,6 +3438,9 @@ impl App {
             stats_saved: now,
             mind,
             reflect_tx,
+            write_tx,
+            write_rx,
+            recap_due: false,
             reflect_rx,
             last_reflection: now,
             reflecting: false,

@@ -194,9 +194,25 @@ pub struct Reflection {
     pub thought: String,
 }
 
+/// One day's diary entry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiaryEntry {
+    /// "2026-11-03".
+    pub date: String,
+    pub text: String,
+}
+
+/// Diary entries kept (oldest dropped first).
+const MAX_DIARY: usize = 60;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Mind {
+    /// Its diary, newest last.
+    pub diary: VecDeque<DiaryEntry>,
+    /// The day being tallied ("2026-11-03"), and what happened that day.
+    pub day: String,
+    pub day_counts: BTreeMap<String, u32>,
     pub memories: VecDeque<Memory>,
     pub feelings: Feelings,
     /// What it has concluded about the user (rewritten by reflection).
@@ -297,6 +313,7 @@ impl Mind {
             .count();
         self.feelings.react(what, recent_hits);
         *self.totals.entry(format!("{what:?}")).or_default() += 1;
+        *self.day_counts.entry(format!("{what:?}")).or_default() += 1;
         if what == Kind::Hit && !app.is_empty() {
             *self.hits_by_app.entry(app.to_string()).or_default() += 1;
         }
@@ -459,6 +476,118 @@ impl Mind {
             self.summary(),
             self.recent(12).join("\n")
         )
+    }
+
+    /// What happened on the day being tallied, in words.
+    fn day_summary(&self) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        for (k, n) in &self.day_counts {
+            let kind = match k.as_str() {
+                "Hit" => Kind::Hit,
+                "Flung" => Kind::Flung,
+                "Petted" => Kind::Petted,
+                "KnockedOut" => Kind::KnockedOut,
+                "StruckCursor" => Kind::StruckCursor,
+                "ThrewCursor" => Kind::ThrewCursor,
+                "CursorEscaped" => Kind::CursorEscaped,
+                "WonDuel" => Kind::WonDuel,
+                "LostDuel" => Kind::LostDuel,
+                _ => Kind::Ignored,
+            };
+            parts.push(format!(
+                "{} {n} time{}",
+                kind.describe(),
+                if *n == 1 { "" } else { "s" }
+            ));
+        }
+        if parts.is_empty() {
+            "Nothing much happened.".into()
+        } else {
+            format!("Today: {}.", parts.join("; "))
+        }
+    }
+
+    /// The day changed to `today`: returns the prompt for the diary entry of
+    /// the day that just ended (or `None` if nothing happened), and starts
+    /// tallying the new day.
+    pub fn new_day(&mut self, today: &str, name: &str, salty: bool) -> Option<(String, String)> {
+        if self.day.is_empty() {
+            self.day = today.to_string();
+            return None;
+        }
+        if self.day == today {
+            return None;
+        }
+        let ended = std::mem::replace(&mut self.day, today.to_string());
+        let had_events = !self.day_counts.is_empty();
+        let prompt = self.diary_prompt(&ended, name, salty);
+        self.day_counts.clear();
+        had_events.then_some((ended, prompt))
+    }
+
+    /// The prompt for the entry of `date` (from today's tally so far).
+    pub fn diary_prompt(&self, date: &str, name: &str, salty: bool) -> String {
+        let style = if salty || self.enraged {
+            "It may swear (no slurs, nothing hateful)."
+        } else {
+            "No swearing."
+        };
+        let thoughts: Vec<&str> = self
+            .thoughts
+            .iter()
+            .rev()
+            .take(5)
+            .map(|s| s.as_str())
+            .collect();
+        format!(
+            "You are {name}, a mischievous stick figure living on the user's desktop, in a \
+             cartoon feud with the mouse cursor. Write today's diary entry ({date}): 3 to 5 \
+             short sentences, first person, funny and dramatic, starting with \"Dear diary,\". \
+             {}\nHow you feel: {}. Your scheme: {}. Recent thoughts: {}.\n\
+             Reply with JSON: {{\"text\": the entry}}. {style}",
+            self.day_summary(),
+            self.feelings.mood(),
+            if self.scheme.is_empty() {
+                "none yet"
+            } else {
+                &self.scheme
+            },
+            thoughts.join(" / ")
+        )
+    }
+
+    /// A diary entry without the model.
+    pub fn diary_offline(&self, date: &str) -> String {
+        let f = &self.feelings;
+        let hits = self.day_counts.get("Hit").copied().unwrap_or(0);
+        let pets = self.day_counts.get("Petted").copied().unwrap_or(0);
+        let mood = match f.mood() {
+            "vengeful" => "I will have my revenge.",
+            "scared" => "I am scared. I hid behind a window.",
+            "fond" => "Honestly? The human is growing on me.",
+            "cocky" => "That cursor doesn't stand a chance.",
+            _ => "All in all, a quiet day.",
+        };
+        format!(
+            "Dear diary, {date}. The human hit me {hits} time{} and petted me {pets} time{}. {mood}",
+            if hits == 1 { "" } else { "s" },
+            if pets == 1 { "" } else { "s" }
+        )
+    }
+
+    pub fn add_diary(&mut self, date: &str, text: &str) {
+        let text = tidy(text, 600);
+        if text.is_empty() {
+            return;
+        }
+        self.diary.retain(|e| e.date != date);
+        self.diary.push_back(DiaryEntry {
+            date: date.to_string(),
+            text,
+        });
+        while self.diary.len() > MAX_DIARY {
+            self.diary.pop_front();
+        }
     }
 
     /// Take in a reflection's conclusions.
@@ -723,6 +852,34 @@ mod tests {
         }
         assert_eq!(m.update_temper(true), Some(false));
         assert!(!m.enraged);
+    }
+
+    #[test]
+    fn a_new_day_turns_yesterday_into_a_diary_entry() {
+        let mut m = Mind::default();
+        assert!(
+            m.new_day("2026-11-03", "Stick", false).is_none(),
+            "first day: just starts"
+        );
+        for _ in 0..3 {
+            m.record(Kind::Hit, "Mail");
+        }
+        assert!(
+            m.new_day("2026-11-03", "Stick", false).is_none(),
+            "same day"
+        );
+        let (date, prompt) = m
+            .new_day("2026-11-04", "Stick", false)
+            .expect("yesterday's entry");
+        assert_eq!(date, "2026-11-03");
+        assert!(prompt.contains("the user hit you 3 times") && prompt.contains("Dear diary"));
+        assert!(m.day_counts.is_empty() && m.day == "2026-11-04");
+        // A quiet day writes nothing.
+        assert!(m.new_day("2026-11-05", "Stick", false).is_none());
+        m.add_diary("2026-11-03", "Dear diary, the human was rude.");
+        m.add_diary("2026-11-03", "Dear diary, rewritten.");
+        assert_eq!(m.diary.len(), 1);
+        assert!(m.diary_offline("2026-11-05").starts_with("Dear diary"));
     }
 
     #[test]

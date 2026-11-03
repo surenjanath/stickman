@@ -418,6 +418,70 @@ pub fn spawn_reflector(
     });
 }
 
+/// Run free-text writing jobs (diary entries) on `rt`: each `(id, prompt)`
+/// gets `(id, Some(text))` back, or `None` if the model failed.
+pub fn spawn_writer(
+    rt: &tokio::runtime::Runtime,
+    cfg: Config,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<(String, String)>,
+    tx: Sender<(String, Option<String>)>,
+) {
+    rt.spawn(async move {
+        let Ok(client) = reqwest::Client::builder().build() else {
+            return;
+        };
+        while let Some((id, prompt)) = rx.recv().await {
+            let body = json!({
+                "model": cfg.model,
+                "prompt": prompt,
+                "stream": false,
+                "think": false,
+                "keep_alive": "15m",
+                "format": {
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"]
+                },
+                "options": {"temperature": 0.9, "num_predict": 260}
+            });
+            let answer = async {
+                let text = client
+                    .post(format!("{}/api/generate", cfg.url.trim_end_matches('/')))
+                    .timeout(cfg.timeout)
+                    .json(&body)
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .text()
+                    .await?;
+                #[derive(Deserialize)]
+                struct Outer {
+                    response: String,
+                }
+                #[derive(Deserialize)]
+                struct Inner {
+                    text: String,
+                }
+                let outer: Outer = serde_json::from_str(&text)?;
+                let cleaned: String = outer
+                    .response
+                    .chars()
+                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .collect();
+                let inner: Inner = serde_json::from_str(cleaned.trim())?;
+                anyhow::Ok(inner.text)
+            }
+            .await;
+            if let Err(e) = &answer {
+                log::debug!("writer: failed: {e:#}");
+            }
+            if tx.send((id, answer.ok())).is_err() {
+                return;
+            }
+        }
+    });
+}
+
 /// Run the director loop on `rt`. Reads the latest observation from `obs`, sends
 /// each decision to `tx` while `active` is set; stops when the receiver is gone.
 pub fn spawn(

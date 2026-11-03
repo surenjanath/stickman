@@ -128,6 +128,8 @@ pub struct MindView {
     pub note: String,
     /// Recent thoughts and memories, newest first.
     pub log: String,
+    /// Diary entries, newest first.
+    pub diary: String,
 }
 
 /// The settings window. Built once, shown and hidden on demand. Holds +1
@@ -145,6 +147,7 @@ pub struct SettingsWindow {
     /// Thought, scheme, beliefs, note.
     mind_labels: Vec<*mut Object>,
     log: *mut Object,
+    diary: *mut Object,
     mind_shown: Option<MindView>,
     /// The hat pop-up and which hats are unlocked (as last shown).
     hat_popup: *mut Object,
@@ -169,6 +172,7 @@ impl SettingsWindow {
             bars: Vec::new(),
             mind_labels: Vec::new(),
             log: std::ptr::null_mut(),
+            diary: std::ptr::null_mut(),
             mind_shown: None,
             hat_popup: std::ptr::null_mut(),
             hats_shown: Vec::new(),
@@ -422,6 +426,13 @@ impl SettingsWindow {
         Self::width(scroll, 420.0);
         Self::height(scroll, 110.0);
         self.log = tv;
+        let dscroll: *mut Object = msg_send![class!(NSTextView), scrollableTextView];
+        let dtv: *mut Object = msg_send![dscroll, documentView];
+        let _: () = msg_send![dtv, setEditable: NO];
+        let _: () = msg_send![dtv, setFont: small];
+        Self::width(dscroll, 420.0);
+        Self::height(dscroll, 90.0);
+        self.diary = dtv;
         let achievements = Self::wrapping("—", 420.0);
         self.achievements = achievements;
         let reflect = self.check(
@@ -436,6 +447,7 @@ impl SettingsWindow {
             &[
                 Self::button("Reflect Now", Command::ReflectNow),
                 Self::button("Leave Me a Note", Command::WriteNote),
+                Self::button("Write Diary Now", Command::WriteDiary),
             ],
             8.0,
         );
@@ -457,6 +469,7 @@ impl SettingsWindow {
             Row::Field("Believes:", labels[2]),
             Row::Field("Next note:", labels[3]),
             Row::Field("Memory:", scroll),
+            Row::Field("Diary:", dscroll),
             Row::Section("Achievements"),
             Row::Under(achievements),
             Row::Section("Its mind"),
@@ -689,6 +702,12 @@ impl SettingsWindow {
                 let _: () = msg_send![*l, setStringValue: ns_string(shown)];
             }
             let _: () = msg_send![self.log, setString: ns_string(&view.log)];
+            let diary = if view.diary.is_empty() {
+                "No entries yet: it writes one at the end of each day."
+            } else {
+                view.diary.as_str()
+            };
+            let _: () = msg_send![self.diary, setString: ns_string(diary)];
         }
         self.mind_shown = Some(view.clone());
     }

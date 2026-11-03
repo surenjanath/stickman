@@ -455,6 +455,35 @@ fn focused_window(pid: i64) -> Option<AxElement> {
     ))
 }
 
+/// Today's local date, "YYYY-MM-DD". Main thread only.
+pub fn local_date() -> String {
+    // SAFETY: documented NSDateFormatter/NSDate API; the formatter is +1 and
+    // released here, the strings are autoreleased and copied out at once.
+    unsafe {
+        let f: *mut Object = msg_send![class!(NSDateFormatter), new];
+        if f.is_null() {
+            return String::new();
+        }
+        let fmt = std::ffi::CString::new("yyyy-MM-dd").unwrap_or_default();
+        let fmt: *mut Object = msg_send![class!(NSString), stringWithUTF8String: fmt.as_ptr()];
+        let _: () = msg_send![f, setDateFormat: fmt];
+        let now: *mut Object = msg_send![class!(NSDate), date];
+        let s: *mut Object = msg_send![f, stringFromDate: now];
+        let out = if s.is_null() {
+            String::new()
+        } else {
+            let p: *const std::ffi::c_char = msg_send![s, UTF8String];
+            if p.is_null() {
+                String::new()
+            } else {
+                std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
+            }
+        };
+        let _: () = msg_send![f, release];
+        out
+    }
+}
+
 /// The local hour, 0..23. Main thread only.
 pub fn local_hour() -> u32 {
     // SAFETY: documented NSCalendar/NSDate API; autoreleased objects.
