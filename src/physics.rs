@@ -154,19 +154,28 @@ impl World {
 }
 
 /// Visible top edges of windows, front-to-back order in, occluded parts removed.
-/// `windows` are (id, rect) in overlay points, frontmost first.
+/// `windows` are (id, rect) frontmost first and `screens` are screen frames,
+/// both in global points. An edge is kept on each screen it crosses, except
+/// within `menu_bar` points of that screen's top.
 pub fn window_platforms(
     windows: &[(u32, crate::geom::Rect)],
-    width: f32,
-    min_y: f32,
+    screens: &[crate::geom::Rect],
+    menu_bar: f32,
 ) -> Vec<Platform> {
     let mut out = Vec::new();
     for (i, (id, r)) in windows.iter().enumerate() {
         let y = r.y as f32;
-        if y < min_y {
-            continue;
-        }
-        let mut spans = vec![((r.x as f32).max(0.0), (r.right() as f32).min(width))];
+        let mut spans: Vec<(f32, f32)> = screens
+            .iter()
+            .filter(|s| y >= s.y as f32 + menu_bar && f64::from(y) < s.bottom())
+            .map(|s| {
+                (
+                    (r.x as f32).max(s.x as f32),
+                    (r.right() as f32).min(s.right() as f32),
+                )
+            })
+            .filter(|(a, b)| b > a)
+            .collect();
         // Remove parts covered by any window in front whose area contains this edge.
         for (_, front) in &windows[..i] {
             let (fy0, fy1) = (front.y as f32, front.bottom() as f32);
@@ -303,7 +312,7 @@ mod tests {
             (1, r(300.0, 100.0, 200.0, 300.0)),
             (2, r(100.0, 200.0, 600.0, 400.0)),
         ];
-        let ps = window_platforms(&windows, 1800.0, 30.0);
+        let ps = window_platforms(&windows, &[r(0.0, 0.0, 1800.0, 1169.0)], 30.0);
         let back: Vec<_> = ps
             .iter()
             .filter(|p| p.owner == 2)
@@ -329,10 +338,33 @@ mod tests {
                 (2, r(1700.0, 300.0, 400.0, 200.0)),
                 (3, r(50.0, 400.0, 20.0, 100.0)),
             ],
-            1800.0,
+            &[r(0.0, 0.0, 1800.0, 1169.0)],
             30.0,
         );
         assert_eq!(ps.len(), 1);
         assert_eq!((ps[0].x0, ps[0].x1), (1700.0, 1800.0));
+    }
+
+    #[test]
+    fn window_edges_span_screens_and_respect_each_menu_bar() {
+        let r = |x, y, w, h| Rect {
+            x,
+            y,
+            width: w,
+            height: h,
+        };
+        let screens = [
+            r(0.0, 0.0, 1800.0, 1169.0),
+            r(1800.0, -200.0, 2560.0, 1440.0),
+        ];
+        // A window straddling both screens.
+        let ps = window_platforms(&[(1, r(1500.0, 300.0, 800.0, 400.0))], &screens, 30.0);
+        let spans: Vec<_> = ps.iter().map(|p| (p.x0, p.x1)).collect();
+        assert_eq!(spans, [(1500.0, 1800.0), (1800.0, 2300.0)]);
+        // Just under the right screen's menu bar, but above the left screen's top.
+        let ps = window_platforms(&[(2, r(2000.0, -180.0, 500.0, 300.0))], &screens, 30.0);
+        assert!(ps.is_empty());
+        let ps = window_platforms(&[(2, r(2000.0, -150.0, 500.0, 300.0))], &screens, 30.0);
+        assert_eq!(ps.len(), 1);
     }
 }

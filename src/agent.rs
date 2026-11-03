@@ -73,9 +73,11 @@ pub struct Senses {
     pub mode: Mode,
     /// Frontmost window: (CGWindowID, frame in overlay points).
     pub active_window: Option<(u32, Rect)>,
-    /// Horizontal walking range.
+    /// Horizontal walking range (can span several screens).
     pub min_x: f32,
     pub max_x: f32,
+    /// Top of the screen the figure is on.
+    pub top: f32,
     /// A word the figure could rip off the screen and throw.
     pub ammo: Option<Ammo>,
     /// May grab and throw the user's cursor (the app moves the real pointer).
@@ -1092,6 +1094,18 @@ impl Agent {
                 }
             }
         }
+        if (0.25..0.37).contains(&roll) && ground.kind == PlatformKind::Ground {
+            // Another screen next door: go and visit it.
+            let (left, right) = (ground.x0 - s.min_x, s.max_x - ground.x1);
+            if left > 150.0 || right > 150.0 {
+                let x = if right >= left {
+                    ground.x1 + self.random(80.0, right.min(600.0))
+                } else {
+                    ground.x0 - self.random(80.0, left.min(600.0))
+                };
+                return self.walk_to(x.clamp(s.min_x, s.max_x), false);
+            }
+        }
         if roll < 0.25 && ground.kind != PlatformKind::Ground {
             // Wander off the edge of a window and drop down.
             let edge = if self.random(0.0, 1.0) < 0.5 {
@@ -1144,7 +1158,7 @@ impl Agent {
         // Airborne.
         self.vel.y += GRAVITY * dt;
         let mut next = self.pos + self.vel * dt;
-        let ceiling = 40.0 + 230.0 * self.scale;
+        let ceiling = s.top + 40.0 + 230.0 * self.scale;
         if next.y < ceiling {
             next.y = ceiling;
             self.vel.y = self.vel.y.abs() * 0.3;
@@ -1204,12 +1218,18 @@ impl Agent {
             return;
         }
         self.pos = next;
-        // Safety net: never lose the figure below the screen.
-        if let Some(g) = world
-            .platforms()
-            .iter()
-            .find(|p| p.kind == PlatformKind::Ground)
-        {
+        // Safety net: never lose the figure below the screen. Use the ground
+        // of the screen it's over (several screens, several grounds).
+        let grounds = || {
+            world
+                .platforms()
+                .iter()
+                .filter(|p| p.kind == PlatformKind::Ground)
+        };
+        let under = grounds()
+            .find(|p| p.contains_x(self.pos.x))
+            .or_else(|| grounds().next());
+        if let Some(g) = under {
             if self.pos.y > g.y + 80.0 {
                 self.pos.y = g.y;
                 self.vel = V2::ZERO;
@@ -1244,6 +1264,7 @@ mod tests {
             active_window: None,
             min_x: 60.0,
             max_x: 1740.0,
+            top: 0.0,
             ammo: None,
             can_grab_cursor: false,
         }
@@ -1467,6 +1488,43 @@ mod tests {
         a.update(&s, &w, &mut ev);
         assert!(!a.holding_cursor);
         assert_eq!(a.action, Action::Tumble);
+    }
+
+    #[test]
+    fn wanders_onto_a_lower_screen_next_door() {
+        // Laptop ground at 1100 on 0..1800, a monitor to the right whose floor
+        // is lower (1300).
+        let mut w = World::new();
+        w.set_platforms(vec![
+            Platform::ground(1800.0, GROUND_Y),
+            Platform {
+                x0: 1800.0,
+                x1: 4360.0,
+                y: 1300.0,
+                kind: PlatformKind::Ground,
+                owner: 0,
+            },
+        ]);
+        for seed in [77, 5, 1234] {
+            let mut a = Agent::new(1500.0, Platform::ground(1800.0, GROUND_Y), SCALE, seed);
+            let mut s = senses(Mode::Idle);
+            s.max_x = 4330.0;
+            let mut ev = vec![];
+            let mut crossed = false;
+            for _ in 0..(240.0 / FIXED_DT) as usize {
+                a.update(&s, &w, &mut ev);
+                if a.ground.is_some_and(|g| g.y == 1300.0) {
+                    crossed = true;
+                    break;
+                }
+            }
+            assert!(
+                crossed,
+                "seed {seed}: never visited the other screen ({:?})",
+                a.pos
+            );
+            assert!(a.pos.x > 1800.0 && a.pos.y == 1300.0);
+        }
     }
 
     #[test]

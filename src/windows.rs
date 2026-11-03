@@ -88,13 +88,13 @@ pub fn list_windows(
         .collect()
 }
 
-/// A normal application window, in overlay coordinates.
+/// A normal application window.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AppWindow {
     pub id: u32,
     pub pid: i64,
     pub owner: String,
-    /// Overlay points (global minus display origin).
+    /// Global CoreGraphics points.
     pub rect: Rect,
 }
 
@@ -111,45 +111,44 @@ impl Snapshot {
     }
 }
 
-/// Keep ordinary app windows on the display: layer 0, visible, a sensible size,
-/// not ours.
-pub fn filter_windows(raw: &[WindowInfo], own_pid: i64, display: Rect) -> Vec<AppWindow> {
+/// Keep ordinary app windows on any of the `screens`: layer 0, visible, a
+/// sensible size, not ours.
+pub fn filter_windows(raw: &[WindowInfo], own_pid: i64, screens: &[Rect]) -> Vec<AppWindow> {
     raw.iter()
         .filter(|w| w.layer == 0 && w.alpha > 0.01 && w.pid != own_pid)
         .filter(|w| w.bounds.width >= 120.0 && w.bounds.height >= 60.0)
         .filter(|w| {
-            w.bounds.x < display.right()
-                && w.bounds.right() > display.x
-                && w.bounds.y < display.bottom()
-                && w.bounds.bottom() > display.y
+            screens.iter().any(|d| {
+                w.bounds.x < d.right()
+                    && w.bounds.right() > d.x
+                    && w.bounds.y < d.bottom()
+                    && w.bounds.bottom() > d.y
+            })
         })
         .map(|w| AppWindow {
             id: w.id,
             pid: w.pid,
             owner: w.owner.clone(),
-            rect: Rect {
-                x: w.bounds.x - display.x,
-                y: w.bounds.y - display.y,
-                ..w.bounds
-            },
+            rect: w.bounds,
         })
         .collect()
 }
 
-pub fn snapshot(own_pid: i64, display: Rect) -> Snapshot {
+pub fn snapshot(own_pid: i64, screens: &[Rect]) -> Snapshot {
     let raw = list_windows(
         cgw::kCGWindowListOptionOnScreenOnly | cgw::kCGWindowListExcludeDesktopElements,
         cgw::kCGNullWindowID,
     );
     Snapshot {
-        windows: filter_windows(&raw, own_pid, display),
+        windows: filter_windows(&raw, own_pid, screens),
     }
 }
 
-/// Poll every `interval` on a background thread; send only on change.
+/// Poll every `interval` on a background thread; send only on change. The
+/// screen list is shared so it can change when displays are plugged in.
 pub fn spawn_poller(
     own_pid: i64,
-    display: Rect,
+    screens: std::sync::Arc<std::sync::Mutex<Vec<Rect>>>,
     interval: Duration,
     tx: Sender<Snapshot>,
 ) -> JoinHandle<()> {
@@ -158,7 +157,8 @@ pub fn spawn_poller(
         .spawn(move || {
             let mut last = None;
             loop {
-                let snap = snapshot(own_pid, display);
+                let frames = screens.lock().map(|s| s.clone()).unwrap_or_default();
+                let snap = snapshot(own_pid, &frames);
                 if last.as_ref() != Some(&snap) {
                     if tx.send(snap.clone()).is_err() {
                         return; // app shut down
@@ -207,20 +207,33 @@ mod tests {
             raw(4, 12, 0, 10.0, 10.0, 40.0, 40.0),     // tiny
             raw(5, 13, 0, 3000.0, 0.0, 800.0, 600.0),  // other display
         ];
-        let w = filter_windows(&list, 99, display);
+        let w = filter_windows(&list, 99, &[display]);
         assert_eq!(w.iter().map(|w| w.id).collect::<Vec<_>>(), [1]);
     }
 
     #[test]
-    fn converts_to_overlay_coordinates() {
-        let display = Rect {
-            x: -1800.0,
-            y: 0.0,
-            width: 1800.0,
-            height: 1169.0,
-        };
-        let w = filter_windows(&[raw(1, 10, 0, -1700.0, 50.0, 400.0, 300.0)], 99, display);
-        assert_eq!((w[0].rect.x, w[0].rect.y), (100.0, 50.0));
+    fn keeps_windows_on_every_screen_in_global_coordinates() {
+        let screens = [
+            Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 1800.0,
+                height: 1169.0,
+            },
+            Rect {
+                x: -1920.0,
+                y: 0.0,
+                width: 1920.0,
+                height: 1080.0,
+            },
+        ];
+        let list = [
+            raw(1, 10, 0, -1700.0, 50.0, 400.0, 300.0),
+            raw(2, 10, 0, 5000.0, 50.0, 400.0, 300.0),
+        ];
+        let w = filter_windows(&list, 99, &screens);
+        assert_eq!(w.len(), 1);
+        assert_eq!((w[0].rect.x, w[0].rect.y), (-1700.0, 50.0));
     }
 
     #[test]
@@ -234,7 +247,7 @@ mod tests {
             width: 2e5,
             height: 2e5,
         };
-        let snap = snapshot(i64::from(std::process::id()), display);
+        let snap = snapshot(i64::from(std::process::id()), &[display]);
         assert!(snap
             .windows
             .iter()

@@ -2,9 +2,10 @@
 
 A native macOS desktop companion: a stick figure that lives on top of your desktop.
 It walks along the Dock, climbs onto your windows, stands on lines of text, dodges
-your mouse, fights your cursor, gets knocked flying when you click it, and stomps
-on whatever window you're working in. A **local** LLM running in Ollama decides
-its mood.
+your mouse, fights your cursor (and sometimes grabs it and throws it across the
+screen), gets knocked flying when you click it, and stomps on whatever window
+you're working in. It talks in speech bubbles, makes cartoon sound effects, and
+roams across all your displays. A **local** LLM running in Ollama decides its mood.
 
 Written in Rust for Apple Silicon:
 - **Overlay window:** `winit` + AppKit (`objc`).
@@ -19,12 +20,16 @@ Written in Rust for Apple Silicon:
 
 | | |
 |---|---|
-| **Overlay** | Borderless, fully transparent window over the main display, always on top (`NSStatusWindowLevel`), on every Space, including over full-screen apps. No Dock icon, never steals focus. |
+| **Overlay** | Borderless, fully transparent windows over every display, always on top (`NSStatusWindowLevel`), on every Space, including over full-screen apps. No Dock icon, never steals focus. |
 | **Click-through** | Every click passes to the app underneath, except when you deliberately aim at the figure (the cursor moves onto it and hovers for 120 ms). Clicks meant for your app aren't stolen when the figure wanders under a parked cursor. |
 | **Walking** | Procedural gait with planted feet (no sliding), two-bone IK knees, hip bob and counter-swinging arms. Running uses a longer stride, high knees and pumping arms. |
 | **Climbing** | Window title bars are one-way platforms (occluded parts removed), as are lines of text found by OCR in the active window. The figure jumps up onto them, walks along them, rides them when you drag the window, and falls when it walks off the edge or you close the window. |
 | **Combat** | Click the figure: it's knocked flying with an explosion, spins, bounces and gets back up, and a small health bar appears. Clicks land mid-air too (juggling). Enough hits knock it out, with stars. Swipe fast at it and it dodges. In combat mode it chases the cursor and punches or kicks it, physically shoving your pointer. |
 | **Word throwing** | In combat the figure jumps onto lines of text in your active window (any app, web pages included), rips a whole word right off the screen and lobs it at your cursor. The word flies as the real pixels, spinning, knocks the pointer and falls to the Dock. Where it was taken from, the page looks blank: the overlay paints the exact on-screen background colour over it. Nothing in the real app changes, and the gap heals when the window scrolls, moves or loses focus, or after 45 s. In sabotage mode it steals words and flings them away. |
+| **Grab & throw the cursor** | In combat, a slow cursor within reach is sometimes snatched with both hands, hoisted overhead and lobbed across the screen: your real pointer is pinned to its hands, then flies along the arc. Yank the mouse away or click the figure to escape; a hold never lasts more than 3 s. Only while *Punches Push My Cursor* is on. |
+| **Speech bubbles** | The AI director gives the figure a short line when its mood changes ("That's it. It's on!"), and it quips when hit, knocked out, dodging, grabbing or throwing. |
+| **Sound** | Punches, kicks, whooshes, knockback booms, landing thuds, pops, stomps, a talking babble and a knockout wah-wah, all synthesised in code (no audio files) and panned by where they happen. |
+| **Multiple displays** | One overlay per screen. Each screen has its own floor (the Dock top, or the screen bottom), and windows on every screen are platforms. The figure wanders across a shared screen edge, dropping down when the next screen's floor is lower; an edge that would be a step up is a wall. Plugging in or rearranging displays is picked up within 2 s. |
 | **Sabotage** | It climbs onto your active window and stomps on it, shaking the window via Accessibility. |
 | **AI director** | Every 4 s a local Ollama model (`llama3.2:1b` by default, ~200–300 ms) picks `IDLE` / `OBSERVE` / `SABOTAGE` / `COMBAT` from what you're doing: active app, mouse speed, hits, health, frustration, idle time. Modes last at least 12 s, except immediate retaliation after a hit. If Ollama is down, a built-in director takes over. |
 | **Efficiency** | 60 Hz simulation when something moves, 30 Hz otherwise; frames that wouldn't visibly change are skipped. Idle ≈ 2–3% of one core (PRD budget 5%), walking ≈ 13–16%. |
@@ -45,6 +50,8 @@ menu bars. Click it for:
 | Stomps Shake My Windows | Whether stomps jolt your windows (needs Accessibility). |
 | Walk on Text | Whether to read the active window's text lines (needs Screen Recording). |
 | Rip Words Off the Screen & Throw Them | The word-throwing trick above. |
+| Speech Bubbles | Show what the figure says. |
+| Sound Effects | Play the synthesised sound effects. |
 | Show Figure (⌘H) | Hide or show the figure. Hidden means fully click-through, no simulation and no AI calls. |
 | Pause (⌘P) / Respawn (⌘R) | Freeze the figure / bring it back to the middle of the Dock. |
 | Grant … | Shortcuts to the right System Settings pane, shown only while a permission is missing. |
@@ -88,10 +95,12 @@ launching terminal.
 | `STICKMAN_NO_WINDOW_SHAKE=1` | Stomps don't move your windows. |
 | `STICKMAN_NO_OCR=1` | Don't read screen text (no walking on text). |
 | `STICKMAN_NO_PROMPTS=1` | Never show macOS permission dialogs. |
+| `STICKMAN_NO_SOUND=1` | No sound effects. |
 | `STICKMAN_HOLD_IDLE=1` | Stand still (used to measure idle CPU). |
 | `STICKMAN_SETTINGS` | Settings file path (default `~/Library/Application Support/Stickman/settings.json`). |
 | `STICKMAN_CLICK_THROUGH=0` | Debug: the overlay catches every click (blocks the screen). |
 | `STICKMAN_DEBUG_OPEN_MENU=1` | Debug: pop the menu bar menu open once at startup. |
+| `STICKMAN_DEBUG_SAY="…"` | Debug: say this line at startup. |
 | `RUST_LOG=debug` | Verbose logs: director decisions, OCR, perf stats, click-through toggles. |
 
 ## Testing
@@ -102,14 +111,20 @@ cargo test --release --test overlay -- ocr # one GUI test by name
 STICKMAN_INTERACTIVE_TESTS=1 cargo test --release --test overlay -- click  # hands off the mouse
 cargo clippy --all-targets -- -D warnings
 cargo run --release --example pose_sheet -- docs/poses.png   # re-render the pose sheet
+cargo run --release --example sfx_demo     # hear every sound effect
 ```
 
-**Unit tests (72).**
+**Unit tests (118).**
 - **Collision:** one-way landings, no tunnelling, window-edge occlusion clipping.
 - **Walking and running:** feet never slide; feet always on the ground.
 - **Poses:** IK accuracy and knee direction; hands and arms never cross the head.
 - **Combat:** knockback, juggling into a KO, getting back up, chasing and hitting
-  the cursor, dodging fast swipes.
+  the cursor, dodging fast swipes, snatching and throwing the cursor, letting go
+  when the user yanks free or clicks.
+- **Screens:** per-screen floors, walking across edges only when it isn't a step
+  up, window edges clipped per screen and below each menu bar.
+- **Speech and sound:** wrapping, priorities, rate limits, on-screen layout, text
+  rendering; every effect audible, bounded and click-free, panning, mixing.
 - **Sabotage:** climbing onto a window and stomping it; riding a dragged window.
 - **Smoothness:** no limb ever jumps between frames, across 16 mode/seed runs.
 - **Director:** prompt and schema building, response parsing, fallback heuristics.
@@ -136,24 +151,25 @@ through the window server and AppKit:
   `STICKMAN_INTERACTIVE_TESTS=1`.
 
 The GUI tests run overlays with cursor pushes, window shakes and permission
-prompts disabled, and with a throwaway settings file. Set `STICKMAN_SKIP_GUI_TESTS=1` to skip them (e.g. on CI).
+prompts and sound disabled, and with a throwaway settings file. Set `STICKMAN_SKIP_GUI_TESTS=1` to skip them (e.g. on CI).
 
 ## Architecture
 
 ```text
 main thread (winit / AppKit)                         background
-┌───────────────────────────────────────────┐   ┌───────────────────────────────┐
+┌───────────────────────────────────────────┐   ┌───────────────────────────────────┐
 │ about_to_wait: tick at 60/30 Hz           │   │ stickman-windows: CGWindowList    │
-│  ├ Cursor::sample (pos, velocity)         │◄──┤   every 250 ms → Snapshot     │
-│  ├ platforms: ground + window tops + text │◄──┤ stickman-ocr: Vision on the       │
-│  │   → physics::World (rapier2d)          │   │   settled active window       │
-│  ├ director decisions → Mode              │◄──┤ tokio: director ↔ Ollama      │
-│  ├ Agent::update ×N (fixed 60 Hz steps)   │   │                               │
-│  ├ events → particles, cursor push,       │──►│ stickman-os: Accessibility shakes │
-│  │          window shake                  │   └───────────────────────────────┘
-│  ├ click intent → setIgnoresMouseEvents   │
+│  ├ Cursor::sample (pos, velocity)         │◄──┤   every 250 ms → Snapshot         │
+│  ├ platforms: floors + window tops + text │◄──┤ stickman-ocr: Vision on the       │
+│  │   → physics::World (rapier2d)          │   │   settled active window           │
+│  ├ director decisions → Mode, speech      │◄──┤ tokio: director ↔ Ollama          │
+│  ├ Agent::update ×N (fixed 60 Hz steps)   │   │                                   │
+│  ├ events → particles, cursor push/grab,  │──►│ stickman-os: Accessibility shakes │
+│  │          window shake, sound, quips    │──►│ stickman-sound: synth + CoreAudio │
+│  ├ click intent → setIgnoresMouseEvents   │   └───────────────────────────────────┘
 │  └ present (skip if nothing changed)      │
-│      DrawList → wgpu/Metal, 1 draw call   │
+│      DrawList → wgpu/Metal, one surface   │
+│      per screen, shared device            │
 └───────────────────────────────────────────┘
 ```
 
@@ -172,7 +188,10 @@ main thread (winit / AppKit)                         background
 | `src/director.rs` | Ollama client, prompt, structured output, fallback director. |
 | `src/macos.rs` | AppKit and Accessibility wrappers (overlay setup, focus, window shake, opening URLs). |
 | `src/words.rs` | Word throwing: ammo choice, "holes", flying words. |
-| `src/sprite.wgsl` | Textured sprites (grabbed words) with rotation and fade. |
+| `src/sprite.wgsl` | Textured sprites (grabbed words, speech text) with rotation and fade. |
+| `src/screens.rs` | Display layout: screens, per-screen floors, where the figure may walk. |
+| `src/speech.rs`, `src/text.rs` | Speech bubbles: lines, quips, timing, layout; AppKit text rasterised into sprites. |
+| `src/sound.rs` | Synthesised sound effects and the CoreAudio mixer thread. |
 | `src/menubar.rs` | Menu bar extra: mood icon drawn from the rig, settings menu, Objective-C action target. |
 | `src/settings.rs` | Persistent settings and menu commands. |
 | `tests/overlay.rs` | Live GUI test harness. |
@@ -216,7 +235,8 @@ Engineering rules (from `claude.md`):
 | 4 | Window title bars and text as platforms, jumping, falling, riding windows | ✅ |
 | 5 | AI director (Ollama) with fallback | ✅ |
 | 6 | OCR text traversal (Vision) | ✅ |
-| Next | Multi-display, speech bubbles, more combat moves (grabs, throws), sound (out of scope for V1) | — |
+| 7 | Speech bubbles, sound effects, grabbing and throwing the cursor, multiple displays | ✅ |
+| Next | Climbing up to a higher neighbouring screen, more combat moves (wall jumps, air kicks), voice lines from the director | — |
 
 ## Credits
 

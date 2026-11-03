@@ -148,11 +148,57 @@ impl DrawList {
     }
 }
 
-pub struct Renderer {
+/// One overlay window (one per screen) and its surface.
+struct Target {
     surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    window: Arc<Window>,
+    /// Top-left of the window in world points.
+    origin: V2,
+    /// Window size in points.
+    size: V2,
+    /// Something was drawn here last frame (so it must be cleared when the
+    /// content leaves).
+    drew: bool,
+}
+
+impl DrawList {
+    /// World-space bounding box of everything in the list (min, max).
+    pub fn bounds(&self) -> Option<(V2, V2)> {
+        let mut lo = V2::splat(f32::MAX);
+        let mut hi = V2::splat(f32::MIN);
+        for i in &self.items {
+            let (a, b) = (V2::from(i.a), V2::from(i.b));
+            let (p, q) = if i.params[1] > 2.5 {
+                (a - b, a + b) // rect: centre, half extents
+            } else if i.params[1] > 0.5 && i.params[1] < 1.5 {
+                let c = (a + b) / 2.0;
+                let r = V2::splat((b - a).length() / 2.0);
+                (c - r, c + r)
+            } else {
+                (a.min(b), a.max(b))
+            };
+            let pad = V2::splat(i.params[0] + 2.0);
+            lo = lo.min(p - pad);
+            hi = hi.max(q + pad);
+        }
+        for sp in &self.sprites {
+            let r = V2::splat(sp.half.length());
+            lo = lo.min(sp.center - r);
+            hi = hi.max(sp.center + r);
+        }
+        (lo.x <= hi.x).then_some((lo, hi))
+    }
+}
+
+pub struct Renderer {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    format: wgpu::TextureFormat,
+    alpha_mode: wgpu::CompositeAlphaMode,
+    targets: Vec<Target>,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
     instances: wgpu::Buffer,
     sprite_pipeline: wgpu::RenderPipeline,
@@ -161,11 +207,12 @@ pub struct Renderer {
     sprite_instances: wgpu::Buffer,
     sprites: std::collections::HashMap<u32, Sprite>,
     next_sprite: u32,
-    window: Arc<Window>,
 }
 
 impl Renderer {
-    pub fn new(window: Arc<Window>) -> Result<Self> {
+    /// A renderer drawing to `window`, whose top-left is at `origin` (world
+    /// points). Add more screens with [`add_target`](Self::add_target).
+    pub fn new(window: Arc<Window>, origin: V2) -> Result<Self> {
         let instance = wgpu::Instance::default();
         let surface = instance
             .create_surface(window.clone())
@@ -208,21 +255,11 @@ impl Renderer {
             )
         })?;
 
-        let size = window.inner_size();
-        let mut config = surface
-            .get_default_config(&adapter, size.width.max(1), size.height.max(1))
-            .ok_or_else(|| anyhow!("surface not supported by adapter"))?;
-        config.format = format;
-        config.alpha_mode = alpha_mode;
-        config.present_mode = wgpu::PresentMode::Fifo;
-        surface.configure(&device, &config);
         log::info!(
-            "renderer: {} {:?} {:?} {}x{} px",
+            "renderer: {} {:?} {:?}",
             adapter.get_info().name,
             format,
-            alpha_mode,
-            config.width,
-            config.height
+            alpha_mode
         );
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -347,11 +384,14 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        Ok(Renderer {
-            surface,
+        let mut r = Renderer {
+            instance,
+            adapter,
+            format,
+            alpha_mode,
+            targets: Vec::new(),
             device,
             queue,
-            config,
             pipeline,
             instances,
             sprite_pipeline,
@@ -360,8 +400,67 @@ impl Renderer {
             sprite_instances,
             sprites: std::collections::HashMap::new(),
             next_sprite: 1,
+        };
+        r.push_target(surface, window, origin)?;
+        Ok(r)
+    }
+
+    fn push_target(
+        &mut self,
+        surface: wgpu::Surface<'static>,
+        window: Arc<Window>,
+        origin: V2,
+    ) -> Result<()> {
+        let caps = surface.get_capabilities(&self.adapter);
+        if !caps.formats.contains(&self.format) || !caps.alpha_modes.contains(&self.alpha_mode) {
+            anyhow::bail!("screen surface does not support {:?}", self.format);
+        }
+        let px = window.inner_size();
+        let mut config = surface
+            .get_default_config(&self.adapter, px.width.max(1), px.height.max(1))
+            .ok_or_else(|| anyhow!("surface not supported by adapter"))?;
+        config.format = self.format;
+        config.alpha_mode = self.alpha_mode;
+        config.present_mode = wgpu::PresentMode::Fifo;
+        surface.configure(&self.device, &config);
+        let scale = window.scale_factor() as f32;
+        log::info!(
+            "renderer: screen at {:?}, {}x{} px @{scale}x",
+            origin,
+            config.width,
+            config.height
+        );
+        self.targets.push(Target {
+            surface,
+            config,
+            size: V2::new(px.width as f32 / scale, px.height as f32 / scale),
             window,
-        })
+            origin,
+            drew: false,
+        });
+        Ok(())
+    }
+
+    /// Draw to another overlay window too (another screen), sharing the GPU
+    /// device and sprites.
+    pub fn add_target(&mut self, window: Arc<Window>, origin: V2) -> Result<()> {
+        let surface = self
+            .instance
+            .create_surface(window.clone())
+            .context("create wgpu surface")?;
+        self.push_target(surface, window, origin)
+    }
+
+    /// Replace every overlay window (screens were plugged in, unplugged or
+    /// rearranged). The GPU device and sprites are kept. Screens whose surface
+    /// can't be set up are skipped with a warning.
+    pub fn set_targets(&mut self, windows: Vec<(Arc<Window>, V2)>) {
+        self.targets.clear();
+        for (w, origin) in windows {
+            if let Err(e) = self.add_target(w, origin) {
+                log::warn!("renderer: skipping a screen: {e:#}");
+            }
+        }
     }
 
     /// Upload a premultiplied RGBA8 image (`w`×`h` pixels) as a sprite.
@@ -431,38 +530,82 @@ impl Renderer {
         self.sprites.remove(&id);
     }
 
-    /// Backing pixels per point.
+    /// Backing pixels per point (the sharpest screen's, for text).
     pub fn scale_factor(&self) -> f64 {
-        self.window.scale_factor()
+        self.targets
+            .iter()
+            .map(|t| t.window.scale_factor())
+            .fold(1.0, f64::max)
     }
 
     pub fn sprite_count(&self) -> usize {
         self.sprites.len()
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) {
+    pub fn resize(&mut self, window: winit::window::WindowId, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
         }
-        self.config.width = width;
-        self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        if let Some(t) = self.targets.iter_mut().find(|t| t.window.id() == window) {
+            t.config.width = width;
+            t.config.height = height;
+            let scale = t.window.scale_factor() as f32;
+            t.size = V2::new(width as f32 / scale, height as f32 / scale);
+            t.surface.configure(&self.device, &t.config);
+        }
     }
 
-    /// Draw one frame (an empty list clears the overlay to fully transparent).
-    /// Returns whether the frame actually reached the screen.
+    /// Draw one frame to every screen it touches (an empty list clears the
+    /// overlays to fully transparent). Returns whether every needed frame
+    /// reached the screen.
     pub fn render(&mut self, list: &DrawList) -> bool {
-        let scale = self.window.scale_factor() as f32;
-        let screen = [self.config.width as f32, self.config.height as f32];
+        let bounds = list.bounds();
+        let mut ok = true;
+        for i in 0..self.targets.len() {
+            let t = &self.targets[i];
+            let touches = bounds.is_some_and(|(lo, hi)| {
+                hi.x >= t.origin.x
+                    && lo.x <= t.origin.x + t.size.x
+                    && hi.y >= t.origin.y
+                    && lo.y <= t.origin.y + t.size.y
+            });
+            if !touches && !t.drew {
+                continue; // nothing here before or now
+            }
+            let presented = self.render_target(i, list, touches);
+            if presented {
+                self.targets[i].drew = touches;
+            }
+            ok &= presented;
+        }
+        ok
+    }
+
+    fn render_target(&mut self, index: usize, list: &DrawList, draw: bool) -> bool {
+        let t = &self.targets[index];
+        let scale = t.window.scale_factor() as f32;
+        let screen = [t.config.width as f32, t.config.height as f32];
+        let o = t.origin;
+        let px = |p: [f32; 2]| [(p[0] - o.x) * scale, (p[1] - o.y) * scale];
+        let empty = DrawList::default();
+        let list = if draw { list } else { &empty };
         let data: Vec<Instance> = list
             .items
             .iter()
-            .map(|i| Instance {
-                a: [i.a[0] * scale, i.a[1] * scale],
-                b: [i.b[0] * scale, i.b[1] * scale],
-                screen,
-                params: [i.params[0] * scale, i.params[1]],
-                color: i.color,
+            .map(|i| {
+                // Rects store half extents in `b`: scale, don't offset.
+                let b = if i.params[1] > 2.5 {
+                    [i.b[0] * scale, i.b[1] * scale]
+                } else {
+                    px(i.b)
+                };
+                Instance {
+                    a: px(i.a),
+                    b,
+                    screen,
+                    params: [i.params[0] * scale, i.params[1]],
+                    color: i.color,
+                }
             })
             .collect();
         if !data.is_empty() {
@@ -473,7 +616,7 @@ impl Renderer {
             .sprites
             .iter()
             .map(|s| SpriteInstance {
-                center: [s.center.x * scale, s.center.y * scale],
+                center: px([s.center.x, s.center.y]),
                 half: [s.half.x * scale, s.half.y * scale],
                 rot_alpha: [s.rotation, s.alpha.clamp(0.0, 1.0)],
                 screen,
@@ -484,11 +627,12 @@ impl Renderer {
                 .write_buffer(&self.sprite_instances, 0, bytemuck::cast_slice(&sprites));
         }
 
-        let frame = match self.surface.get_current_texture() {
+        let t = &self.targets[index];
+        let frame = match t.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
             | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.config);
+                t.surface.configure(&self.device, &t.config);
                 return false;
             }
             // Occluded / timeout / validation: skip this frame.
@@ -539,7 +683,7 @@ impl Renderer {
             }
         }
         self.queue.submit([encoder.finish()]);
-        self.window.pre_present_notify();
+        t.window.pre_present_notify();
         self.queue.present(frame);
         true
     }

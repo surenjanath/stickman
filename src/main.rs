@@ -1,11 +1,12 @@
-//! Stickman: a transparent, click-through, always-on-top window
-//! covering the main display, with an AI-directed stick figure living on it.
+//! Stickman: transparent, click-through, always-on-top windows
+//! covering every display, with an AI-directed stick figure living on them.
 //!
 //! Threads (claude.md rule 1):
 //! - **main**: winit/AppKit event loop, fixed-step simulation, wgpu rendering.
 //! - **stickman-windows**: polls the window server for app windows (platforms).
 //! - **stickman-ocr**: Vision text detection on the active window (text platforms).
 //! - **stickman-os**: Accessibility IPC (window shakes), which can block.
+//! - **stickman-sound**: synthesises sound effects and feeds CoreAudio.
 //! - **tokio**: the AI director talking to Ollama.
 //!
 //! Environment (diagnostics and opt-outs):
@@ -22,7 +23,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -38,6 +39,7 @@ use stickman::ocr;
 use stickman::particles::Particles;
 use stickman::physics::{window_platforms, Platform, World};
 use stickman::render::{DrawList, Renderer};
+use stickman::screens::{self, Layout, Screen};
 use stickman::settings::{Behaviour, Command, Settings};
 use stickman::sound::{Sfx, Sound};
 use stickman::speech::{Moment, Priority, Speech};
@@ -89,19 +91,6 @@ fn click_through_from_env(value: Option<&str>) -> bool {
     )
 }
 
-/// Ground line for the figure, in overlay points (y down from the display top):
-/// the top edge of the Dock, or the bottom of the screen if the Dock is hidden or
-/// on the side.
-fn ground_line(display: Rect, visible_cocoa: Option<Rect>, primary_height: f64) -> f32 {
-    let bottom = display.height;
-    let ground = visible_cocoa
-        .map(|v| cg_to_cocoa(v, primary_height))
-        .map(|v| v.y + v.height - display.y)
-        .filter(|g| *g > display.height * 0.5 && *g <= bottom)
-        .unwrap_or(bottom);
-    ground as f32
-}
-
 /// Largest distance any joint moved between two placements of the figure.
 fn max_joint_shift(a: &[Segment], b: &[Segment]) -> f32 {
     a.iter()
@@ -111,17 +100,8 @@ fn max_joint_shift(a: &[Segment], b: &[Segment]) -> f32 {
         .fold(0.0, f32::max)
 }
 
-/// The display carrying the menu bar, in global top-left-origin points — the same
-/// space winit's `LogicalPosition` uses on macOS.
-fn main_display_rect() -> Rect {
-    let b = core_graphics::display::CGDisplay::main().bounds();
-    Rect {
-        x: b.origin.x,
-        y: b.origin.y,
-        width: b.size.width,
-        height: b.size.height,
-    }
-}
+/// How often to check whether screens were plugged in or rearranged.
+const SCREEN_CHECK: Duration = Duration::from_secs(2);
 
 // The instance buffer must fit the figure (outline + fill), every particle and
 // the health bar.
@@ -190,13 +170,14 @@ impl Captive {
     }
 }
 
-/// One fixed step of a thrown cursor inside `size`. Returns `false` when the
-/// flight is over (it hit the bottom or ran out of time).
-fn fly(pos: &mut V2, vel: &mut V2, t: &mut f32, size: V2, dt: f32) -> bool {
+/// One fixed step of a thrown cursor inside `area` (its screen). Returns
+/// `false` when the flight is over (it hit the bottom or ran out of time).
+fn fly(pos: &mut V2, vel: &mut V2, t: &mut f32, area: Rect, dt: f32) -> bool {
     vel.y += stickman::agent::PROJECTILE_GRAVITY * dt;
     *pos += *vel * dt;
     *t += dt;
-    let (lo, hi) = (V2::splat(2.0), size - V2::splat(2.0));
+    let lo = v2(area.x as f32 + 2.0, area.y as f32 + 2.0);
+    let hi = v2(area.right() as f32 - 2.0, area.bottom() as f32 - 2.0);
     if pos.x < lo.x || pos.x > hi.x {
         pos.x = pos.x.clamp(lo.x, hi.x);
         vel.x = -vel.x * 0.5;
@@ -232,14 +213,17 @@ struct Shown {
 }
 
 struct Scene {
-    overlay: OverlayWindow,
+    /// One overlay per screen, menu-bar screen first.
+    overlays: Vec<OverlayWindow>,
     renderer: Renderer,
     world: World,
     agent: Agent,
     particles: Particles,
     cursor: Cursor,
-    display: Rect,
-    ground: Platform,
+    layout: Layout,
+    /// Shared with the window poller.
+    screen_frames: Arc<Mutex<Vec<Rect>>>,
+    screens_checked: Instant,
     // Window and text platforms.
     windows_rx: Receiver<Snapshot>,
     snapshot: Snapshot,
@@ -307,8 +291,8 @@ impl Scene {
             .iter()
             .map(|w| (w.id, w.rect))
             .collect();
-        let mut ps = vec![self.ground];
-        ps.extend(window_platforms(&wins, self.display.width as f32, 40.0));
+        let mut ps = self.layout.grounds();
+        ps.extend(window_platforms(&wins, &self.layout.frames(), 40.0));
         ps.extend(self.text.iter().copied());
         ps
     }
@@ -498,6 +482,70 @@ impl Scene {
         }
     }
 
+    fn set_click_through(&mut self, through: bool) {
+        for o in &mut self.overlays {
+            o.set_click_through(through);
+        }
+    }
+
+    /// A fresh figure in the middle of the menu-bar screen's floor.
+    fn respawn(&mut self) {
+        let p = self.layout.primary();
+        let ground = Platform {
+            x0: p.frame.x as f32,
+            x1: p.frame.right() as f32,
+            y: p.ground_y,
+            kind: stickman::physics::PlatformKind::Ground,
+            owner: 0,
+        };
+        let x = (p.frame.x + p.frame.width / 2.0) as f32;
+        let hold = self.agent.hold_still;
+        self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        self.agent = Agent::new(x, ground, self.settings.size.scale(), self.seed);
+        self.agent.hold_still = hold;
+        self.captive = Captive::Free;
+        self.particles.dust(v2(x, ground.y), 0.8);
+    }
+
+    /// New screen layout, if displays were plugged in, unplugged or moved.
+    fn screens_changed(&mut self) -> Option<Vec<Screen>> {
+        if self.screens_checked.elapsed() < SCREEN_CHECK {
+            return None;
+        }
+        self.screens_checked = Instant::now();
+        let now = screens::current();
+        (!now.is_empty() && now != self.layout.screens).then_some(now)
+    }
+
+    /// Switch to a new screen layout (the overlay windows are already rebuilt).
+    fn apply_layout(&mut self, layout: Layout, overlays: Vec<OverlayWindow>) {
+        log::info!(
+            "screens: now {} ({:?})",
+            layout.screens.len(),
+            layout.frames()
+        );
+        if let Ok(mut f) = self.screen_frames.lock() {
+            *f = layout.frames();
+        }
+        self.layout = layout;
+        self.overlays = overlays;
+        self.shown = None;
+        self.text.clear();
+        self.world.set_platforms(self.platforms());
+        // Still over a screen? Otherwise come back on the main one.
+        let b = self.layout.bounds();
+        let inside = self
+            .layout
+            .screens
+            .iter()
+            .any(|s| s.frame.contains(self.agent.pos - v2(0.0, 2.0)));
+        if !inside || !b.contains(self.agent.pos - v2(0.0, 2.0)) {
+            self.respawn();
+        } else {
+            self.agent.on_platforms_changed(&self.world);
+        }
+    }
+
     /// The user pulled the pointer away from the figure (or a limit was hit).
     fn check_escape(&mut self) {
         let Some(at) = self.captive.pinned_at() else {
@@ -518,7 +566,6 @@ impl Scene {
     }
 
     fn fly_cursor(&mut self, dt: f32) {
-        let size = v2(self.display.width as f32, self.display.height as f32);
         if let Captive::Flying {
             mut pos,
             mut vel,
@@ -526,11 +573,12 @@ impl Scene {
             mut t,
         } = self.captive
         {
-            if fly(&mut pos, &mut vel, &mut t, size, dt) {
+            let area = self.layout.screen_at(at).frame;
+            if fly(&mut pos, &mut vel, &mut t, area, dt) {
                 self.captive = Captive::Flying { pos, vel, at, t };
             } else {
                 self.captive = Captive::Free;
-                self.cursor.warp_to(pos, size);
+                self.cursor.warp_to(pos, area);
                 self.last_cursor = self.cursor.pos;
                 self.particles.dust(pos, 0.4);
                 self.sfx(Sfx::Thud, 0.5, pos);
@@ -541,7 +589,6 @@ impl Scene {
 
     /// Put the pointer where the figure has it: in its hands, or in flight.
     fn move_captive(&mut self) {
-        let size = v2(self.display.width as f32, self.display.height as f32);
         let target = match self.captive {
             Captive::Free => return,
             Captive::Held { .. } if !self.agent.holding_cursor => {
@@ -552,7 +599,8 @@ impl Scene {
             Captive::Held { .. } => self.agent.hands() - v2(0.0, 6.0),
             Captive::Flying { pos, .. } => pos,
         };
-        self.cursor.warp_to(target, size);
+        let area = self.layout.screen_at(target).frame;
+        self.cursor.warp_to(target, area);
         self.last_cursor = self.cursor.pos;
         match &mut self.captive {
             Captive::Held { at, .. } | Captive::Flying { at, .. } => *at = self.cursor.pos,
@@ -563,7 +611,8 @@ impl Scene {
     /// Play a sound effect panned to where it happens.
     fn sfx(&mut self, sfx: Sfx, gain: f32, at: V2) {
         if self.settings.sound {
-            let pan = (at.x / self.display.width as f32) * 2.0 - 1.0;
+            let b = self.layout.bounds();
+            let pan = ((at.x - b.x as f32) / b.width as f32) * 2.0 - 1.0;
             self.sound.play(sfx, gain, pan * 0.8);
         }
     }
@@ -609,14 +658,14 @@ impl Scene {
     }
 
     fn handle_word_events(&mut self, events: &[WordEvent], freed: &[u32]) {
-        let size = v2(self.display.width as f32, self.display.height as f32);
+        let area = self.layout.screen_at(self.cursor.pos).frame;
         for e in events {
             match *e {
                 WordEvent::HitCursor { at, dir } => {
                     self.particles.sparks(at, dir, 22);
                     self.sfx(Sfx::Punch, 0.7, at);
                     if self.settings.cursor_push {
-                        self.cursor.push(dir * CURSOR_PUSH, size);
+                        self.cursor.push(dir * CURSOR_PUSH, area);
                     }
                     log::info!("event: a thrown word hit the cursor");
                 }
@@ -632,7 +681,7 @@ impl Scene {
     }
 
     fn handle(&mut self, events: &[Event]) {
-        let size = v2(self.display.width as f32, self.display.height as f32);
+        let area = self.layout.screen_at(self.cursor.pos).frame;
         for e in events {
             match *e {
                 Event::Knockback { at, dir } => {
@@ -649,7 +698,7 @@ impl Scene {
                     let kick = matches!(self.agent.action, stickman::agent::Action::Kick { .. });
                     self.sfx(if kick { Sfx::Kick } else { Sfx::Punch }, 0.8, at);
                     if self.settings.cursor_push {
-                        self.cursor.push(dir * CURSOR_PUSH, size);
+                        self.cursor.push(dir * CURSOR_PUSH, area);
                     }
                     log::info!("event: struck cursor");
                     self.quip(Moment::StruckCursor);
@@ -685,16 +734,21 @@ impl Scene {
                 }
                 Event::Grabbed { id } => match self.words.grabbed(id) {
                     Some(need) => {
-                        let global = Rect {
-                            x: need.rect.x + self.display.x,
-                            y: need.rect.y + self.display.y,
-                            ..need.rect
-                        };
+                        // Capture what's just below the overlay of the word's screen.
+                        let c = v2(
+                            (need.rect.x + need.rect.width / 2.0) as f32,
+                            (need.rect.y + need.rect.height / 2.0) as f32,
+                        );
+                        let below = self
+                            .overlays
+                            .get(self.layout.index_at(c))
+                            .or(self.overlays.first())
+                            .map_or(0, |o| o.state().window_number as u32);
                         let job = ocr::GrabRequest {
                             id,
                             window: need.window,
-                            below: self.overlay.state().window_number as u32,
-                            global,
+                            below,
+                            global: need.rect,
                         };
                         if let Some(tx) = &self.ocr_tx {
                             let _ = tx.send(ocr::Job::Grab(job));
@@ -751,12 +805,7 @@ impl Scene {
             match cmd {
                 Command::Quit => return false,
                 Command::Respawn => {
-                    let x = (self.display.width / 2.0) as f32;
-                    let hold = self.agent.hold_still;
-                    self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    self.agent = Agent::new(x, self.ground, self.settings.size.scale(), self.seed);
-                    self.agent.hold_still = hold;
-                    self.particles.dust(v2(x, self.ground.y), 0.8);
+                    self.respawn();
                 }
                 Command::OpenAccessibilitySettings => {
                     macos::open_url("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility");
@@ -839,7 +888,7 @@ impl Scene {
         if !self.settings.visible || self.settings.paused {
             // Frozen or hidden: no simulation, never intercept clicks, and draw
             // nothing (or keep the last frame when paused).
-            self.overlay.set_click_through(true);
+            self.set_click_through(true);
             self.busy = false;
             if !self.settings.visible {
                 self.speech.clear();
@@ -889,6 +938,7 @@ impl Scene {
             && self.settings.walk_on_text
             && matches!(self.mode, Mode::Combat | Mode::Sabotage);
         while self.accumulator >= FIXED_DT {
+            let range = self.layout.walk_range(self.agent.pos, EDGE_MARGIN);
             let ammo = if wants_ammo && !self.agent.holding {
                 let active = self.snapshot.active().map(|w| w.id);
                 self.words
@@ -910,8 +960,9 @@ impl Scene {
                 clicked: std::mem::take(&mut self.pending_click),
                 mode: self.mode,
                 active_window: self.snapshot.active().map(|w| (w.id, w.rect)),
-                min_x: EDGE_MARGIN,
-                max_x: self.display.width as f32 - EDGE_MARGIN,
+                min_x: range.min_x,
+                max_x: range.max_x,
+                top: range.top,
                 ammo,
                 can_grab_cursor: self.settings.cursor_push,
             };
@@ -923,8 +974,8 @@ impl Scene {
                 FIXED_DT,
                 self.cursor.pos,
                 &self.world,
-                EDGE_MARGIN,
-                self.display.width as f32 - EDGE_MARGIN,
+                self.layout.bounds().x as f32 + EDGE_MARGIN,
+                self.layout.bounds().right() as f32 - EDGE_MARGIN,
             );
             word_events.extend(we);
             freed.extend(fr);
@@ -942,13 +993,13 @@ impl Scene {
         let over = self.agent.hit_test(self.cursor.pos);
         let catch = self.intent.update(over, cursor_moved, Instant::now());
         let through = !(catch || self.force_catch_clicks);
-        if through != self.overlay.click_through() {
+        if through != self.overlays.first().is_some_and(|o| o.click_through()) {
             log::debug!(
                 "click-through {through} (cursor {:?}, over {over})",
                 self.cursor.pos
             );
         }
-        self.overlay.set_click_through(through);
+        self.set_click_through(through);
 
         self.ticks += 1;
         if self.stats_at.elapsed() >= Duration::from_secs(5) {
@@ -1009,11 +1060,17 @@ impl Scene {
         self.particles.draw(&mut self.draw);
         self.health_bar();
         let head_r = 22.0 * self.agent.scale;
+        let head = self.agent.head();
+        let screen = self.layout.screen_at(head).frame;
         self.speech.draw(
             &mut self.draw,
-            self.agent.head(),
+            head,
             head_r,
-            (8.0, self.display.width as f32 - 8.0, 40.0),
+            (
+                screen.x as f32 + 8.0,
+                screen.right() as f32 - 8.0,
+                screen.y as f32 + 40.0,
+            ),
         );
         if !self.renderer.render(&self.draw) {
             // Not on screen (occluded/timeout): don't record it, or a still figure
@@ -1056,16 +1113,20 @@ impl Scene {
 
 struct App {
     scene: Option<Scene>,
-    display: Rect,
     click_through: bool,
     runtime: tokio::runtime::Runtime,
 }
 
 impl App {
-    fn create_overlay(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+    /// One transparent overlay window covering `frame` (global CG points).
+    fn overlay_window(
+        &self,
+        event_loop: &ActiveEventLoop,
+        frame: Rect,
+        primary_height: f64,
+    ) -> Result<(Arc<Window>, OverlayWindow)> {
         use winit::platform::macos::WindowAttributesExtMacOS;
 
-        let d = self.display;
         let attributes = WindowAttributes::default()
             .with_title("Stickman")
             .with_transparent(true)
@@ -1073,19 +1134,17 @@ impl App {
             .with_resizable(false)
             .with_active(false) // never steal focus from the user's app
             .with_window_level(WindowLevel::AlwaysOnTop)
-            .with_position(LogicalPosition::new(d.x, d.y))
-            .with_inner_size(LogicalSize::new(d.width, d.height))
+            .with_position(LogicalPosition::new(frame.x, frame.y))
+            .with_inner_size(LogicalSize::new(frame.width, frame.height))
             .with_has_shadow(false);
         let window: Arc<Window> = Arc::new(
             event_loop
                 .create_window(attributes)
                 .context("failed to create overlay window")?,
         );
-
         // AppKit-level overlay configuration (click-through, Spaces, level, frame).
-        let primary_height = main_display_rect().height;
         let mut overlay = OverlayWindow::new(window.clone())?;
-        overlay.configure(cg_to_cocoa(d, primary_height), self.click_through);
+        overlay.configure(cg_to_cocoa(frame, primary_height), self.click_through);
         let state = overlay.state();
         if state.ignores_mouse_events != self.click_through
             || state.collection_behavior & OVERLAY_COLLECTION_BEHAVIOR
@@ -1094,9 +1153,84 @@ impl App {
         {
             log::warn!("AppKit did not apply every overlay property: {state:?}");
         }
+        Ok((window, overlay))
+    }
 
-        let renderer = Renderer::new(window.clone())?;
-        let ground_y = ground_line(d, macos::primary_visible_frame(), primary_height);
+    /// Overlay windows for every screen in `layout` (the first must succeed).
+    fn overlay_windows(
+        &self,
+        event_loop: &ActiveEventLoop,
+        layout: &Layout,
+    ) -> Result<Vec<(Arc<Window>, OverlayWindow, V2)>> {
+        let primary_height = layout.primary().frame.height;
+        let mut out = Vec::new();
+        for (i, s) in layout.screens.iter().enumerate() {
+            let origin = v2(s.frame.x as f32, s.frame.y as f32);
+            match self.overlay_window(event_loop, s.frame, primary_height) {
+                Ok((w, o)) => out.push((w, o, origin)),
+                Err(e) if i > 0 => log::warn!("screen {i}: {e:#}"),
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(out)
+    }
+
+    /// Displays changed: rebuild the overlay windows.
+    fn rebuild_overlays(&mut self, event_loop: &ActiveEventLoop, screens: Vec<Screen>) {
+        let layout = Layout::new(screens);
+        let built = match self.overlay_windows(event_loop, &layout) {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!("screens changed but the overlays could not be rebuilt: {e:#}");
+                return;
+            }
+        };
+        let Some(scene) = self.scene.as_mut() else {
+            return;
+        };
+        let targets = built.iter().map(|(w, _, o)| (w.clone(), *o)).collect();
+        scene.renderer.set_targets(targets);
+        let overlays = built.into_iter().map(|(_, o, _)| o).collect();
+        scene.apply_layout(layout, overlays);
+    }
+
+    fn create_overlay(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+        let mut screen_list = screens::current();
+        if screen_list.is_empty() {
+            // No NSScreen info (shouldn't happen): fall back to the main display.
+            let b = core_graphics::display::CGDisplay::main().bounds();
+            let frame = Rect {
+                x: b.origin.x,
+                y: b.origin.y,
+                width: b.size.width,
+                height: b.size.height,
+            };
+            screen_list.push(Screen {
+                frame,
+                ground_y: screens::ground_line(frame, None),
+            });
+        }
+        let layout = Layout::new(screen_list);
+        let built = self.overlay_windows(event_loop, &layout)?;
+        let state = built[0].1.state();
+        let mut renderer = Renderer::new(built[0].0.clone(), built[0].2)?;
+        for (w, _, origin) in &built[1..] {
+            if let Err(e) = renderer.add_target(w.clone(), *origin) {
+                log::warn!("renderer: skipping a screen: {e:#}");
+            }
+        }
+        let scale_factor = built[0].0.scale_factor();
+        for (i, (_, o, origin)) in built.iter().enumerate().skip(1) {
+            log::info!(
+                "overlay on screen {i}: window_number={} origin={},{}",
+                o.state().window_number,
+                origin.x,
+                origin.y
+            );
+        }
+        let overlays: Vec<OverlayWindow> = built.into_iter().map(|(_, o, _)| o).collect();
+        let d = layout.primary().frame;
+        let ground_y = layout.primary().ground_y;
         let ground = Platform::ground(d.width as f32, ground_y);
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1135,7 +1269,16 @@ impl App {
             Sound::silent()
         };
         settings.paused = false;
-        let mut agent = Agent::new((d.width / 2.0) as f32, ground, settings.size.scale(), seed);
+        let mut agent = Agent::new(
+            (d.x + d.width / 2.0) as f32,
+            Platform {
+                x0: d.x as f32,
+                x1: d.right() as f32,
+                ..ground
+            },
+            settings.size.scale(),
+            seed,
+        );
         agent.hold_still = env_flag("STICKMAN_HOLD_IDLE");
 
         // Permissions: Accessibility (window shakes) and Screen Recording (OCR).
@@ -1159,7 +1302,13 @@ impl App {
         // Background workers.
         let own_pid = i64::from(std::process::id());
         let (win_tx, windows_rx) = mpsc::channel();
-        windows::spawn_poller(own_pid, d, Duration::from_millis(250), win_tx);
+        let screen_frames = Arc::new(Mutex::new(layout.frames()));
+        windows::spawn_poller(
+            own_pid,
+            screen_frames.clone(),
+            Duration::from_millis(250),
+            win_tx,
+        );
         let (ocr_req_tx, ocr_req_rx) = mpsc::channel();
         let (ocr_res_tx, ocr_rx) = mpsc::channel();
         let ocr_tx = if ocr_allowed {
@@ -1198,7 +1347,7 @@ impl App {
             state.level,
             state.collection_behavior,
             state.ignores_mouse_events,
-            window.scale_factor(),
+            scale_factor,
             ground_y,
             settings.size.scale(),
             mode.as_str(),
@@ -1207,16 +1356,17 @@ impl App {
         );
 
         let now = Instant::now();
-        let origin = v2(d.x as f32, d.y as f32);
         self.scene = Some(Scene {
-            overlay,
+            overlays,
             renderer,
             world: World::new(),
             agent,
             particles: Particles::new(seed ^ 0xA5A5),
-            cursor: Cursor::new(origin),
-            display: d,
-            ground,
+            // World coordinates are global: no origin offset.
+            cursor: Cursor::new(V2::ZERO),
+            layout,
+            screen_frames,
+            screens_checked: now,
             windows_rx,
             snapshot: Snapshot::default(),
             ocr_tx,
@@ -1281,13 +1431,13 @@ impl ApplicationHandler for App {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         let Some(scene) = self.scene.as_mut() else {
             return;
         };
         match event {
             WindowEvent::CloseRequested | WindowEvent::Destroyed => event_loop.exit(),
-            WindowEvent::Resized(size) => scene.renderer.resize(size.width, size.height),
+            WindowEvent::Resized(size) => scene.renderer.resize(id, size.width, size.height),
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
@@ -1317,6 +1467,12 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(scene) = self.scene.as_mut() else {
+            return;
+        };
+        if let Some(screens) = scene.screens_changed() {
+            self.rebuild_overlays(event_loop, screens);
+        }
         let Some(scene) = self.scene.as_mut() else {
             return;
         };
@@ -1372,7 +1528,6 @@ fn main() -> Result<()> {
 
     let mut app = App {
         scene: None,
-        display: main_display_rect(),
         click_through,
         runtime,
     };
@@ -1384,42 +1539,6 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use stickman::physics::PlatformKind;
-
-    #[test]
-    fn ground_sits_on_top_of_bottom_dock() {
-        let d = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 1800.0,
-            height: 1169.0,
-        };
-        // Dock 80 pt tall at the bottom, menu bar 37 pt at the top (AppKit coords).
-        let visible = Rect {
-            x: 0.0,
-            y: 80.0,
-            width: 1800.0,
-            height: 1169.0 - 80.0 - 37.0,
-        };
-        assert_eq!(ground_line(d, Some(visible), 1169.0), 1089.0);
-    }
-
-    #[test]
-    fn ground_falls_back_to_screen_bottom() {
-        let d = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 1800.0,
-            height: 1169.0,
-        };
-        let visible = Rect {
-            x: 70.0,
-            y: 0.0,
-            width: 1730.0,
-            height: 1132.0,
-        };
-        assert_eq!(ground_line(d, Some(visible), 1169.0), 1169.0);
-        assert_eq!(ground_line(d, None, 1169.0), 1169.0);
-    }
 
     #[test]
     fn clicks_are_caught_only_when_aiming() {
@@ -1452,7 +1571,12 @@ mod tests {
 
     #[test]
     fn thrown_cursor_arcs_and_lands_on_screen() {
-        let size = v2(1800.0, 1169.0);
+        let size = Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 1800.0,
+            height: 1169.0,
+        };
         let (mut pos, mut vel, mut t) = (v2(900.0, 900.0), v2(900.0, -1100.0), 0.0);
         let mut peak = pos.y;
         let mut steps = 0;
@@ -1499,6 +1623,7 @@ mod tests {
             active_window: None,
             min_x: 30.0,
             max_x: 1770.0,
+            top: 0.0,
             ammo: None,
             can_grab_cursor: false,
         };

@@ -9,7 +9,7 @@ use core_graphics::event::CGEvent;
 use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
 use core_graphics::geometry::CGPoint;
 
-use crate::geom::{v2, V2};
+use crate::geom::{v2, Rect, V2};
 
 /// Global cursor position in CoreGraphics coordinates (points, top-left origin).
 pub fn global_cursor() -> Option<V2> {
@@ -105,13 +105,15 @@ impl Cursor {
 
     /// Shove the pointer by `by` points (clamped to the display). The user's
     /// physical mouse is unaffected afterwards: the pointer just jumps.
-    pub fn push(&mut self, by: V2, display_size: V2) {
-        self.warp_to(self.pos + by, display_size);
+    pub fn push(&mut self, by: V2, area: Rect) {
+        self.warp_to(self.pos + by, area);
     }
 
-    /// Move the pointer to `target` (overlay points, clamped to the display).
-    pub fn warp_to(&mut self, target: V2, display_size: V2) {
-        let target = target.clamp(V2::splat(2.0), display_size - V2::splat(2.0));
+    /// Move the pointer to `target`, kept inside `area` (a screen frame).
+    pub fn warp_to(&mut self, target: V2, area: Rect) {
+        let lo = v2(area.x as f32 + 2.0, area.y as f32 + 2.0);
+        let hi = v2(area.right() as f32 - 2.0, area.bottom() as f32 - 2.0);
+        let target = target.clamp(lo, hi.max(lo));
         let global = target + self.origin;
         if CGDisplay::warp_mouse_cursor_position(CGPoint::new(
             f64::from(global.x),
