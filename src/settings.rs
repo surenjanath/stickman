@@ -313,6 +313,9 @@ pub enum Command {
     ToggleBleep,
     SetColor(FigureColor),
     OpenSettings,
+    /// Enter or leave draw mode (sketch platforms with the mouse).
+    ToggleDrawMode,
+    ClearDrawings,
     ToggleVisible,
     TogglePaused,
     Respawn,
@@ -349,6 +352,8 @@ impl Command {
             Command::ToggleJailIntro => 316,
             Command::ToggleBleep => 317,
             Command::OpenSettings => 401,
+            Command::ToggleDrawMode => 402,
+            Command::ClearDrawings => 403,
             Command::SetLanguage(l) => {
                 700 + Language::ALL.iter().position(|x| *x == l).unwrap_or(0) as isize
             }
@@ -387,6 +392,8 @@ impl Command {
             316 => Command::ToggleJailIntro,
             317 => Command::ToggleBleep,
             401 => Command::OpenSettings,
+            402 => Command::ToggleDrawMode,
+            403 => Command::ClearDrawings,
             700..=702 => Command::SetLanguage(Language::ALL[(tag - 700) as usize]),
             800..=806 => Command::SetColor(FigureColor::ALL[(tag - 800) as usize]),
             600..=604 => Command::SetWordStay(WordStay::ALL[(tag - 600) as usize]),
@@ -548,6 +555,8 @@ mod tests {
             Command::ToggleJailIntro,
             Command::ToggleBleep,
             Command::OpenSettings,
+            Command::ToggleDrawMode,
+            Command::ClearDrawings,
             Command::ToggleVisible,
             Command::TogglePaused,
             Command::Respawn,

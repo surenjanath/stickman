@@ -5,6 +5,7 @@
 pub mod agent;
 pub mod director;
 pub mod doodle;
+pub mod draw;
 pub mod geom;
 pub mod input;
 pub mod jail;

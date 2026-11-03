@@ -31,6 +31,7 @@ use anyhow::{Context, Result};
 use stickman::agent::{Agent, Event, Mind, Mode, Senses, FIXED_DT};
 use stickman::director::{self, Directive, Observation};
 use stickman::doodle::Doodles;
+use stickman::draw::Sketchpad;
 use stickman::geom::{cg_to_cocoa, v2, Rect, V2};
 use stickman::input::{self as input, Cursor};
 use stickman::jail::{Cue, Jail};
@@ -108,6 +109,9 @@ fn max_joint_shift(a: &[Segment], b: &[Segment]) -> f32 {
 /// instead of hitting it.
 const DRAG_START_PT: f32 = 6.0;
 const DRAG_START_HOLD: Duration = Duration::from_millis(250);
+
+/// Draw mode turns itself off after this long without a stroke.
+const DRAW_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// After the jail break, fight the cursor this long (Auto behaviour only).
 const INTRO_COMBAT: Duration = Duration::from_secs(15);
@@ -259,6 +263,10 @@ struct Scene {
     speech: Speech,
     last_director_line: Instant,
     doodles: Doodles,
+    /// Platforms and trampolines the user drew.
+    sketch: Sketchpad,
+    /// In draw mode since / last stroke at.
+    drawing: Option<Instant>,
     /// The jail-break intro, while it plays.
     jail: Option<Jail>,
     /// After breaking out: fight the cursor until then.
@@ -337,6 +345,7 @@ impl Scene {
         let mut ps = self.layout.grounds();
         ps.extend(window_platforms(&wins, &self.layout.frames(), 40.0));
         ps.extend(self.text.iter().copied());
+        ps.extend(self.sketch.platforms());
         ps
     }
 
@@ -940,6 +949,11 @@ impl Scene {
                         self.quip(Moment::ThrewCursor);
                     }
                 }
+                Event::Boing { at } => {
+                    self.particles.dust(at, 0.3);
+                    self.sfx(Sfx::Pop, 0.6, at);
+                    self.quip(Moment::Boing);
+                }
                 Event::SuperJumped { at } => {
                     log::info!("event: super jump");
                     self.particles.shockwave(at);
@@ -1082,6 +1096,17 @@ impl Scene {
                     macos::open_url("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture");
                 }
                 Command::OpenSettings => self.open_settings(),
+                Command::ToggleDrawMode => {
+                    if self.drawing.is_some() {
+                        self.end_drawing();
+                    } else {
+                        self.start_drawing();
+                    }
+                }
+                Command::ClearDrawings => {
+                    self.sketch.clear();
+                    self.shown = None;
+                }
                 _ => {}
             }
             if self.settings.apply(cmd) {
@@ -1111,6 +1136,73 @@ impl Scene {
         true
     }
 
+    fn start_drawing(&mut self) {
+        self.drawing = Some(Instant::now());
+        self.shown = None;
+        log::info!("draw mode on");
+        let lines = self.speech.say(
+            "Draw me something! Shift = trampoline. Right-click when done.",
+            Priority::Event,
+        );
+        self.speak(lines);
+    }
+
+    fn end_drawing(&mut self) {
+        if self.sketch.stroke.is_some() {
+            self.finish_stroke();
+        }
+        self.drawing = None;
+        self.shown = None;
+        log::info!("draw mode off ({} drawings)", self.sketch.drawings.len());
+    }
+
+    /// Draw mode: follow the stroke while the button is held; time out.
+    fn track_drawing(&mut self) {
+        let Some(last) = self.drawing else { return };
+        if self.sketch.stroke.is_some() {
+            if input::left_button_down() {
+                self.sketch.extend(self.cursor.pos);
+                self.drawing = Some(Instant::now());
+            } else {
+                self.finish_stroke();
+            }
+        } else if last.elapsed() > DRAW_TIMEOUT {
+            self.end_drawing();
+        }
+    }
+
+    fn finish_stroke(&mut self) {
+        let trampoline = input::shift_down();
+        if let Some(p) = self.sketch.finish(trampoline) {
+            log::info!(
+                "drew a {} from {:.0} to {:.0} at {:.0}",
+                if trampoline { "trampoline" } else { "platform" },
+                p.x0,
+                p.x1,
+                p.y
+            );
+            self.sfx(Sfx::Pop, 0.4, v2((p.x0 + p.x1) / 2.0, p.y));
+        }
+    }
+
+    /// A blue frame around every screen while in draw mode.
+    fn draw_mode_frame(&mut self) {
+        let color = [0.2, 0.5, 1.0, 0.55];
+        for s in &self.layout.screens {
+            let f = s.frame;
+            let (x0, y0) = (f.x as f32 + 3.0, f.y as f32 + 3.0);
+            let (x1, y1) = (f.right() as f32 - 3.0, f.bottom() as f32 - 3.0);
+            for (a, b) in [
+                (v2(x0, y0), v2(x1, y0)),
+                (v2(x1, y0), v2(x1, y1)),
+                (v2(x1, y1), v2(x0, y1)),
+                (v2(x0, y1), v2(x0, y0)),
+            ] {
+                self.draw.capsule(a, b, 3.0, color);
+            }
+        }
+    }
+
     fn save_settings(&self) {
         if let Some(path) = &self.settings_path {
             if let Err(e) = self.settings.save(path) {
@@ -1133,6 +1225,24 @@ impl Scene {
         }
         self.debug_done = true;
         if let Ok(what) = std::env::var("STICKMAN_DEBUG_DO") {
+            if what.trim() == "draw" {
+                self.start_drawing();
+                return;
+            }
+            if what.trim() == "sketch" {
+                // A sample platform and trampoline beside the figure.
+                let p = self.agent.pos;
+                for (dx, dy, tramp) in [(120.0, -160.0, false), (-260.0, -40.0, true)] {
+                    self.sketch.begin(p + v2(dx, dy));
+                    for i in 1..=24 {
+                        let wobble = 5.0 * (i as f32 * 0.9).sin();
+                        self.sketch.extend(p + v2(dx + 8.0 * i as f32, dy + wobble));
+                    }
+                    self.sketch.finish(tramp);
+                }
+                self.shown = None;
+                return;
+            }
             let mut ev = Vec::new();
             if self.agent.perform(&what, &mut ev) {
                 self.handle(&ev);
@@ -1223,6 +1333,7 @@ impl Scene {
             self.last_cursor = self.cursor.pos;
         }
         self.track_press();
+        self.track_drawing();
         self.debug_do();
         self.agent.traits = stickman::agent::Traits {
             naps: self.settings.naps,
@@ -1360,7 +1471,8 @@ impl Scene {
         let catch = self.intent.update(over, cursor_moved, Instant::now());
         // Keep catching mouse events for the whole press, so the drag and the
         // release reach us.
-        let through = !(catch || self.force_catch_clicks || self.press.is_some());
+        let through =
+            !(catch || self.force_catch_clicks || self.press.is_some() || self.drawing.is_some());
         if through != self.overlays.first().is_some_and(|o| o.click_through()) {
             log::debug!(
                 "click-through {through} (cursor {:?}, over {over})",
@@ -1396,7 +1508,8 @@ impl Scene {
             || self.speech.visible()
             || self.dragging
             || self.doodles.animating()
-            || self.jail.is_some();
+            || self.jail.is_some()
+            || self.sketch.stroke.is_some();
         self.present();
         true
     }
@@ -1451,7 +1564,8 @@ impl Scene {
             || self.words.animating()
             || self.speech.visible()
             || self.doodles.animating()
-            || self.jail.is_some();
+            || self.jail.is_some()
+            || self.sketch.stroke.is_some();
         let zzz = self.zzz_frame();
         if let Some(shown) = &self.shown {
             if !effects
@@ -1467,6 +1581,10 @@ impl Scene {
         let hands = self.agent.holding.then(|| self.agent.hands());
         self.words.draw(&mut self.draw, hands);
         self.doodles.draw(&mut self.draw);
+        self.sketch.draw(&mut self.draw);
+        if self.drawing.is_some() {
+            self.draw_mode_frame();
+        }
         self.draw.figure(&segments, self.settings.color.rgb());
         if let Some(j) = &self.jail {
             j.draw(&mut self.draw); // bars in front of the figure
@@ -1838,6 +1956,8 @@ impl App {
             words: WordPlay::new(seed ^ 0x5157),
             speech: Speech::new(seed ^ 0x7A11),
             doodles: Doodles::default(),
+            sketch: Sketchpad::default(),
+            drawing: None,
             jail: None,
             intro_combat_until: None,
             zzz_sprites: Vec::new(),
@@ -1915,6 +2035,19 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested | WindowEvent::Destroyed => event_loop.exit(),
             WindowEvent::Resized(size) => scene.renderer.resize(id, size.width, size.height),
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } if scene.drawing.is_some() => scene.end_drawing(),
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } if scene.drawing.is_some() => {
+                scene.sketch.begin(scene.cursor.pos);
+                scene.drawing = Some(Instant::now());
+            }
             WindowEvent::MouseInput {
                 state: ElementState::Released,
                 button: MouseButton::Left,

@@ -418,6 +418,13 @@ impl MenuBar {
         self.director = self.add(menu, "AI: —", None, "");
         Self::separator(menu);
         self.add(menu, "Settings…", Some(Command::OpenSettings), ",");
+        self.add(
+            menu,
+            "Draw Platforms (Shift = trampoline)",
+            Some(Command::ToggleDrawMode),
+            "d",
+        );
+        self.add(menu, "Clear Drawings", Some(Command::ClearDrawings), "");
         Self::separator(menu);
 
         let behaviour = self.submenu(menu, "Behaviour");

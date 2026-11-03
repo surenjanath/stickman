@@ -17,6 +17,10 @@ pub enum PlatformKind {
     Window,
     /// Top of a line of text recognised by OCR.
     Text,
+    /// A line the user drew.
+    Drawn,
+    /// A trampoline the user drew: bouncy.
+    Trampoline,
 }
 
 /// A horizontal surface from `x0` to `x1` at height `y` (overlay points, y down).

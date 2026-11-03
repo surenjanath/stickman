@@ -49,6 +49,7 @@ pub enum Moment {
     Doodling,
     Shove,
     SuperJump,
+    Boing,
     MindCursor,
     MindWords,
 }
@@ -133,6 +134,7 @@ impl Moment {
             Moment::Doodling => &["Shut up, it's art."],
             Moment::Shove => &["Move your damn window!", "Outta my way!"],
             Moment::SuperJump => &["Hell yeah!", "Up, damn it!"],
+            Moment::Boing => &["Boing, baby!", "Hell yeah, trampoline!"],
             Moment::MindCursor => &["Get over here, you damn arrow!", "With my damn mind!"],
             Moment::MindWords => &["Eat words, jerk!", "Incoming, dammit!"],
         }
@@ -185,6 +187,7 @@ impl Moment {
             Moment::Doodling => (&["Art time.", "Hold still…", "A masterpiece!"], 0.4),
             Moment::Shove => (&["Scoot over!", "Move it!", "Wheee, window ride!"], 0.5),
             Moment::SuperJump => (&["Up, up and away!", "Super jump!", "Hup!"], 0.6),
+            Moment::Boing => (&["Boing!", "Wheee!", "Again! Again!"], 0.5),
             Moment::MindCursor => (
                 &["With my mind!", "Hmmmmm…", "You're under my control."],
                 0.8,

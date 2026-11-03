@@ -21,6 +21,14 @@ pub fn global_cursor() -> Option<V2> {
 
 extern "C" {
     fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
+    fn CGEventSourceFlagsState(state: i32) -> u64;
+}
+
+/// Whether a Shift key is held right now.
+pub fn shift_down() -> bool {
+    // SAFETY: a pure query; 0 = combined session state; 0x20000 =
+    // kCGEventFlagMaskShift.
+    unsafe { CGEventSourceFlagsState(0) & 0x2_0000 != 0 }
 }
 
 /// Whether the left mouse button is physically down right now.

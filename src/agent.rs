@@ -249,6 +249,10 @@ pub enum Event {
         from: V2,
         vel: V2,
     },
+    /// Bounced off a trampoline.
+    Boing {
+        at: V2,
+    },
     /// Telekinesis lifts words near `at` (the app picks and captures them).
     MindLiftWords {
         at: V2,
@@ -468,6 +472,8 @@ pub struct Agent {
     sit_plan: bool,
     /// Dancing to music (to announce it only once).
     grooving: bool,
+    /// Trampoline bounces in a row (it sticks the landing after a few).
+    bounces: u32,
     /// This flight is a super jump (glowing trail).
     super_air: bool,
     /// Seconds until telekinesis can be used again.
@@ -529,6 +535,7 @@ impl Agent {
             combo: 0,
             sit_plan: false,
             grooving: false,
+            bounces: 0,
             super_air: false,
             tk_cooldown: 1.5,
             tk_aim: V2::ZERO,
@@ -907,6 +914,7 @@ impl Agent {
             PlatformKind::Ground => f32::MAX,
             PlatformKind::Window => 400.0,
             PlatformKind::Text => 12.0,
+            PlatformKind::Drawn | PlatformKind::Trampoline => 1.0,
         };
         // A window edge of the same width that moved sideways carries the
         // figure along with it.
@@ -1881,6 +1889,20 @@ impl Agent {
                 }
             }
             self.pos.y = ground.y;
+            if ground.kind == PlatformKind::Trampoline && self.bounces < 3 {
+                // Stepped onto a trampoline: up it goes.
+                self.bounces += 1;
+                let vx = match self.action {
+                    Action::Walk { run, .. } => self.facing * self.walk_speed(run),
+                    _ => 0.0,
+                };
+                self.vel = v2(vx, -1250.0);
+                self.ground = None;
+                self.super_air = true;
+                self.set_action(Action::Air);
+                events.push(Event::Boing { at: self.pos });
+                return;
+            }
             if world.support(self.pos).is_none() {
                 // Walked off the edge.
                 let vx = match self.action {
@@ -1916,6 +1938,18 @@ impl Agent {
             let p = world.platforms()[i];
             next.y = p.y;
             let impact = self.vel.y;
+            if p.kind == PlatformKind::Trampoline && self.bounces < 3 {
+                // Boing: up again, higher than it came down.
+                self.bounces += 1;
+                self.vel = v2(self.vel.x * 0.9, -(impact * 1.05).clamp(1150.0, 2200.0));
+                self.pos = next - v2(0.0, 0.5);
+                self.super_air = true;
+                if self.action != Action::Tumble {
+                    self.set_action(Action::Air);
+                }
+                events.push(Event::Boing { at: next });
+                return;
+            }
             if self.action == Action::Tumble && impact > 380.0 {
                 // Bounce.
                 self.vel.y = -impact * 0.38;
@@ -1933,6 +1967,9 @@ impl Agent {
             self.ground = Some(p);
             self.air_attack = false;
             self.super_air = false;
+            if p.kind != PlatformKind::Trampoline {
+                self.bounces = 0;
+            }
             if impact > 700.0 {
                 events.push(Event::Dust {
                     at: next,
@@ -2711,6 +2748,43 @@ mod tests {
         s.music = false;
         run(&mut a, &w, &s, 8.0, &mut ev);
         assert_ne!(a.action, Action::Dance);
+    }
+
+    #[test]
+    fn trampolines_bounce_it_high_then_it_sticks_the_landing() {
+        let tramp = Platform {
+            x0: 850.0,
+            x1: 950.0,
+            y: GROUND_Y - 10.0,
+            kind: PlatformKind::Trampoline,
+            owner: 0x7000_0001,
+        };
+        let w = world(vec![tramp]);
+        let mut a = agent();
+        a.pos = v2(900.0, GROUND_Y - 300.0);
+        a.ground = None;
+        a.set_action(Action::Fall);
+        let s = senses(Mode::Idle);
+        let mut ev = vec![];
+        let mut peak = 0.0f32;
+        for _ in 0..(1.5 / FIXED_DT) as usize {
+            a.update(&s, &w, &mut ev);
+            if ev.iter().any(|e| matches!(e, Event::Boing { .. })) {
+                peak = peak.max(GROUND_Y - a.pos.y);
+            }
+        }
+        assert!(
+            ev.iter().any(|e| matches!(e, Event::Boing { .. })),
+            "no bounce"
+        );
+        assert!(peak > 300.0, "bounced only {peak} pt");
+        run(&mut a, &w, &s, 8.0, &mut ev);
+        let boings = ev
+            .iter()
+            .filter(|e| matches!(e, Event::Boing { .. }))
+            .count();
+        assert!(boings >= 3, "{boings} bounces");
+        assert!(a.ground.is_some(), "never stopped bouncing");
     }
 
     #[test]

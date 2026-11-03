@@ -792,6 +792,41 @@ fn test_drag_and_fling_the_figure() {
     );
 }
 
+/// Draw mode: a stroke becomes a platform; a right-click finishes.
+fn test_draw_a_platform() {
+    use core_graphics::event::CGEventType;
+    if !interactive() {
+        return;
+    }
+    let o = Overlay::spawn(&[("STICKMAN_DEBUG_DO", "draw"), ("STICKMAN_HOLD_IDLE", "1")]);
+    o.wait_for("draw mode on", Duration::from_secs(6))
+        .expect("draw mode never started");
+    pump_run_loop(Duration::from_millis(200));
+    let home = cursor_now();
+    let (x0, y) = (500.0, 700.0);
+    post_mouse(CGEventType::MouseMoved, x0, y);
+    pump_run_loop(Duration::from_millis(100));
+    post_mouse(CGEventType::LeftMouseDown, x0, y);
+    for i in 1..=30 {
+        let x = x0 + 10.0 * i as f64;
+        post_mouse(
+            CGEventType::LeftMouseDragged,
+            x,
+            y + 4.0 * (i as f64 * 0.7).sin(),
+        );
+        pump_run_loop(Duration::from_millis(16));
+    }
+    post_mouse(CGEventType::LeftMouseUp, x0 + 300.0, y);
+    let drew = o.wait_for("drew a platform", Duration::from_secs(2));
+    post_mouse(CGEventType::RightMouseDown, x0 + 300.0, y);
+    post_mouse(CGEventType::RightMouseUp, x0 + 300.0, y);
+    let off = o.wait_for("draw mode off", Duration::from_secs(2));
+    post_mouse(CGEventType::MouseMoved, home.x, home.y);
+    let drew = drew.expect("the stroke didn't become a platform");
+    println!("      {}", drew.split("] ").nth(1).unwrap_or(&drew));
+    off.expect("right-click didn't end draw mode");
+}
+
 /// The Settings window opens from the menu and shows on screen.
 fn test_settings_window_opens() {
     let o = Overlay::spawn(&[("STICKMAN_DEBUG_OPEN_SETTINGS", "1")]);
@@ -1001,6 +1036,7 @@ fn main() {
     );
     run("drag_and_fling_the_figure", &test_drag_and_fling_the_figure);
     run("settings_window_opens", &test_settings_window_opens);
+    run("draw_a_platform", &test_draw_a_platform);
     run("ai_director_decides", &test_ai_director_decides);
     run(
         "rips_words_and_throws_them",
