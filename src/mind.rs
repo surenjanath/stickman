@@ -470,10 +470,12 @@ impl Mind {
     }
 
     pub fn load(path: &Path) -> Mind {
-        std::fs::read_to_string(path)
+        let mut m: Mind = std::fs::read_to_string(path)
             .ok()
             .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        m.note = fit_note(&m.note);
+        m
     }
 
     pub fn save(&self, path: &Path) -> anyhow::Result<()> {

@@ -428,6 +428,8 @@ impl MenuBar {
         );
         self.add(menu, "Clear Drawings", Some(Command::ClearDrawings), "");
         self.add(menu, "Summon a Rival", Some(Command::SummonRival), "");
+        self.add(menu, "Leave Me a Note", Some(Command::WriteNote), "");
+        self.add(menu, "Wipe Its Memory", Some(Command::ResetMind), "");
         Self::separator(menu);
 
         let behaviour = self.submenu(menu, "Behaviour");

@@ -13,6 +13,7 @@ pub mod macos;
 pub mod menubar;
 pub mod mind;
 pub mod music;
+pub mod note;
 pub mod ocr;
 pub mod particles;
 pub mod physics;

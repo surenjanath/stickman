@@ -47,6 +47,18 @@ pub struct Word {
     pub chars: u16,
 }
 
+/// One recognised letter (upper-cased) and its box, normalised like [`Word`].
+/// Used only in memory, to tear letters off for notes; never logged or kept.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Letter {
+    pub ch: char,
+    pub rect: Rect,
+}
+
+/// Letter boxes kept per window: at most this many of each letter, and in all.
+const LETTERS_PER_CHAR: usize = 4;
+const MAX_LETTERS: usize = 260;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Result {
     pub id: u32,
@@ -54,6 +66,7 @@ pub struct Result {
     /// Text line boxes, normalised to the window (Vision: origin bottom-left).
     pub lines: Vec<Rect>,
     pub words: Vec<Word>,
+    pub letters: Vec<Letter>,
 }
 
 /// Capture one word for the figure to carry.
@@ -208,10 +221,11 @@ pub fn word_ranges(s: &str) -> Vec<(usize, usize, usize)> {
 }
 
 /// Text lines and words in `image` (normalised boxes).
-fn recognize(image: &CGImage) -> (Vec<Rect>, Vec<Word>) {
+fn recognize(image: &CGImage) -> (Vec<Rect>, Vec<Word>, Vec<Letter>) {
     use foreign_types::ForeignType;
     let mut out = Vec::new();
     let mut words = Vec::new();
+    let mut letters: Vec<Letter> = Vec::new();
     objc::rc::autoreleasepool(|| {
         // SAFETY: documented Vision API; every object is either autoreleased or
         // released below, and nothing escapes the pool. `image` outlives the call.
@@ -269,6 +283,30 @@ fn recognize(image: &CGImage) -> (Vec<Rect>, Vec<Word>) {
                     let text = std::ffi::CStr::from_ptr(utf8)
                         .to_string_lossy()
                         .into_owned();
+                    // Single letters (for ransom notes): a few of each.
+                    let mut pos = 0usize;
+                    for ch in text.chars() {
+                        let up = ch.to_ascii_uppercase();
+                        let enough = letters.len() >= MAX_LETTERS
+                            || letters.iter().filter(|l| l.ch == up).count() >= LETTERS_PER_CHAR;
+                        if ch.is_ascii_alphanumeric() && !enough {
+                            let mut err: *mut Object = std::ptr::null_mut();
+                            let r: *mut Object = msg_send![cand, boundingBoxForRange: NSRange { location: pos, length: 1 } error: &mut err];
+                            if !r.is_null() {
+                                let b: NSRect = msg_send![r, boundingBox];
+                                letters.push(Letter {
+                                    ch: up,
+                                    rect: Rect {
+                                        x: b.x,
+                                        y: b.y,
+                                        width: b.w,
+                                        height: b.h,
+                                    },
+                                });
+                            }
+                        }
+                        pos += ch.len_utf16();
+                    }
                     for (loc, len, chars) in word_ranges(&text) {
                         let mut err: *mut Object = std::ptr::null_mut();
                         let r: *mut Object = msg_send![cand, boundingBoxForRange: NSRange { location: loc, length: len } error: &mut err];
@@ -292,7 +330,27 @@ fn recognize(image: &CGImage) -> (Vec<Rect>, Vec<Word>) {
             let _: () = msg_send![request, release];
         }
     });
-    (out, words)
+    (out, words, letters)
+}
+
+/// Letters of a window in global points (letters too small, too big or in
+/// the title bar left out).
+pub fn letters_in(window: Rect, letters: &[Letter]) -> Vec<(char, Rect)> {
+    letters
+        .iter()
+        .filter_map(|l| {
+            let r = Rect {
+                x: window.x + l.rect.x * window.width,
+                y: window.y + (1.0 - l.rect.y - l.rect.height) * window.height,
+                width: l.rect.width * window.width,
+                height: l.rect.height * window.height,
+            };
+            let ok = (7.0..=60.0).contains(&r.height)
+                && (3.0..=60.0).contains(&r.width)
+                && r.y > window.y + 28.0;
+            ok.then_some((l.ch, r))
+        })
+        .collect()
 }
 
 /// Words of a window in overlay points: (box, characters). `words` are Vision
@@ -512,7 +570,8 @@ pub fn text_platforms(id: u32, window: Rect, lines: &[Rect]) -> Vec<Platform> {
 /// Capture and read window `id` right now (diagnostics): lines, words.
 pub fn read_window_now(id: u32) -> Option<(Vec<Rect>, Vec<Word>)> {
     let image = capture(id)?;
-    Some(recognize(&image))
+    let (lines, words, _) = recognize(&image);
+    Some((lines, words))
 }
 
 /// Capture + recognise on a worker thread. Read requests that pile up are
@@ -540,7 +599,7 @@ pub fn spawn_worker(rx: Receiver<Job>, tx: Sender<Output>) -> JoinHandle<()> {
                     log::debug!("ocr: capture of window {} failed", req.id);
                     continue;
                 };
-                let (lines, words) = recognize(&image);
+                let (lines, words, letters) = recognize(&image);
                 drop(image); // release the pixels before anything else (claude.md rule 4)
                 if tx
                     .send(Output::Text(Result {
@@ -548,6 +607,7 @@ pub fn spawn_worker(rx: Receiver<Job>, tx: Sender<Output>) -> JoinHandle<()> {
                         rect: req.rect,
                         lines,
                         words,
+                        letters,
                     }))
                     .is_err()
                 {
@@ -721,8 +781,17 @@ mod tests {
             return;
         }
         let img = render_text_image(&["The quick brown fox jumps", "over the lazy dog 12345"]);
-        let (lines, words) = recognize(&img);
+        let (lines, words, letters) = recognize(&img);
         assert!(lines.len() >= 2, "Vision found {} lines", lines.len());
+        // Letters for ransom notes, with their boxes.
+        assert!(
+            letters.iter().any(|l| l.ch == 'Q'),
+            "no Q among {} letters",
+            letters.len()
+        );
+        assert!(letters.iter().filter(|l| l.ch == 'O').count() <= LETTERS_PER_CHAR);
+        let q = letters.iter().find(|l| l.ch == 'Q').unwrap();
+        assert!(q.rect.width > 0.0 && q.rect.width < 0.2, "{:?}", q.rect);
         assert!(words.len() >= 8, "Vision found {} words", words.len());
         assert!(
             words.iter().any(|w| w.chars == 5),

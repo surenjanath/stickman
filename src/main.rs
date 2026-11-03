@@ -41,6 +41,7 @@ use stickman::macos::{
 };
 use stickman::menubar::{MenuBar, Status};
 use stickman::mind::{Kind as Memory, Mind as Psyche};
+use stickman::note::{self as notes, Note};
 use stickman::ocr;
 use stickman::particles::Particles;
 use stickman::physics::{window_platforms, Platform, World};
@@ -126,6 +127,8 @@ const INTRO_COMBAT: Duration = Duration::from_secs(15);
 
 /// Capture id for the weapon (words and icons count up from 1).
 const WEAPON_ID: u64 = u64::MAX - 1;
+/// Capture ids for a note's torn-off letters: this plus the tile index.
+const NOTE_ID: u64 = u64::MAX - 1000;
 /// A sword is drawn this long, at most / at least (points).
 const SWORD_MAX: f32 = 110.0;
 const SWORD_MIN: f32 = 60.0;
@@ -358,6 +361,11 @@ struct Scene {
     dock_polled: Instant,
     flight: Option<WindowFlight>,
     sword: Option<Sword>,
+    /// Letters in the active window (for notes), the note being spelled, and
+    /// when the next one is due.
+    screen_letters: Vec<(char, Rect)>,
+    note: Option<Note>,
+    next_note: Instant,
     /// Where the scrollbar being fetched is (waiting for its pixels).
     sword_pending: Option<Rect>,
     /// Don't look for a weapon again before this (no scrollbar there).
@@ -422,6 +430,7 @@ impl Scene {
         if changed && active != self.ocr_target {
             // The active window moved or changed: its old text lines are stale.
             self.text.clear();
+            self.screen_letters.clear();
         }
         // OCR results for the window that is still active, unmoved; and word grabs.
         while let Ok(out) = self.ocr_rx.try_recv() {
@@ -433,6 +442,7 @@ impl Scene {
                             rect: r.rect,
                         })
                     {
+                        self.screen_letters = ocr::letters_in(r.rect, &r.letters);
                         let mut lines = ocr::text_platforms(r.id, r.rect, &r.lines);
                         lines.truncate(120);
                         log::debug!(
@@ -453,6 +463,7 @@ impl Scene {
                     }
                 }
                 ocr::Output::Grabbed(g) if g.id == WEAPON_ID => self.sword_captured(g),
+                ocr::Output::Grabbed(g) if g.id >= NOTE_ID => self.letter_captured(g),
                 ocr::Output::Grabbed(g) => self.word_captured(g),
             }
         }
@@ -979,6 +990,154 @@ impl Scene {
                 self.dock_polled = Instant::now();
                 let _ = self.ax_tx.send(macos::AxQuery::DockIcons { dock_pid: pid });
             }
+        }
+    }
+
+    /// Spell out `text` with letters torn off the screen (and cut-outs).
+    fn write_note(&mut self, text: &str) {
+        if self.note.is_some() || !self.settings.notes || !self.settings.visible {
+            return;
+        }
+        let text = if self.settings.bleep {
+            stickman::speech::bleep(text)
+        } else {
+            text.to_string()
+        };
+        let head = self.agent.head();
+        let screen = self.layout.screen_at(head).frame;
+        let top = v2(head.x, (head.y - 230.0).max(screen.y as f32 + 60.0));
+        self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(11);
+        let mut note = Note::plan(
+            &text,
+            &self.screen_letters,
+            top,
+            screen.x as f32 + 20.0,
+            screen.right() as f32 - 20.0,
+            self.agent.hands(),
+            self.seed,
+        );
+        let mut torn = 0;
+        for i in 0..note.tiles.len() {
+            let tile = note.tiles[i];
+            match tile.source {
+                Some(r) => {
+                    // A scrap of the page around the letter.
+                    let scrap = Rect {
+                        x: r.x - 2.0,
+                        y: r.y - 2.0,
+                        width: r.width + 4.0,
+                        height: r.height + 4.0,
+                    };
+                    self.request_raw(NOTE_ID + i as u64, scrap);
+                    torn += 1;
+                }
+                None => note.tiles[i].sprite = self.cutout_letter(tile.ch),
+            }
+        }
+        log::info!(
+            "note: \"{text}\" ({torn} letters torn off the screen, {} cut out)",
+            note.tiles.len() - torn
+        );
+        let mut ev = Vec::new();
+        self.agent.perform("compose", &mut ev);
+        self.sfx(Sfx::Pop, 0.5, head);
+        self.note = Some(note);
+        self.shown = None;
+    }
+
+    /// A cut-out letter in a random colour (when it isn't on screen).
+    fn cutout_letter(&mut self, ch: char) -> Option<(u32, V2)> {
+        let inks = [
+            [0.8, 0.1, 0.1],
+            [0.1, 0.2, 0.7],
+            [0.1, 0.1, 0.1],
+            [0.5, 0.1, 0.6],
+            [0.0, 0.45, 0.2],
+        ];
+        let ink = inks[(self.seed >> 33) as usize % inks.len()];
+        self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(3);
+        let scale = self.renderer.scale_factor();
+        let size = 22.0 + ((self.seed >> 40) % 8) as f64;
+        let img = stickman::text::render_lines(&[ch.to_string()], size, ink, scale)?;
+        let id = self
+            .renderer
+            .create_sprite(&img.rgba, img.width, img.height)?;
+        Some((id, v2(img.size_pt.0 / 2.0, img.size_pt.1 / 2.0)))
+    }
+
+    /// A torn-off letter's pixels arrived.
+    fn letter_captured(&mut self, g: ocr::GrabResult) {
+        let i = (g.id - NOTE_ID) as usize;
+        let Some(tile) = self.note.as_ref().and_then(|n| n.tiles.get(i)).copied() else {
+            return;
+        };
+        let sprite = match (g.cutout, tile.source) {
+            (Some(c), Some(r)) => self
+                .renderer
+                .create_sprite(&c.rgba, c.width, c.height)
+                .map(|id| (id, notes::torn_half(r))),
+            _ => None,
+        };
+        let sprite = sprite.or_else(|| self.cutout_letter(tile.ch));
+        if let Some(n) = &mut self.note {
+            n.tiles[i].sprite = sprite;
+        }
+        self.shown = None;
+    }
+
+    /// Capture a region as is (for torn-off letters).
+    fn request_raw(&mut self, id: u64, rect: Rect) {
+        let c = v2(
+            (rect.x + rect.width / 2.0) as f32,
+            (rect.y + rect.height / 2.0) as f32,
+        );
+        let below = self
+            .overlays
+            .get(self.layout.index_at(c))
+            .or(self.overlays.first())
+            .map_or(0, |o| o.state().window_number as u32);
+        if let Some(tx) = &self.ocr_tx {
+            let _ = tx.send(ocr::Job::Grab(ocr::GrabRequest {
+                id,
+                window: 0,
+                below,
+                global: rect,
+                cut: ocr::Cut::Plain,
+            }));
+        }
+    }
+
+    /// Advance the note; now and then, write a new one.
+    fn update_note(&mut self, dt: f32) {
+        if let Some(n) = &mut self.note {
+            let floor = self
+                .layout
+                .screen_at(n.tiles.first().map_or(V2::ZERO, |t| t.target))
+                .ground_y;
+            n.update(dt, floor);
+            if n.done() {
+                for id in n.sprites() {
+                    self.renderer.free_sprite(id);
+                }
+                self.note = None;
+                self.shown = None;
+            }
+        }
+    }
+
+    fn maybe_write_note(&mut self) {
+        if self.note.is_some() || Instant::now() < self.next_note || !self.settings.notes {
+            return;
+        }
+        let wait = 180.0 + 180.0 * ((self.seed >> 41) % 1000) as f32 / 1000.0;
+        self.next_note = Instant::now() + Duration::from_secs_f32(wait);
+        let around = self.last_mouse_move.elapsed() < Duration::from_secs(60);
+        let free = self.agent.action.is_still()
+            || matches!(self.agent.action, stickman::agent::Action::Walk { .. });
+        if around && free && self.rival.is_none() && self.jail.is_none() {
+            let roll = ((self.seed >> 29) % 1000) as f32 / 1000.0;
+            let text = self.mind.note_for(self.mode, roll);
+            self.write_note(&text);
         }
     }
 
@@ -1614,6 +1773,11 @@ impl Scene {
                 }
                 Command::OpenSettings => self.open_settings(),
                 Command::SummonRival => self.summon_rival(),
+                Command::WriteNote => {
+                    let roll = ((self.seed >> 29) % 1000) as f32 / 1000.0;
+                    let text = self.mind.note_for(self.mode, roll);
+                    self.write_note(&text);
+                }
                 Command::ToggleDrawMode => {
                     if self.drawing.is_some() {
                         self.end_drawing();
@@ -1755,6 +1919,11 @@ impl Scene {
                 self.mind.beliefs
             );
             self.save_mind();
+            // A fresh note to deliver, sometimes right away.
+            if !self.mind.note.is_empty() && (self.seed >> 35) % 5 < 2 {
+                let text = self.mind.note.clone();
+                self.write_note(&text);
+            }
             // Now and then, it tells you its plan.
             if self.rival.is_none() && (self.seed >> 37) % 3 == 0 && !self.mind.scheme.is_empty() {
                 let line = self.mind.scheme.clone();
@@ -1853,6 +2022,10 @@ impl Scene {
         }
         self.debug_done = true;
         if let Ok(what) = std::env::var("STICKMAN_DEBUG_DO") {
+            if what.trim() == "note" {
+                self.write_note("I REMEMBER YOU");
+                return;
+            }
             if what.trim() == "reflect" {
                 // A few memories to reflect on, then reflect now.
                 for _ in 0..6 {
@@ -1923,6 +2096,25 @@ impl Scene {
         self.menubar.sync(&self.settings, &status);
         if let Some(w) = &mut self.settings_window {
             w.sync(&self.settings);
+            let m = &self.mind;
+            let f = &m.feelings;
+            let or_dash = |s: String| if s.is_empty() { "—".to_string() } else { s };
+            w.set_mind([
+                format!(
+                    "Mostly {} · resentment {:.0} · fear {:.0} · affection {:.0} · pride {:.0} · {} memories, {} reflection{}",
+                    f.mood(),
+                    f.resentment,
+                    f.fear,
+                    f.affection,
+                    f.pride,
+                    m.memories.len(),
+                    m.reflections,
+                    if m.reflections == 1 { "" } else { "s" }
+                ),
+                or_dash(m.beliefs.join(" · ")),
+                or_dash(m.scheme.clone()),
+                or_dash(m.note.clone()),
+            ]);
         }
         if !self.menubar_logged && self.stats_at.elapsed() > Duration::from_secs(1) {
             // Report once the menu bar has laid the icon out.
@@ -1940,6 +2132,12 @@ impl Scene {
             }
             if env_flag("STICKMAN_DEBUG_OPEN_SETTINGS") {
                 self.open_settings();
+                // A tab name opens that tab ("Mind", "Abilities", …).
+                if let Ok(tab) = std::env::var("STICKMAN_DEBUG_OPEN_SETTINGS") {
+                    if let Some(w) = &self.settings_window {
+                        w.select_tab(tab.trim());
+                    }
+                }
             }
             if let Ok(line) = std::env::var("STICKMAN_DEBUG_SAY") {
                 let lines = self.speech.say(&line, Priority::Event);
@@ -2001,6 +2199,7 @@ impl Scene {
             + self.mind.aggression_bias())
         .clamp(0.0, 1.0);
         self.think();
+        self.maybe_write_note();
         self.agent.traits.aggression = a;
         self.agent.traits.max_health = self.stats.max_health();
         self.agent.traits.speed = self.stats.speed();
@@ -2166,6 +2365,7 @@ impl Scene {
             }
             self.particles.update(FIXED_DT);
             self.speech.update(FIXED_DT);
+            self.update_note(FIXED_DT);
             self.fly_window(FIXED_DT);
             if let Some(j) = &mut self.jail {
                 jail_cues.extend(j.update(FIXED_DT));
@@ -2254,7 +2454,8 @@ impl Scene {
             || self.sketch.stroke.is_some()
             || self.rival.is_some()
             || self.flight.is_some()
-            || self.sword.is_some();
+            || self.sword.is_some()
+            || self.note.as_ref().is_some_and(|n| n.animating());
         self.present();
         true
     }
@@ -2316,7 +2517,8 @@ impl Scene {
             || self.sketch.stroke.is_some()
             || self.rival.is_some()
             || self.flight.is_some()
-            || self.sword.is_some();
+            || self.sword.is_some()
+            || self.note.as_ref().is_some_and(|n| n.animating());
         let zzz = self.zzz_frame();
         if let Some(shown) = &self.shown {
             if !effects
@@ -2360,6 +2562,9 @@ impl Scene {
             j.draw(&mut self.draw); // bars in front of the figure
         }
         self.draw_sword();
+        if let Some(n) = &self.note {
+            n.draw(&mut self.draw);
+        }
         if let Some((hand, pen)) = self.agent.pen_stroke() {
             // The marker in its hand.
             self.draw.capsule(hand, pen, 2.4, [1.0, 1.0, 1.0, 0.85]);
@@ -2844,6 +3049,9 @@ impl App {
             dock_polled: now - Duration::from_secs(10),
             flight: None,
             sword: None,
+            screen_letters: Vec::new(),
+            note: None,
+            next_note: now + Duration::from_secs(120),
             sword_pending: None,
             sword_retry: now,
             force_catch_clicks: !self.click_through,

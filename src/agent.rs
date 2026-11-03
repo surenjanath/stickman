@@ -389,6 +389,8 @@ pub enum Action {
     ThrowWeapon {
         target: V2,
     },
+    /// Spelling out a note with letters (hands raised, concentrating).
+    Compose,
 }
 
 /// Hits a weapon lasts before the figure throws it.
@@ -422,6 +424,7 @@ impl Action {
             Action::Shove { .. } => 0.6,
             Action::Charge { .. } => 0.55,
             Action::RipWeapon => 0.6,
+            Action::Compose => 2.2,
             Action::Slash { .. } => 0.45,
             Action::ThrowWeapon { .. } => 0.55,
             Action::Telekinesis { on: Mind::Cursor } => 1.5,
@@ -663,6 +666,11 @@ impl Agent {
             "sleep" => self.set_action(Action::Sleep),
             "dance" => self.set_action(Action::Dance),
             "cheer" => self.set_action(Action::Cheer),
+            "compose" => {
+                if self.ground.is_some() && self.action.interruptible() {
+                    self.set_action(Action::Compose);
+                }
+            }
             "superjump" => self.super_jump_to(self.pos - v2(0.0, 600.0)),
             "mindwords" => self.set_action(Action::Telekinesis { on: Mind::Words }),
             "doodle" => {
@@ -793,6 +801,7 @@ impl Agent {
             Action::Charge { .. } => poses::charge(t),
             Action::Rattle => poses::rattle(t),
             Action::RipWeapon => poses::grab(k(self.action)),
+            Action::Compose => poses::telekinesis(t, -0.5),
             Action::Slash { aim } => poses::slash(k(self.action), aim),
             Action::ThrowWeapon { target } => {
                 poses::throw(k(self.action), self.aim_at(target, -1.2, 1.2))

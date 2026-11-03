@@ -28,6 +28,10 @@ Written in Rust for Apple Silicon:
 | **Word throwing** | In combat the figure jumps onto lines of text in your active window (any app, web pages included), rips a whole word right off the screen and lobs it at your cursor. The word flies as the real pixels, spinning, knocks the pointer and falls to the Dock. Where it was taken from, the page looks blank: the overlay paints the exact on-screen background colour over it. Nothing in the real app changes, and the gap heals when the window scrolls, moves or loses focus, or after 45 s. In sabotage mode it steals words and flings them away. |
 | **Jail-break intro** | It starts locked in a steel cell: rattles the bars ("Let me out!"), grumbles, kicks the door off in an explosion of flying bars, then comes for your cursor. Click it while it's locked up to blast the cell open early. Plays again on Respawn. |
 | **Super powers** | **Super jump:** a glowing power-up crouch, then a leap of up to ~1000 pt with a trail and a shockwave, to reach a cursor up high, a far-off window or a word. **Telekinesis:** hand out, purple aura: it lifts your pointer, wobbles it in the air and flings it; or raises a group of up to 6 words off the page, keeps them orbiting overhead, then fires them at your cursor one after another. |
+| **A mind of its own** | It remembers what you do to it (and in which app), and it develops feelings toward you: resentment, fear, affection, pride. Every couple of minutes it reflects on its memories with the local AI and rewrites its own beliefs ("The user hits me most in Safari"), a scheme ("Operation Pointer Doom: …") and the next note it wants to leave you. All of that feeds back into how it decides what to do: a small, local take on self-improving agent harnesses like Google's Harness². Kept in `mind.json`; see it, or wipe it, in Settings → Mind. |
+| **Ransom notes** | It spells messages to you with letters torn off your screen, each one cut out with a scrap of its page; letters that aren't on screen become coloured cut-outs. The message depends on its mood, its mode and its last reflection ("I REMEMBER YOU", "PLEASE STOP", "FIGHT ME"). |
+| **Throwing windows** | With telekinesis it can lift your active window, wobble it in the air and hurl it at your cursor (or fling it aside); it bounces off the screen edges and slides to a stop, always kept on screen. |
+| **Dock icons and swords** | Standing on the Dock it rips app icons up from under its feet and throws them (copies; your Dock is untouched). In combat it rips a scrollbar off your window and fights with it as a sword, then hurls it. |
 | **Rival duels** | Every 6–12 minutes (or via **Summon a Rival**), a red ninja stick figure drops in on the far side: "You! Me! Now!" The two fight each other with the full combat moveset (punches, kicks, leaps, super jumps); no healing mid-duel. Click either one to join in. Knock the rival out for a big experience bonus; then it limps off screen ("I'll be back!"). |
 | **Levels & grudges** | Experience from fights levels it up (Doodle → Scrapper → Brawler → Champion → Legend) for more health and a quicker step. Hitting it builds a grudge that fades slowly, makes it fiercer, and is remembered between launches ("Remember me? I remember YOU."). |
 | **Draw for it** | **Draw Platforms** (⌘D): sketch lines with the mouse to make platforms; hold Shift for a trampoline that bounces it high. Right-click to finish. |
@@ -53,7 +57,8 @@ Written in Rust for Apple Silicon:
 | Tab | What's there |
 |---|---|
 | Personality | Name, Temper and Chattiness sliders, Language, Bleep swear words, Behaviour, Colour, Size. |
-| Abilities | Cursor pushes and grabs, window shakes and shoves, walking on text, ripping words, how long thrown words stay (5 s … Forever), super powers, jail-break intro, rival visits. |
+| Abilities | Cursor pushes and grabs, window shakes and shoves, walking on text, ripping words, Dock icons, scrollbar swords, how long thrown words stay (5 s … Forever), super powers, window throwing, jail-break intro, rival visits. |
+| Mind | What it feels, believes and schemes and its next note (live), self-reflection and notes on/off, Leave Me a Note, Wipe Its Memory. |
 | Hobbies & Sound | Naps, dancing, dancing to music, doodles, sitting on edges, speech bubbles, sound effects. |
 
 The menu bar keeps quick toggles for the same options; both stay in sync and
@@ -127,8 +132,8 @@ launching terminal.
 | `STICKMAN_CLICK_THROUGH=0` | Debug: the overlay catches every click (blocks the screen). |
 | `STICKMAN_DEBUG_OPEN_MENU=1` | Debug: pop the menu bar menu open once at startup. |
 | `STICKMAN_DEBUG_SAY="…"` | Debug: say this line at startup. |
-| `STICKMAN_DEBUG_DO=sleep\|dance\|cheer\|doodle\|superjump\|mindwords\|rival\|draw\|sketch` | Debug: do that 3 s after launch. |
-| `STICKMAN_DEBUG_OPEN_SETTINGS=1` | Debug: open the Settings window at launch. |
+| `STICKMAN_DEBUG_DO=sleep\|dance\|cheer\|doodle\|superjump\|mindwords\|rival\|draw\|sketch\|note\|reflect` | Debug: do that 3 s after launch. |
+| `STICKMAN_DEBUG_OPEN_SETTINGS=1` | Debug: open the Settings window at launch (or `=Mind`, `=Abilities`, … for that tab). |
 | `STICKMAN_DEBUG_GRAB=1` | Debug: in combat, always grab a slow cursor in reach (instead of 30% of the time). |
 | `RUST_LOG=debug` | Verbose logs: director decisions, OCR, perf stats, click-through toggles. |
 
@@ -145,7 +150,7 @@ cargo run --release --example pose_sheet -- docs/poses.png   # re-render the pos
 cargo run --release --example sfx_demo     # hear every sound effect
 ```
 
-**Unit tests (160).**
+**Unit tests (180).**
 - **Collision:** one-way landings, no tunnelling, window-edge occlusion clipping.
 - **Walking and running:** feet never slide; feet always on the ground.
 - **Poses:** IK accuracy and knee direction; hands and arms never cross the head.
@@ -162,6 +167,15 @@ cargo run --release --example sfx_demo     # hear every sound effect
   chattiness shaping quips, temperament in the director's prompt and fallback,
   settings-window controls reaching the app, thrown words staying "forever"
   but falling when their window goes, at most 40 lying around.
+- **Mind and notes:** abuse building resentment then fear and petting softening
+  it, memories capped but totals kept, feelings fading, model reflections tidied
+  (even with raw line breaks) and applied, offline reflections, notes cut at word
+  boundaries; ransom notes tearing each on-screen letter once and cutting out the
+  rest, wrapping, flying in, hanging and dropping; Vision letter boxes.
+- **Windows, icons, swords:** thrown windows stay on screen and an aimed throw
+  passes the cursor; Dock icons underfoot as ammo with no hole; slashing along the
+  blade, wearing a sword out and throwing it, dropping it when hit; narrow
+  platforms never crash it.
 - **Rivals, levels, drawing, music:** a full duel between two figures ends in
   a knockout and the rival leaves; levels from experience, grudges growing and
   fading, saved and loaded; faster walking at higher levels without foot
@@ -239,6 +253,9 @@ main thread (winit / AppKit)                         background
 | `src/director.rs` | Ollama client, prompt, structured output, fallback director. |
 | `src/macos.rs` | AppKit and Accessibility wrappers (overlay setup, focus, window shake, opening URLs). |
 | `src/words.rs` | Word throwing: ammo choice, "holes", flying words. |
+| `src/mind.rs` | Memories, feelings, beliefs and schemes; reflection prompts and parsing (`mind.json`). |
+| `src/note.rs` | Ransom notes: letters torn off the screen, layout and animation. |
+| `src/winfly.rs` | A window thrown by telekinesis: lift, flight, bounces, kept on screen. |
 | `src/rival.rs` | The rival and the duel (each figure fights the other as its "cursor"). |
 | `src/stats.rs` | Experience, levels and grudges, saved to `stats.json`. |
 | `src/draw.rs` | Draw mode: strokes into platforms and trampolines. |
@@ -273,8 +290,10 @@ Engineering rules (from `claude.md`):
 - **Vision instead of Tesseract (PRD 4):**
   - **Install:** Vision ships with macOS, so nothing to install.
   - **Speed:** it runs on the Neural Engine.
-  - **Privacy:** only text-line and word boxes are used. The recognised text is
-    used in memory to find word boundaries and is never logged, stored or sent.
+  - **Privacy:** only text-line, word and letter boxes are used. The recognised
+    text is used in memory to find word boundaries and to tear off letters for
+    notes; it is never logged, stored or sent. The mind remembers app names
+    (to know where you're meanest), and only the local Ollama model sees them.
 - **Custom character controller over rapier queries:** platforms are rapier
   colliders. The figure moves with its own fixed-step integrator using rapier ray
   casts, which gives precise one-way platforms and planted feet.

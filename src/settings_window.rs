@@ -75,6 +75,10 @@ pub struct SettingsWindow {
     popups: Vec<Popup>,
     sliders: Vec<(isize, *mut Object)>,
     name: *mut Object,
+    /// Mind tab labels: feelings, beliefs, scheme, note.
+    mind_labels: Vec<*mut Object>,
+    mind_shown: Vec<String>,
+    tabs: *mut Object,
     shown: Option<Settings>,
     centered: bool,
 }
@@ -88,6 +92,9 @@ impl SettingsWindow {
             popups: Vec::new(),
             sliders: Vec::new(),
             name: std::ptr::null_mut(),
+            mind_labels: Vec::new(),
+            mind_shown: Vec::new(),
+            tabs: std::ptr::null_mut(),
             shown: None,
             centered: false,
         };
@@ -113,10 +120,12 @@ impl SettingsWindow {
             let personality = w.personality_tab();
             let abilities = w.abilities_tab();
             let hobbies = w.hobbies_tab();
+            let mind = w.mind_tab();
             for (label, view) in [
                 ("Personality", personality),
                 ("Abilities", abilities),
                 ("Hobbies & Sound", hobbies),
+                ("Mind", mind),
             ] {
                 let item: *mut Object = msg_send![class!(NSTabViewItem), alloc];
                 let item: *mut Object = msg_send![item, initWithIdentifier: ns_string(label)];
@@ -126,6 +135,7 @@ impl SettingsWindow {
                 let _: () = msg_send![item, release];
             }
             let _: () = msg_send![window, setContentView: tabs];
+            w.tabs = tabs;
             let _: () = msg_send![tabs, release];
         }
         w
@@ -366,6 +376,69 @@ impl SettingsWindow {
         ])
     }
 
+    /// A multi-line label that wraps at `width`.
+    unsafe fn wrapping(text: &str, width: f64) -> *mut Object {
+        let l: *mut Object =
+            msg_send![class!(NSTextField), wrappingLabelWithString: ns_string(text)];
+        let _: () = msg_send![l, setPreferredMaxLayoutWidth: width];
+        let _: () = msg_send![l, setMaximumNumberOfLines: 0isize];
+        let _: () = msg_send![l, setLineBreakMode: 0isize]; // word wrap
+        let cell: *mut Object = msg_send![l, cell];
+        let _: () = msg_send![cell, setWraps: YES];
+        Self::width(l, width);
+        l
+    }
+
+    unsafe fn button(title: &str, cmd: Command) -> *mut Object {
+        let b: *mut Object = msg_send![class!(NSButton),
+            buttonWithTitle: ns_string(title) target: action_target() action: sel!(menuAction:)];
+        let _: () = msg_send![b, setTag: cmd.tag()];
+        b
+    }
+
+    unsafe fn mind_tab(&mut self) -> *mut Object {
+        let labels: Vec<*mut Object> = (0..4).map(|_| Self::wrapping("—", 330.0)).collect();
+        self.mind_labels = labels.clone();
+        let reflect = self.check(
+            "Reflects on its memories (local AI)",
+            Command::ToggleReflection,
+        );
+        let notes = self.check(
+            "Spells notes with letters from the screen",
+            Command::ToggleNotes,
+        );
+        let note_now = Self::button("Leave Me a Note", Command::WriteNote);
+        let wipe = Self::button("Wipe Its Memory", Command::ResetMind);
+        Self::grid(vec![
+            ("Feels:", labels[0]),
+            ("Believes:", labels[1]),
+            ("Scheme:", labels[2]),
+            ("Next note:", labels[3]),
+            ("", reflect),
+            ("", notes),
+            ("", note_now),
+            ("", wipe),
+            (
+                "",
+                Self::hint("Forgets every memory, feeling, belief and scheme."),
+            ),
+        ])
+    }
+
+    /// Show the mind's state (feelings, beliefs, scheme, note).
+    pub fn set_mind(&mut self, lines: [String; 4]) {
+        if self.mind_shown.as_slice() == lines.as_slice() || !self.is_visible() {
+            return;
+        }
+        // SAFETY: main thread; labels live as long as the window.
+        unsafe {
+            for (l, text) in self.mind_labels.iter().zip(&lines) {
+                let _: () = msg_send![*l, setStringValue: ns_string(text)];
+            }
+        }
+        self.mind_shown = lines.to_vec();
+    }
+
     // --- State ----------------------------------------------------------------
 
     /// Bring the window up, showing the current settings.
@@ -385,6 +458,14 @@ impl SettingsWindow {
             let _: () = msg_send![app, activateIgnoringOtherApps: YES];
             let _: () =
                 msg_send![self.window, makeKeyAndOrderFront: std::ptr::null_mut::<Object>()];
+        }
+    }
+
+    /// Switch to the tab labelled `label` (e.g. "Mind").
+    pub fn select_tab(&self, label: &str) {
+        // SAFETY: main thread; the tab view lives as long as the window.
+        unsafe {
+            let _: () = msg_send![self.tabs, selectTabViewItemWithIdentifier: ns_string(label)];
         }
     }
 
