@@ -47,6 +47,9 @@ pub struct Observation {
     /// Its rank, e.g. "level 4 Brawler".
     #[serde(skip)]
     pub rank: String,
+    /// Its memories, feelings, beliefs and scheme, in words.
+    #[serde(skip)]
+    pub mind: String,
 }
 
 impl Default for Observation {
@@ -67,6 +70,7 @@ impl Default for Observation {
             language: Language::Cheeky,
             grudge: 0,
             rank: String::new(),
+            mind: String::new(),
         }
     }
 }
@@ -166,7 +170,17 @@ pub fn persona(obs: &Observation) -> String {
     } else {
         format!(" It is a {}.", obs.rank)
     };
-    format!("The figure is called {name}. Its temperament is {temper}.{rank}{grudge} {talk}\n")
+    let mind = if obs.mind.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nIts mind (speak as it would, act on its scheme): {}",
+            obs.mind
+        )
+    };
+    format!(
+        "The figure is called {name}. Its temperament is {temper}.{rank}{grudge} {talk}{mind}\n"
+    )
 }
 
 pub fn situation(obs: &Observation) -> String {
@@ -348,6 +362,59 @@ pub async fn ask(client: &reqwest::Client, cfg: &Config, obs: &Observation) -> R
         .text()
         .await?;
     parse_response(&body)
+}
+
+/// Run reflections on `rt`: each prompt that arrives on `rx` is sent to the
+/// model; the parsed reflection (or `None` if the model failed) goes to `tx`.
+pub fn spawn_reflector(
+    rt: &tokio::runtime::Runtime,
+    cfg: Config,
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<String>,
+    tx: Sender<Option<crate::mind::Reflection>>,
+) {
+    rt.spawn(async move {
+        let Ok(client) = reqwest::Client::builder().build() else {
+            return;
+        };
+        while let Some(prompt) = rx.recv().await {
+            let body = json!({
+                "model": cfg.model,
+                "prompt": prompt,
+                "stream": false,
+                "think": false,
+                "keep_alive": "15m",
+                "format": {
+                    "type": "object",
+                    "properties": {
+                        "beliefs": {"type": "array", "items": {"type": "string"}},
+                        "scheme": {"type": "string"},
+                        "note": {"type": "string"}
+                    },
+                    "required": ["beliefs", "scheme", "note"]
+                },
+                "options": {"temperature": 0.9, "num_predict": 200}
+            });
+            let answer = async {
+                let text = client
+                    .post(format!("{}/api/generate", cfg.url.trim_end_matches('/')))
+                    .timeout(cfg.timeout)
+                    .json(&body)
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .text()
+                    .await?;
+                crate::mind::parse_reflection(&text)
+            }
+            .await;
+            if let Err(e) = &answer {
+                log::debug!("mind: reflection failed: {e:#}");
+            }
+            if tx.send(answer.ok()).is_err() {
+                return;
+            }
+        }
+    });
 }
 
 /// Run the director loop on `rt`. Reads the latest observation from `obs`, sends

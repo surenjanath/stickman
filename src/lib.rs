@@ -11,6 +11,7 @@ pub mod input;
 pub mod jail;
 pub mod macos;
 pub mod menubar;
+pub mod mind;
 pub mod music;
 pub mod ocr;
 pub mod particles;

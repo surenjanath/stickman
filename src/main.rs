@@ -40,6 +40,7 @@ use stickman::macos::{
     self, OsAction, OverlayWindow, OVERLAY_COLLECTION_BEHAVIOR, OVERLAY_WINDOW_LEVEL,
 };
 use stickman::menubar::{MenuBar, Status};
+use stickman::mind::{Kind as Memory, Mind as Psyche};
 use stickman::ocr;
 use stickman::particles::Particles;
 use stickman::physics::{window_platforms, Platform, World};
@@ -140,6 +141,9 @@ struct Sword {
     /// Flying from the window into the hand: (from, seconds).
     summon: Option<(V2, f32)>,
 }
+
+/// Reflect on its memories this often (sooner after many new ones).
+const REFLECT_EVERY: Duration = Duration::from_secs(150);
 
 /// Telekinesis lifts words within this distance of the figure, at most this many.
 const TK_RADIUS: f32 = 650.0;
@@ -326,6 +330,16 @@ struct Scene {
     /// Experience, level and grudge (kept between launches).
     stats: Stats,
     stats_saved: Instant,
+    /// Memories, feelings, beliefs and scheme (kept between launches).
+    mind: Psyche,
+    reflect_tx: tokio::sync::mpsc::UnboundedSender<String>,
+    reflect_rx: Receiver<Option<stickman::mind::Reflection>>,
+    last_reflection: Instant,
+    reflecting: bool,
+    mind_saved: Instant,
+    /// Memories at the last reflection (reflect sooner after a lot happens).
+    memories_at_reflection: usize,
+    ignored_noted: bool,
     menubar: MenuBar,
     menubar_logged: bool,
     /// Built the first time it's opened.
@@ -578,6 +592,7 @@ impl Scene {
             language: self.settings.language,
             grudge: self.stats.grudge.round() as u8,
             rank: format!("level {} {}", self.stats.level(), self.stats.title()),
+            mind: self.mind.summary(),
         });
     }
 
@@ -734,6 +749,7 @@ impl Scene {
                 rival::Cue::Won => {
                     log::info!("rival: defeated");
                     self.stats.duels_won += 1;
+                    self.remember(Memory::WonDuel);
                     self.earn(Feat::WonDuel);
                     self.rival_say("Ugh… I'll be back!");
                     let lines = self.speech.say("Victory!", Priority::Event);
@@ -742,6 +758,7 @@ impl Scene {
                 rival::Cue::Lost => {
                     log::info!("rival: won the duel");
                     self.stats.duels_lost += 1;
+                    self.remember(Memory::LostDuel);
                     self.rival_say("Too easy!");
                 }
                 rival::Cue::Draw => {
@@ -1123,6 +1140,7 @@ impl Scene {
             self.agent.holding_cursor = false;
             if was_held && yanked {
                 log::info!("event: the cursor escaped");
+                self.remember(Memory::CursorEscaped);
                 self.quip(Moment::CursorEscaped);
             }
         }
@@ -1270,6 +1288,7 @@ impl Scene {
                 Event::Knockback { at, dir } => {
                     self.particles.explosion(at, -dir);
                     self.stats.hurt(false);
+                    self.remember(Memory::Hit);
                     self.sfx(Sfx::Boom, 0.9, at);
                     self.hits.push_back(Instant::now());
                     log::info!("event: knockback (health {:.0})", self.agent.health);
@@ -1285,6 +1304,7 @@ impl Scene {
                         self.cursor.push(dir * CURSOR_PUSH, area);
                     }
                     log::info!("event: struck cursor");
+                    self.remember(Memory::StruckCursor);
                     self.earn(Feat::HitCursor);
                     self.quip(Moment::StruckCursor);
                 }
@@ -1349,6 +1369,7 @@ impl Scene {
                             t: 0.0,
                         };
                         log::info!("event: threw the cursor");
+                        self.remember(Memory::ThrewCursor);
                         self.earn(Feat::ThrewCursor);
                         self.sfx(Sfx::Whoosh, 0.6, from);
                         self.quip(Moment::ThrewCursor);
@@ -1419,6 +1440,7 @@ impl Scene {
                             t: 0.0,
                         };
                         log::info!("event: flung the cursor with telekinesis");
+                        self.remember(Memory::ThrewCursor);
                         self.earn(Feat::ThrewCursor);
                         self.sfx(Sfx::Whoosh, 0.7, at);
                     }
@@ -1488,6 +1510,7 @@ impl Scene {
                 }
                 Event::Petted { at } => {
                     log::info!("event: petted");
+                    self.remember(Memory::Petted);
                     self.earn(Feat::Petted);
                     self.particles.hearts(at - v2(0.0, 20.0));
                     self.sfx(Sfx::Pop, 0.35, at);
@@ -1537,11 +1560,13 @@ impl Scene {
                     }
                     if speed > 600.0 {
                         self.quip(Moment::Flung);
+                        self.remember(Memory::Flung);
                     }
                 }
                 Event::KnockedOut { .. } => {
                     self.particles.stars(self.agent.head());
                     log::info!("event: knocked out");
+                    self.remember(Memory::KnockedOut);
                     self.stats.knockouts += 1;
                     self.quip(Moment::KnockedOut);
                     self.sfx(Sfx::Ko, 0.6, self.agent.head());
@@ -1555,8 +1580,18 @@ impl Scene {
         for cmd in self.menubar.drain_commands() {
             log::info!("menu: {cmd:?}");
             match cmd {
+                Command::ResetMind => {
+                    self.mind = Psyche::default();
+                    self.save_mind();
+                    log::info!("mind wiped");
+                    let lines = self
+                        .speech
+                        .say("Huh? Who am I? Where am I?", Priority::Event);
+                    self.speak(lines);
+                }
                 Command::Quit => {
                     self.save_stats();
+                    self.save_mind();
                     return false;
                 }
                 Command::ResetStats => {
@@ -1686,6 +1721,86 @@ impl Scene {
         }
     }
 
+    /// The mind: remember the user's app with each memory.
+    fn remember(&mut self, what: Memory) {
+        let app = self
+            .snapshot
+            .active()
+            .map(|w| w.owner.clone())
+            .unwrap_or_default();
+        self.mind.record(what, &app);
+    }
+
+    /// Feelings fade, reflections come and go, the mind gets saved.
+    fn think(&mut self) {
+        let dt = self.last_tick.elapsed().as_secs_f32().min(0.1);
+        self.mind.fade(dt);
+        // Left alone for five minutes: noted (once per absence).
+        let idle = self.last_mouse_move.elapsed();
+        if idle > Duration::from_secs(300) && !self.ignored_noted {
+            self.ignored_noted = true;
+            self.remember(Memory::Ignored);
+        } else if idle < Duration::from_secs(5) {
+            self.ignored_noted = false;
+        }
+        while let Ok(r) = self.reflect_rx.try_recv() {
+            self.reflecting = false;
+            let r = r.unwrap_or_else(|| self.mind.reflect_offline());
+            self.mind.apply(r);
+            log::info!(
+                "mind: reflection #{} — scheme \"{}\", note \"{}\", beliefs {:?}",
+                self.mind.reflections,
+                self.mind.scheme,
+                self.mind.note,
+                self.mind.beliefs
+            );
+            self.save_mind();
+            // Now and then, it tells you its plan.
+            if self.rival.is_none() && (self.seed >> 37) % 3 == 0 && !self.mind.scheme.is_empty() {
+                let line = self.mind.scheme.clone();
+                let lines = self.speech.say(&line, Priority::Director);
+                self.speak(lines);
+            }
+        }
+        if !self.settings.self_reflection || self.reflecting || !self.settings.visible {
+            return;
+        }
+        let new = self
+            .mind
+            .memories
+            .len()
+            .abs_diff(self.memories_at_reflection);
+        let since = self.last_reflection.elapsed();
+        if since > REFLECT_EVERY || (new >= 8 && since > Duration::from_secs(45)) {
+            self.last_reflection = Instant::now();
+            self.memories_at_reflection = self.mind.memories.len();
+            if self.director_online == Some(false) {
+                // No model: reflect with simple rules.
+                let r = self.mind.reflect_offline();
+                self.mind.apply(r);
+                self.save_mind();
+            } else {
+                let prompt = self.mind.reflection_prompt(
+                    &self.settings.name,
+                    self.settings.language == stickman::settings::Language::Salty,
+                );
+                self.reflecting = self.reflect_tx.send(prompt).is_ok();
+            }
+        }
+        if self.mind_saved.elapsed() > Duration::from_secs(60) {
+            self.save_mind();
+        }
+    }
+
+    fn save_mind(&mut self) {
+        self.mind_saved = Instant::now();
+        if let Some(path) = &self.settings_path {
+            if let Err(e) = self.mind.save(&Psyche::path_next_to(path)) {
+                log::warn!("mind: could not save: {e:#}");
+            }
+        }
+    }
+
     fn save_stats(&mut self) {
         self.stats_saved = Instant::now();
         if let Some(path) = &self.settings_path {
@@ -1738,6 +1853,15 @@ impl Scene {
         }
         self.debug_done = true;
         if let Ok(what) = std::env::var("STICKMAN_DEBUG_DO") {
+            if what.trim() == "reflect" {
+                // A few memories to reflect on, then reflect now.
+                for _ in 0..6 {
+                    self.remember(Memory::Hit);
+                }
+                self.remember(Memory::Petted);
+                self.last_reflection = Instant::now() - REFLECT_EVERY * 2;
+                return;
+            }
             if what.trim() == "rival" {
                 self.summon_rival();
                 return;
@@ -1871,9 +1995,12 @@ impl Scene {
             max_health: self.stats.max_health(),
             speed: self.stats.speed(),
         };
-        // A grudge makes it fiercer.
-        let a = (f32::from(self.settings.aggression) / 100.0 + self.stats.grudge / 100.0 * 0.35)
-            .min(1.0);
+        // A grudge makes it fiercer; so does resentment (fear calms it).
+        let a = (f32::from(self.settings.aggression) / 100.0
+            + self.stats.grudge / 100.0 * 0.35
+            + self.mind.aggression_bias())
+        .clamp(0.0, 1.0);
+        self.think();
         self.agent.traits.aggression = a;
         self.agent.traits.max_health = self.stats.max_health();
         self.agent.traits.speed = self.stats.speed();
@@ -2531,6 +2658,16 @@ impl App {
             .as_deref()
             .map(|p| Stats::load(&Stats::path_next_to(p)))
             .unwrap_or_default();
+        let mind = settings_path
+            .as_deref()
+            .map(|p| Psyche::load(&Psyche::path_next_to(p)))
+            .unwrap_or_default();
+        log::info!(
+            "mind: {} memories, mostly {}, {} reflections",
+            mind.memories.len(),
+            mind.feelings.mood(),
+            mind.reflections
+        );
         log::info!(
             "stats: level {} {} ({} xp), grudge {:.0}",
             stats.level(),
@@ -2591,6 +2728,14 @@ impl App {
             None
         };
         let (dir_tx, directive_rx) = mpsc::channel();
+        let (reflect_tx, reflect_req_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (reflect_out_tx, reflect_rx) = mpsc::channel();
+        director::spawn_reflector(
+            &self.runtime,
+            director::Config::from_env(),
+            reflect_req_rx,
+            reflect_out_tx,
+        );
         let (obs_tx, obs_rx) = watch::channel(Observation::default());
         let forced_mode = settings.behaviour.forced_mode();
         let director_cfg = director::Config::from_env();
@@ -2677,6 +2822,14 @@ impl App {
             settings_path,
             stats,
             stats_saved: now,
+            mind,
+            reflect_tx,
+            reflect_rx,
+            last_reflection: now,
+            reflecting: false,
+            mind_saved: now,
+            memories_at_reflection: 0,
+            ignored_noted: false,
             menubar,
             menubar_logged: false,
             settings_window: None,

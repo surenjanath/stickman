@@ -261,6 +261,10 @@ pub struct Settings {
     pub pelt_icons: bool,
     /// Rip a scrollbar off the active window and fight with it.
     pub weapons: bool,
+    /// Reflect on its memories with the local model (rewrites its beliefs).
+    pub self_reflection: bool,
+    /// Spell out messages with letters torn from the screen.
+    pub notes: bool,
     pub visible: bool,
     pub paused: bool,
 }
@@ -295,6 +299,8 @@ impl Default for Settings {
             throw_windows: true,
             pelt_icons: true,
             weapons: true,
+            self_reflection: true,
+            notes: true,
             visible: true,
             paused: false,
         }
@@ -335,6 +341,12 @@ pub enum Command {
     ToggleThrowWindows,
     TogglePeltIcons,
     ToggleWeapons,
+    ToggleReflection,
+    ToggleNotes,
+    /// Forget everything it remembers and feels.
+    ResetMind,
+    /// Spell out a message now.
+    WriteNote,
     ToggleVisible,
     TogglePaused,
     Respawn,
@@ -379,6 +391,10 @@ impl Command {
             Command::ToggleThrowWindows => 320,
             Command::TogglePeltIcons => 321,
             Command::ToggleWeapons => 322,
+            Command::ToggleReflection => 323,
+            Command::ToggleNotes => 324,
+            Command::ResetMind => 406,
+            Command::WriteNote => 407,
             Command::SetLanguage(l) => {
                 700 + Language::ALL.iter().position(|x| *x == l).unwrap_or(0) as isize
             }
@@ -425,6 +441,10 @@ impl Command {
             320 => Command::ToggleThrowWindows,
             321 => Command::TogglePeltIcons,
             322 => Command::ToggleWeapons,
+            323 => Command::ToggleReflection,
+            324 => Command::ToggleNotes,
+            406 => Command::ResetMind,
+            407 => Command::WriteNote,
             700..=702 => Command::SetLanguage(Language::ALL[(tag - 700) as usize]),
             800..=806 => Command::SetColor(FigureColor::ALL[(tag - 800) as usize]),
             600..=604 => Command::SetWordStay(WordStay::ALL[(tag - 600) as usize]),
@@ -464,6 +484,8 @@ impl Settings {
             Command::ToggleThrowWindows => self.throw_windows = !self.throw_windows,
             Command::TogglePeltIcons => self.pelt_icons = !self.pelt_icons,
             Command::ToggleWeapons => self.weapons = !self.weapons,
+            Command::ToggleReflection => self.self_reflection = !self.self_reflection,
+            Command::ToggleNotes => self.notes = !self.notes,
             Command::SetLanguage(l) => self.language = l,
             Command::ToggleBleep => self.bleep = !self.bleep,
             Command::SetColor(c) => self.color = c,
@@ -501,6 +523,8 @@ impl Settings {
             Command::ToggleThrowWindows => self.throw_windows,
             Command::TogglePeltIcons => self.pelt_icons,
             Command::ToggleWeapons => self.weapons,
+            Command::ToggleReflection => self.self_reflection,
+            Command::ToggleNotes => self.notes,
             Command::ToggleBleep => self.bleep,
             Command::ToggleVisible => self.visible,
             Command::TogglePaused => self.paused,
@@ -602,6 +626,10 @@ mod tests {
             Command::ToggleThrowWindows,
             Command::TogglePeltIcons,
             Command::ToggleWeapons,
+            Command::ToggleReflection,
+            Command::ToggleNotes,
+            Command::ResetMind,
+            Command::WriteNote,
             Command::ToggleVisible,
             Command::TogglePaused,
             Command::Respawn,
