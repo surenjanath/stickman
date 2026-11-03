@@ -60,6 +60,7 @@ impl Rival {
             doodles: false,
             sitting: false,
             powers: true,
+            telekinesis: false,
             aggression: 0.85,
             max_health: 100.0,
             speed: 1.1,

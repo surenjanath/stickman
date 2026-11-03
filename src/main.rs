@@ -52,7 +52,7 @@ use stickman::settings::{Behaviour, Command, Settings};
 use stickman::settings_window::SettingsWindow;
 use stickman::sound::{Sfx, Sound};
 use stickman::speech::{Moment, Priority, Speech};
-use stickman::stats::{Feat, Stats};
+use stickman::stats::{Deed, Feat, Stats};
 use stickman::stickman::{Segment, BONES};
 use stickman::windows::{self, Snapshot};
 use stickman::winfly::{Stage, WindowFlight};
@@ -1075,6 +1075,7 @@ impl Scene {
                 None => note.tiles[i].sprite = self.cutout_letter(tile.ch),
             }
         }
+        self.stats.add(Deed::Note);
         log::info!(
             "note: \"{text}\" ({torn} letters torn off the screen, {} cut out)",
             note.tiles.len() - torn
@@ -1450,9 +1451,11 @@ impl Scene {
         {
             if icon {
                 log::info!("event: ripped an icon off the Dock");
+                self.deed(Deed::IconThrown);
                 self.quip(Moment::GrabbedIcon);
             } else {
                 log::info!("event: ripped a word off the screen");
+                self.deed(Deed::WordThrown);
                 self.quip(Moment::GrabbedWord);
             }
             self.shown = None;
@@ -1513,6 +1516,7 @@ impl Scene {
                         self.cursor.push(dir * CURSOR_PUSH, area);
                     }
                     log::info!("event: struck cursor");
+                    self.deed(Deed::CursorHit);
                     self.remember(Memory::StruckCursor);
                     self.earn(Feat::HitCursor);
                     self.quip(Moment::StruckCursor);
@@ -1578,6 +1582,7 @@ impl Scene {
                             t: 0.0,
                         };
                         log::info!("event: threw the cursor");
+                        self.deed(Deed::CursorThrown);
                         self.remember(Memory::ThrewCursor);
                         self.earn(Feat::ThrewCursor);
                         self.sfx(Sfx::Whoosh, 0.6, from);
@@ -1606,6 +1611,7 @@ impl Scene {
                         self.last_cursor = self.cursor.pos;
                     }
                     log::info!("event: sword hit the cursor");
+                    self.deed(Deed::SwordHit);
                     self.earn(Feat::HitCursor);
                     self.quip(Moment::Slash);
                 }
@@ -1649,6 +1655,7 @@ impl Scene {
                             t: 0.0,
                         };
                         log::info!("event: flung the cursor with telekinesis");
+                        self.deed(Deed::CursorThrown);
                         self.remember(Memory::ThrewCursor);
                         self.earn(Feat::ThrewCursor);
                         self.sfx(Sfx::Whoosh, 0.7, at);
@@ -1682,6 +1689,7 @@ impl Scene {
                     if let Some(f) = &mut self.flight {
                         f.throw(target, side);
                         log::info!("event: threw the window");
+                        self.stats.add(Deed::WindowThrown);
                         let c = f.center();
                         self.sfx(Sfx::Whoosh, 0.9, c);
                     }
@@ -1719,6 +1727,7 @@ impl Scene {
                 }
                 Event::Petted { at } => {
                     log::info!("event: petted");
+                    self.deed(Deed::Petted);
                     self.remember(Memory::Petted);
                     self.earn(Feat::Petted);
                     self.particles.hearts(at - v2(0.0, 20.0));
@@ -1955,6 +1964,7 @@ impl Scene {
         match self.mind.update_temper(self.settings.lose_temper) {
             Some(true) => {
                 log::info!("mind: lost its temper");
+                self.deed(Deed::Enraged);
                 let head = self.agent.head();
                 self.particles.explosion(head, v2(0.0, -1.0));
                 self.sfx(Sfx::Boom, 0.7, head);
@@ -2117,6 +2127,39 @@ impl Scene {
         }
     }
 
+    /// Moves unlocked at `level` (always, with "Earn moves" off).
+    fn unlocked(&self, level: u32) -> bool {
+        !self.settings.earn_moves || self.stats.level() >= level
+    }
+
+    /// Count a deed (for achievements).
+    fn deed(&mut self, d: Deed) {
+        self.stats.add(d);
+    }
+
+    /// Newly earned achievements: celebrate them.
+    fn check_achievements(&mut self) {
+        let new = self.stats.check_achievements(self.mind.reflections);
+        for a in new {
+            log::info!("achievement: {}", a.name);
+            let head = self.agent.head();
+            self.particles.stars(head);
+            self.particles
+                .sparks(head - v2(0.0, 30.0), v2(0.0, -1.0), 24);
+            self.sfx(Sfx::Pop, 0.8, head);
+            let hat = stickman::hats::Hat::ALL.iter().find(|h| {
+                h.how().is_some_and(|how| how.contains(a.name)) && h.unlocked(&self.stats)
+            });
+            let line = match hat {
+                Some(h) => format!("🏆 {}! Unlocked: {}", a.name, h.label()),
+                None => format!("🏆 Achievement: {}!", a.name),
+            };
+            let lines = self.speech.say(&line, Priority::Event);
+            self.speak(lines);
+            self.save_stats();
+        }
+    }
+
     /// Experience for a feat; celebrate a level-up.
     fn earn(&mut self, f: Feat) {
         if let Some(level) = self.stats.gain(f) {
@@ -2129,8 +2172,16 @@ impl Scene {
             self.particles.stars(head);
             self.sfx(Sfx::Boom, 0.35, head);
             self.sfx(Sfx::Pop, 0.7, head);
+            let unlock = match level {
+                2 if self.settings.earn_moves => " Unlocked: super jump!",
+                3 if self.settings.earn_moves => " Unlocked: telekinesis!",
+                4 if self.settings.earn_moves => " Unlocked: swords!",
+                5 if self.settings.earn_moves => " Unlocked: window throwing!",
+                6 if self.settings.earn_moves => " Unlocked: minion army!",
+                _ => "",
+            };
             let lines = self.speech.say(
-                &format!("Level {level}! I'm a {title} now!"),
+                &format!("Level {level}! I'm a {title} now!{unlock}"),
                 Priority::Event,
             );
             self.speak(lines);
@@ -2247,6 +2298,30 @@ impl Scene {
             w.sync(&self.settings);
             if let Some(view) = &view {
                 w.set_mind(view);
+                let unlocked: Vec<bool> = stickman::hats::Hat::ALL
+                    .iter()
+                    .map(|h| h.unlocked(&self.stats))
+                    .collect();
+                let earned: Vec<&str> = stickman::stats::ACHIEVEMENTS
+                    .iter()
+                    .filter(|a| self.stats.has(a.id))
+                    .map(|a| a.name)
+                    .collect();
+                let next: Vec<String> = stickman::stats::ACHIEVEMENTS
+                    .iter()
+                    .filter(|a| !self.stats.has(a.id))
+                    .take(3)
+                    .map(|a| format!("{} ({})", a.name, a.how))
+                    .collect();
+                let text = format!(
+                    "{} of {} earned{}{}\nNext: {}",
+                    earned.len(),
+                    stickman::stats::ACHIEVEMENTS.len(),
+                    if earned.is_empty() { "" } else { ": 🏆 " },
+                    earned.join(" · "),
+                    next.join(" · ")
+                );
+                w.set_progress(&unlocked, &text);
             }
         }
         if !self.menubar_logged && self.stats_at.elapsed() > Duration::from_secs(1) {
@@ -2321,7 +2396,8 @@ impl Scene {
             dancing: self.settings.dancing,
             doodles: self.settings.doodles,
             sitting: self.settings.sitting,
-            powers: self.settings.powers,
+            powers: self.settings.powers && self.unlocked(2),
+            telekinesis: self.settings.powers && self.unlocked(3),
             aggression: f32::from(self.settings.aggression) / 100.0,
             max_health: self.stats.max_health(),
             speed: self.stats.speed(),
@@ -2336,6 +2412,9 @@ impl Scene {
             .clamp(0.0, 1.0);
         self.think();
         self.maybe_write_note();
+        if self.ticks % 30 == 0 {
+            self.check_achievements();
+        }
         self.agent.traits.aggression = a;
         self.agent.traits.max_health = self.stats.max_health();
         self.agent.traits.speed = self.stats.speed();
@@ -2463,6 +2542,7 @@ impl Scene {
                 tk_words_near: tk_words,
                 music,
                 weapon_available: self.settings.weapons
+                    && self.unlocked(4)
                     && self.accessibility
                     && self.ocr_tx.is_some()
                     && self.sword.is_none()
@@ -2470,6 +2550,7 @@ impl Scene {
                     && Instant::now() >= self.sword_retry
                     && self.snapshot.active().is_some(),
                 can_throw_window: self.settings.throw_windows
+                    && self.unlocked(5)
                     && self.accessibility
                     && self.flight.is_none()
                     && self.snapshot.active().is_some(),
@@ -2690,6 +2771,24 @@ impl Scene {
             self.settings.color.rgb()
         };
         self.draw.figure(&segments, rgb);
+        // Its hat, once earned.
+        // STICKMAN_DEBUG_HAT=Crown (etc.) wears one regardless (for screenshots).
+        let forced = std::env::var("STICKMAN_DEBUG_HAT").ok().and_then(|n| {
+            stickman::hats::Hat::ALL
+                .into_iter()
+                .find(|h| format!("{h:?}").eq_ignore_ascii_case(n.trim()))
+        });
+        let hat = forced.unwrap_or(self.settings.hat);
+        if forced.is_some() || hat.unlocked(&self.stats) {
+            let h = segments[stickman::stickman::HEAD];
+            let up = (V2::from(h.end) - V2::from(h.start)).normalize_or(v2(0.0, -1.0));
+            hat.draw(
+                &mut self.draw,
+                self.agent.head(),
+                up,
+                22.0 * self.agent.scale,
+            );
+        }
         if let Some(r) = &self.rival {
             self.draw.figure(&r.agent.segments(), rival::RIVAL_RGB);
             // A ninja headband with tails flying behind.

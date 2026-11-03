@@ -7,6 +7,7 @@ pub mod director;
 pub mod doodle;
 pub mod draw;
 pub mod geom;
+pub mod hats;
 pub mod input;
 pub mod jail;
 pub mod macos;

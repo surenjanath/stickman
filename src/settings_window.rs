@@ -15,6 +15,7 @@ use std::ffi::CString;
 use objc::runtime::{Object, NO, YES};
 use objc::{class, msg_send, sel, sel_impl, Encode, Encoding};
 
+use crate::hats::Hat;
 use crate::menubar::{action_target, SLIDER_AGGRESSION, SLIDER_CHATTINESS, SLIDER_VOLUME};
 use crate::settings::{Behaviour, Command, FigureColor, Language, Settings, Size, WordStay};
 
@@ -145,6 +146,11 @@ pub struct SettingsWindow {
     mind_labels: Vec<*mut Object>,
     log: *mut Object,
     mind_shown: Option<MindView>,
+    /// The hat pop-up and which hats are unlocked (as last shown).
+    hat_popup: *mut Object,
+    hats_shown: Vec<bool>,
+    /// Achievements list label.
+    achievements: *mut Object,
     tabs: *mut Object,
     shown: Option<Settings>,
     centered: bool,
@@ -164,6 +170,9 @@ impl SettingsWindow {
             mind_labels: Vec::new(),
             log: std::ptr::null_mut(),
             mind_shown: None,
+            hat_popup: std::ptr::null_mut(),
+            hats_shown: Vec::new(),
+            achievements: std::ptr::null_mut(),
             tabs: std::ptr::null_mut(),
             shown: None,
             centered: false,
@@ -413,6 +422,8 @@ impl SettingsWindow {
         Self::width(scroll, 420.0);
         Self::height(scroll, 110.0);
         self.log = tv;
+        let achievements = Self::wrapping("—", 420.0);
+        self.achievements = achievements;
         let reflect = self.check(
             "Reflects on its memories with the local AI",
             Command::ToggleReflection,
@@ -446,6 +457,8 @@ impl SettingsWindow {
             Row::Field("Believes:", labels[2]),
             Row::Field("Next note:", labels[3]),
             Row::Field("Memory:", scroll),
+            Row::Section("Achievements"),
+            Row::Under(achievements),
             Row::Section("Its mind"),
             Row::Under(reflect),
             Row::Under(notes),
@@ -480,6 +493,16 @@ impl SettingsWindow {
                 .map(|s| (s.label(), Command::SetSize(*s)))
                 .collect(),
         );
+        let hat = self.popup(
+            Hat::ALL
+                .iter()
+                .map(|h| (h.label(), Command::SetHat(*h)))
+                .collect(),
+        );
+        // Locked hats are greyed out (we enable items ourselves).
+        let _: () = msg_send![hat, setAutoenablesItems: NO];
+        self.hat_popup = hat;
+        let earn = self.check("Earn moves by levelling up", Command::ToggleEarnMoves);
         let aggression = self.slider(SLIDER_AGGRESSION);
         let chattiness = self.slider(SLIDER_CHATTINESS);
         let language = self.popup(
@@ -504,6 +527,8 @@ impl SettingsWindow {
             Row::Field("Name:", name),
             Row::Field("Colour:", color),
             Row::Field("Size:", size),
+            Row::Field("Hat:", hat),
+            Row::Under(Self::hint("Hats are earned with achievements and levels.")),
             Row::Section("Temperament"),
             Row::Field("Temper:", aggression),
             Row::Under(Self::hint(
@@ -521,6 +546,11 @@ impl SettingsWindow {
             )),
             Row::Section("What it does"),
             Row::Field("Behaviour:", behaviour),
+            Row::Under(earn),
+            Row::Under(Self::hint(
+                "Like a game: super jump at level 2, telekinesis at 3, swords at 4, \
+                 window throwing at 5, minions at 6. Off: everything from the start.",
+            )),
             Row::Under(Self::hint(
                 "Auto lets the local AI director decide; the others pin one mood.",
             )),
@@ -650,6 +680,33 @@ impl SettingsWindow {
             let _: () = msg_send![self.log, setString: ns_string(&view.log)];
         }
         self.mind_shown = Some(view.clone());
+    }
+
+    /// Show which hats are unlocked (locked ones say how to earn them), and
+    /// the achievements text.
+    pub fn set_progress(&mut self, unlocked: &[bool], achievements: &str) {
+        if self.hats_shown.as_slice() != unlocked {
+            // SAFETY: main thread; the pop-up lives as long as the window.
+            unsafe {
+                for (i, (hat, open)) in Hat::ALL.iter().zip(unlocked).enumerate() {
+                    let item: *mut Object = msg_send![self.hat_popup, itemAtIndex: i as isize];
+                    if item.is_null() {
+                        continue;
+                    }
+                    let title = match (open, hat.how()) {
+                        (false, Some(how)) => format!("🔒 {} — {how}", hat.label()),
+                        _ => hat.label().to_string(),
+                    };
+                    let _: () = msg_send![item, setTitle: ns_string(&title)];
+                    let _: () = msg_send![item, setEnabled: if *open { YES } else { NO }];
+                }
+            }
+            self.hats_shown = unlocked.to_vec();
+        }
+        // SAFETY: main thread; the label lives as long as the window.
+        unsafe {
+            let _: () = msg_send![self.achievements, setStringValue: ns_string(achievements)];
+        }
     }
 
     /// Bring the window up, showing the current settings.

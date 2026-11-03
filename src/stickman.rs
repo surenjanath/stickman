@@ -63,7 +63,7 @@ pub const WALKER: [Bone; BONES] = [
 
 // Bone indices (0-based).
 pub(crate) const TORSO: usize = 0;
-pub(crate) const HEAD: usize = 1;
+pub const HEAD: usize = 1;
 pub(crate) const UPPER_ARM: [usize; 2] = [2, 4];
 pub(crate) const FOREARM: [usize; 2] = [3, 5];
 pub(crate) const THIGH: [usize; 2] = [6, 8];

@@ -224,6 +224,11 @@ pub struct Settings {
     /// Replace swear words with #$%&!.
     pub bleep: bool,
     pub color: FigureColor,
+    /// Its hat (only drawn once earned).
+    pub hat: crate::hats::Hat,
+    /// Moves unlock with levels (super jump 2, telekinesis 3, sword 4,
+    /// window throwing 5, minions 6); off: everything from the start.
+    pub earn_moves: bool,
     pub behaviour: Behaviour,
     pub size: Size,
     /// Punches shove the real pointer.
@@ -284,6 +289,8 @@ impl Default for Settings {
             language: Language::Cheeky,
             bleep: true,
             color: FigureColor::Classic,
+            hat: crate::hats::Hat::None,
+            earn_moves: true,
             behaviour: Behaviour::Auto,
             size: Size::Medium,
             cursor_push: true,
@@ -338,6 +345,8 @@ pub enum Command {
     SetLanguage(Language),
     ToggleBleep,
     SetColor(FigureColor),
+    SetHat(crate::hats::Hat),
+    ToggleEarnMoves,
     OpenSettings,
     /// Enter or leave draw mode (sketch platforms with the mouse).
     ToggleDrawMode,
@@ -414,6 +423,13 @@ impl Command {
             Command::SetColor(c) => {
                 800 + FigureColor::ALL.iter().position(|x| *x == c).unwrap_or(0) as isize
             }
+            Command::SetHat(h) => {
+                850 + crate::hats::Hat::ALL
+                    .iter()
+                    .position(|x| *x == h)
+                    .unwrap_or(0) as isize
+            }
+            Command::ToggleEarnMoves => 326,
             Command::SetWordStay(w) => {
                 600 + WordStay::ALL.iter().position(|x| *x == w).unwrap_or(0) as isize
             }
@@ -462,6 +478,8 @@ impl Command {
             407 => Command::WriteNote,
             700..=702 => Command::SetLanguage(Language::ALL[(tag - 700) as usize]),
             800..=806 => Command::SetColor(FigureColor::ALL[(tag - 800) as usize]),
+            850..=858 => Command::SetHat(crate::hats::Hat::ALL[(tag - 850) as usize]),
+            326 => Command::ToggleEarnMoves,
             600..=604 => Command::SetWordStay(WordStay::ALL[(tag - 600) as usize]),
             400 => Command::Respawn,
             500 => Command::OpenAccessibilitySettings,
@@ -505,6 +523,8 @@ impl Settings {
             Command::SetLanguage(l) => self.language = l,
             Command::ToggleBleep => self.bleep = !self.bleep,
             Command::SetColor(c) => self.color = c,
+            Command::SetHat(h) => self.hat = h,
+            Command::ToggleEarnMoves => self.earn_moves = !self.earn_moves,
             Command::ToggleVisible => self.visible = !self.visible,
             Command::TogglePaused => self.paused = !self.paused,
             _ => {}
@@ -521,6 +541,8 @@ impl Settings {
             Command::SetWordStay(w) => self.word_stay == w,
             Command::SetLanguage(l) => self.language == l,
             Command::SetColor(c) => self.color == c,
+            Command::SetHat(h) => self.hat == h,
+            Command::ToggleEarnMoves => self.earn_moves,
             Command::ToggleCursorPush => self.cursor_push,
             Command::ToggleWindowShake => self.window_shake,
             Command::ToggleWalkOnText => self.walk_on_text,
@@ -662,6 +684,8 @@ mod tests {
         all.extend(WordStay::ALL.map(Command::SetWordStay));
         all.extend(Language::ALL.map(Command::SetLanguage));
         all.extend(FigureColor::ALL.map(Command::SetColor));
+        all.extend(crate::hats::Hat::ALL.map(Command::SetHat));
+        all.push(Command::ToggleEarnMoves);
         let mut tags: Vec<isize> = all.iter().map(|c| c.tag()).collect();
         for c in &all {
             assert_eq!(Command::from_tag(c.tag()), Some(*c));

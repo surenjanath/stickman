@@ -472,7 +472,10 @@ pub struct Traits {
     pub dancing: bool,
     pub doodles: bool,
     pub sitting: bool,
+    /// Super jumps.
     pub powers: bool,
+    /// Telekinesis (cursor, words, windows).
+    pub telekinesis: bool,
     /// 0 (gentle) .. 1 (fierce).
     pub aggression: f32,
     /// Health it heals up to (grows with level).
@@ -489,6 +492,7 @@ impl Default for Traits {
             doodles: true,
             sitting: true,
             powers: true,
+            telekinesis: true,
             aggression: 0.5,
             max_health: 100.0,
             speed: 1.0,
@@ -1667,7 +1671,7 @@ impl Agent {
 
     /// Use telekinesis in combat, now and then.
     fn mind_powers(&mut self, s: &Senses) -> bool {
-        if !self.traits.powers || self.tk_cooldown > 0.0 || self.holding {
+        if !self.traits.telekinesis || self.tk_cooldown > 0.0 || self.holding {
             return false;
         }
         let dist = (s.cursor - self.center()).length();
@@ -1895,7 +1899,7 @@ impl Agent {
 
     fn sabotage(&mut self, s: &Senses, world: &World) {
         // Mischief with powers: pick up the user's window and toss it aside.
-        if self.traits.powers
+        if self.traits.telekinesis
             && s.can_throw_window
             && self.tk_cooldown <= 0.0
             && !self.holding
@@ -2972,9 +2976,9 @@ mod tests {
             .iter()
             .position(|e| matches!(e, Event::MindFireWords { .. }));
         assert!(lift.is_some() && fire > lift, "lift {lift:?} fire {fire:?}");
-        // Powers off: never.
+        // Telekinesis off (or not unlocked yet): never.
         let mut b = agent();
-        b.traits.powers = false;
+        b.traits.telekinesis = false;
         let mut ev2 = vec![];
         run(&mut b, &w, &s, 30.0, &mut ev2);
         assert!(!ev2.iter().any(|e| matches!(e, Event::MindLiftWords { .. })));
