@@ -465,6 +465,32 @@ pub fn cheer(t: f32) -> Pose {
     p
 }
 
+/// Powering up a super jump: a deep crouch, arms swept back, trembling.
+pub fn charge(t: f32) -> Pose {
+    let shake = 0.04 * (t * 70.0).sin();
+    let mut p = crouch(1.0);
+    p[TORSO] += 0.15 + shake;
+    p[HEAD] += 0.1 + shake;
+    arm(&mut p, A, 2.35 + shake, 2.75);
+    arm(&mut p, B, 2.55 - shake, 2.95);
+    p
+}
+
+/// Telekinesis: one hand reaching toward `aim`, palm out, the other at the
+/// temple, concentrating (t: seconds).
+pub fn telekinesis(t: f32, aim: f32) -> Pose {
+    let aim = aim.clamp(-0.75, 0.9);
+    let strain = 0.03 * (t * 40.0).sin();
+    let mut p = stance(0.0);
+    let up = aim.min(0.0);
+    p[TORSO] = -H + 0.12 + 0.9 * up + strain;
+    p[HEAD] = -H + 0.1 + 0.9 * up;
+    arm(&mut p, A, aim + strain, aim - 0.25);
+    // Other hand raised beside the face, concentrating.
+    arm(&mut p, B, 0.6, -1.45);
+    p
+}
+
 /// Landing squash (k = 0 at touchdown → 1 recovered).
 pub fn land(k: f32) -> Pose {
     crouch(0.65 * (1.0 - smoothstep(k)))
@@ -523,6 +549,8 @@ mod tests {
             v.push(("stomp", stomp(k)));
             v.push(("snatch", snatch(k, 0.0)));
             v.push(("lie down", lie_down(k)));
+            v.push(("charge", charge(k)));
+            v.push(("telekinesis", telekinesis(k, -0.75 + 1.6 * k)));
             v.push(("flying kick", flying_kick(k, 0.2)));
             v.push(("flying kick up", flying_kick(k, -0.4)));
             v.push(("snatch up", snatch(k, -0.7)));

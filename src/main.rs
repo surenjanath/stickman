@@ -27,7 +27,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use stickman::agent::{Agent, Event, Mode, Senses, FIXED_DT};
+use stickman::agent::{Agent, Event, Mind, Mode, Senses, FIXED_DT};
 use stickman::director::{self, Directive, Observation};
 use stickman::doodle::Doodles;
 use stickman::geom::{cg_to_cocoa, v2, Rect, V2};
@@ -106,6 +106,10 @@ fn max_joint_shift(a: &[Segment], b: &[Segment]) -> f32 {
 const DRAG_START_PT: f32 = 6.0;
 const DRAG_START_HOLD: Duration = Duration::from_millis(250);
 
+/// Telekinesis lifts words within this distance of the figure, at most this many.
+const TK_RADIUS: f32 = 650.0;
+const TK_MAX_WORDS: usize = 6;
+
 /// How often to check whether screens were plugged in or rearranged.
 const SCREEN_CHECK: Duration = Duration::from_secs(2);
 
@@ -157,6 +161,12 @@ enum Captive {
         at: V2,
         since: Instant,
     },
+    /// Lifted by telekinesis: floating up from `origin`, wobbling.
+    Levitating {
+        origin: V2,
+        at: V2,
+        t: f32,
+    },
     /// Thrown: flying along a ballistic arc.
     Flying {
         pos: V2,
@@ -171,7 +181,9 @@ impl Captive {
     fn pinned_at(self) -> Option<V2> {
         match self {
             Captive::Free => None,
-            Captive::Held { at, .. } | Captive::Flying { at, .. } => Some(at),
+            Captive::Held { at, .. }
+            | Captive::Levitating { at, .. }
+            | Captive::Flying { at, .. } => Some(at),
         }
     }
 }
@@ -293,6 +305,8 @@ struct Scene {
     busy: bool,
     last_ammo: Option<u64>,
     // Debug statistics.
+    started: Instant,
+    debug_done: bool,
     ticks: u64,
     stats_frames: u64,
     stats_at: Instant,
@@ -475,6 +489,29 @@ impl Scene {
         });
     }
 
+    /// Ask the OCR worker to capture a word's pixels (just below the overlay of
+    /// the word's screen).
+    fn request_grab(&mut self, need: stickman::words::CaptureNeeded) {
+        let c = v2(
+            (need.rect.x + need.rect.width / 2.0) as f32,
+            (need.rect.y + need.rect.height / 2.0) as f32,
+        );
+        let below = self
+            .overlays
+            .get(self.layout.index_at(c))
+            .or(self.overlays.first())
+            .map_or(0, |o| o.state().window_number as u32);
+        let job = ocr::GrabRequest {
+            id: need.id,
+            window: need.window,
+            below,
+            global: need.rect,
+        };
+        if let Some(tx) = &self.ocr_tx {
+            let _ = tx.send(ocr::Job::Grab(job));
+        }
+    }
+
     /// Rasterise and show lines accepted by [`Speech`] (no-op when bubbles are off).
     fn speak(&mut self, lines: Option<Vec<String>>) {
         let Some(lines) = lines else { return };
@@ -562,6 +599,30 @@ impl Scene {
         }
     }
 
+    /// Glow for super powers, and dropping lifted words if the spell broke.
+    fn power_effects(&mut self) {
+        self.words.hover_center = self.agent.head() - v2(0.0, 60.0);
+        let mind = self.agent.telekinesis();
+        if self.words.tk_active() && mind.is_none_or(|(_, on)| on != Mind::Words) {
+            self.words.tk_drop();
+        }
+        if let Some((hand, on)) = mind {
+            self.particles.aura(hand, 1.5);
+            match (on, self.captive) {
+                (Mind::Cursor, Captive::Levitating { at, .. }) => self.particles.aura(at, 2.0),
+                (Mind::Words, _) => self.particles.aura(self.words.hover_center, 0.8),
+                _ => {}
+            }
+        }
+        if self.agent.charging() {
+            self.particles.charge_sparks(self.agent.pos);
+            self.particles.aura(self.agent.center(), 0.7);
+        }
+        if self.agent.super_flight() {
+            self.particles.trail(self.agent.center());
+        }
+    }
+
     /// The user pulled the pointer away from the figure (or a limit was hit).
     fn check_escape(&mut self) {
         let Some(at) = self.captive.pinned_at() else {
@@ -582,6 +643,9 @@ impl Scene {
     }
 
     fn fly_cursor(&mut self, dt: f32) {
+        if let Captive::Levitating { t, .. } = &mut self.captive {
+            *t += dt;
+        }
         if let Captive::Flying {
             mut pos,
             mut vel,
@@ -613,13 +677,23 @@ impl Scene {
                 return;
             }
             Captive::Held { .. } => self.agent.hands() - v2(0.0, 6.0),
+            Captive::Levitating { .. } if !self.agent.holding_cursor => {
+                self.captive = Captive::Free;
+                return;
+            }
+            Captive::Levitating { origin, t, .. } => {
+                let rise = 45.0 * stickman::stickman::smoothstep(t / 0.8);
+                origin + v2(4.0 * (t * 17.0).sin(), -rise + 3.0 * (t * 13.0).cos())
+            }
             Captive::Flying { pos, .. } => pos,
         };
         let area = self.layout.screen_at(target).frame;
         self.cursor.warp_to(target, area);
         self.last_cursor = self.cursor.pos;
         match &mut self.captive {
-            Captive::Held { at, .. } | Captive::Flying { at, .. } => *at = self.cursor.pos,
+            Captive::Held { at, .. }
+            | Captive::Levitating { at, .. }
+            | Captive::Flying { at, .. } => *at = self.cursor.pos,
             Captive::Free => {}
         }
     }
@@ -749,27 +823,7 @@ impl Scene {
                     self.quip(Moment::Stomp);
                 }
                 Event::Grabbed { id } => match self.words.grabbed(id) {
-                    Some(need) => {
-                        // Capture what's just below the overlay of the word's screen.
-                        let c = v2(
-                            (need.rect.x + need.rect.width / 2.0) as f32,
-                            (need.rect.y + need.rect.height / 2.0) as f32,
-                        );
-                        let below = self
-                            .overlays
-                            .get(self.layout.index_at(c))
-                            .or(self.overlays.first())
-                            .map_or(0, |o| o.state().window_number as u32);
-                        let job = ocr::GrabRequest {
-                            id,
-                            window: need.window,
-                            below,
-                            global: need.rect,
-                        };
-                        if let Some(tx) = &self.ocr_tx {
-                            let _ = tx.send(ocr::Job::Grab(job));
-                        }
-                    }
+                    Some(need) => self.request_grab(need),
                     None => self.agent.holding = false, // nothing there after all
                 },
                 Event::Threw { from, vel } => {
@@ -803,6 +857,61 @@ impl Scene {
                         self.sfx(Sfx::Whoosh, 0.6, from);
                         self.quip(Moment::ThrewCursor);
                     }
+                }
+                Event::SuperJumped { at } => {
+                    log::info!("event: super jump");
+                    self.particles.shockwave(at);
+                    self.sfx(Sfx::Boom, 0.5, at);
+                    self.sfx(Sfx::Whoosh, 0.8, at);
+                    self.quip(Moment::SuperJump);
+                }
+                Event::MindLiftCursor { at } => {
+                    if self.settings.cursor_push && matches!(self.captive, Captive::Free) {
+                        self.captive = Captive::Levitating {
+                            origin: self.cursor.pos,
+                            at: self.cursor.pos,
+                            t: 0.0,
+                        };
+                        log::info!("event: lifted the cursor with telekinesis");
+                        self.sfx(Sfx::Pop, 0.5, at);
+                        self.quip(Moment::MindCursor);
+                    } else {
+                        self.agent.holding_cursor = false;
+                    }
+                }
+                Event::MindFlingCursor { vel, .. } => {
+                    if let Captive::Levitating { at, .. } = self.captive {
+                        self.captive = Captive::Flying {
+                            pos: at,
+                            vel,
+                            at,
+                            t: 0.0,
+                        };
+                        log::info!("event: flung the cursor with telekinesis");
+                        self.sfx(Sfx::Whoosh, 0.7, at);
+                    }
+                }
+                Event::MindLiftWords { at } => {
+                    let active = self.snapshot.active().map(|w| w.id);
+                    let needs = self.words.tk_lift(at, TK_RADIUS, TK_MAX_WORDS, active);
+                    if !needs.is_empty() {
+                        log::info!("event: lifting {} words with telekinesis", needs.len());
+                        self.quip(Moment::MindWords);
+                        self.sfx(Sfx::Pop, 0.5, at);
+                    }
+                    for need in needs {
+                        self.request_grab(need);
+                    }
+                }
+                Event::MindFireWords { target } => {
+                    if !self.words.hovering.is_empty() {
+                        log::info!(
+                            "event: fired {} words at the cursor",
+                            self.words.hovering.len()
+                        );
+                        self.sfx(Sfx::Whoosh, 0.8, target);
+                    }
+                    self.words.tk_fling(target);
                 }
                 Event::Yawned { .. } => {
                     log::info!("event: fell asleep");
@@ -916,6 +1025,23 @@ impl Scene {
         true
     }
 
+    /// `STICKMAN_DEBUG_DO`: perform an action 3 s after launch (once the
+    /// screen's text has been read).
+    fn debug_do(&mut self) {
+        if self.debug_done || self.started.elapsed() < Duration::from_secs(3) {
+            return;
+        }
+        self.debug_done = true;
+        if let Ok(what) = std::env::var("STICKMAN_DEBUG_DO") {
+            let mut ev = Vec::new();
+            if self.agent.perform(&what, &mut ev) {
+                self.handle(&ev);
+            } else {
+                log::warn!("STICKMAN_DEBUG_DO: unknown action {what:?}");
+            }
+        }
+    }
+
     fn sync_menubar(&mut self) {
         let director = if self.settings.behaviour != Behaviour::Auto {
             format!("{} — paused (behaviour pinned)", self.director_model)
@@ -948,14 +1074,6 @@ impl Scene {
             self.menubar_logged = true;
             if env_flag("STICKMAN_DEBUG_OPEN_MENU") {
                 self.menubar.open();
-            }
-            if let Ok(what) = std::env::var("STICKMAN_DEBUG_DO") {
-                let mut ev = Vec::new();
-                if self.agent.perform(&what, &mut ev) {
-                    self.handle(&ev);
-                } else {
-                    log::warn!("STICKMAN_DEBUG_DO: unknown action {what:?}");
-                }
             }
             if let Ok(line) = std::env::var("STICKMAN_DEBUG_SAY") {
                 let lines = self.speech.say(&line, Priority::Event);
@@ -999,6 +1117,7 @@ impl Scene {
             self.last_cursor = self.cursor.pos;
         }
         self.track_press();
+        self.debug_do();
         self.agent.traits = stickman::agent::Traits {
             naps: self.settings.naps,
             dancing: self.settings.dancing,
@@ -1031,6 +1150,14 @@ impl Scene {
         let wants_ammo = self.settings.throw_words
             && self.settings.walk_on_text
             && matches!(self.mode, Mode::Combat | Mode::Sabotage);
+        let tk_words = if self.settings.powers && self.settings.throw_words && self.ocr_tx.is_some()
+        {
+            let active = self.snapshot.active().map(|w| w.id);
+            self.words
+                .tk_candidates(self.agent.center(), TK_RADIUS, active)
+        } else {
+            0
+        };
         while self.accumulator >= FIXED_DT {
             let range = self.layout.walk_range(self.agent.pos, EDGE_MARGIN);
             let ammo = if wants_ammo && !self.agent.holding {
@@ -1061,6 +1188,7 @@ impl Scene {
                 can_grab_cursor: self.settings.cursor_push,
                 held: self.dragging,
                 user_idle: self.last_mouse_move.elapsed().as_secs_f32(),
+                tk_words_near: tk_words,
                 can_shove: self.settings.window_shoves
                     && self.settings.window_shake
                     && self.accessibility,
@@ -1087,6 +1215,7 @@ impl Scene {
         self.handle(&events);
         self.handle_word_events(&word_events, &freed);
         self.move_captive();
+        self.power_effects();
         if !self.settings.speech {
             self.speech.clear();
         }
@@ -1612,6 +1741,8 @@ impl App {
             frames: 0,
             busy: true,
             last_ammo: None,
+            started: now,
+            debug_done: false,
             ticks: 0,
             stats_frames: 0,
             stats_at: now,
@@ -1835,6 +1966,7 @@ mod tests {
             held: false,
             user_idle: 0.0,
             can_shove: false,
+            tk_words_near: 0,
         };
         let count = |hold: bool| {
             let mut a = Agent::new(900.0, ground, FIGURE_SCALE, 11);

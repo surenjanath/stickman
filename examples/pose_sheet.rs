@@ -74,6 +74,8 @@ fn main() {
         ("dance", poses::dance(0.6)),
         ("sit on edge", poses::sit(0.0)),
         ("cheer", poses::cheer(0.1)),
+        ("super-jump charge", poses::charge(0.0)),
+        ("telekinesis", poses::telekinesis(0.0, -0.2)),
         ("knocked out", ko),
         ("rest (source)", stickman::stickman::rest_pose()),
     ];

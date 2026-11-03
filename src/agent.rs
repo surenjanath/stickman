@@ -29,6 +29,8 @@ pub const FIXED_DT: f32 = 1.0 / 60.0;
 pub const GRAVITY: f32 = 1900.0;
 /// Highest platform a jump can reach, points above the feet.
 pub const MAX_JUMP_RISE: f32 = 330.0;
+/// A super jump (powers) reaches this high.
+pub const SUPER_RISE: f32 = 1000.0;
 const RUN_PERIOD: f32 = 0.62;
 const BLEND_SECONDS: f32 = 0.18;
 /// The user away this long (no mouse movement): time for a nap.
@@ -104,6 +106,17 @@ pub struct Senses {
     pub user_idle: f32,
     /// May shove the active window around (Accessibility granted, allowed).
     pub can_shove: bool,
+    /// Words telekinesis could lift right now (near the figure).
+    pub tk_words_near: usize,
+}
+
+/// What telekinesis is working on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mind {
+    /// Lift the cursor, wobble it in the air, fling it.
+    Cursor,
+    /// Lift a group of words off the page and fire them at the cursor.
+    Words,
 }
 
 /// A grabbable word on a text line.
@@ -221,6 +234,27 @@ pub enum Event {
         window: u32,
         dx: f32,
     },
+    /// Launched a super jump.
+    SuperJumped {
+        at: V2,
+    },
+    /// Telekinesis took hold of the cursor (the app levitates the pointer).
+    MindLiftCursor {
+        at: V2,
+    },
+    /// Telekinesis flings the cursor from `from` with `vel`.
+    MindFlingCursor {
+        from: V2,
+        vel: V2,
+    },
+    /// Telekinesis lifts words near `at` (the app picks and captures them).
+    MindLiftWords {
+        at: V2,
+    },
+    /// Fire the lifted words at `target`.
+    MindFireWords {
+        target: V2,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -291,6 +325,14 @@ pub enum Action {
     Shove {
         dx: f32,
     },
+    /// Powering up a super jump; launches with `vel`.
+    Charge {
+        vel: V2,
+    },
+    /// Telekinesis.
+    Telekinesis {
+        on: Mind,
+    },
 }
 
 /// Seconds the pen takes to draw a doodle.
@@ -319,6 +361,9 @@ impl Action {
             Action::Cheer => 1.6,
             Action::Doodle { .. } => DOODLE_LEAD + DOODLE_DRAW + 0.5,
             Action::Shove { .. } => 0.6,
+            Action::Charge { .. } => 0.55,
+            Action::Telekinesis { on: Mind::Cursor } => 1.5,
+            Action::Telekinesis { on: Mind::Words } => 2.2,
             Action::Taunt => 1.6,
             Action::Think => 3.0,
             _ => return None,
@@ -412,6 +457,14 @@ pub struct Agent {
     combo: u32,
     /// Walking to an edge to sit on it.
     sit_plan: bool,
+    /// This flight is a super jump (glowing trail).
+    super_air: bool,
+    /// Seconds until telekinesis can be used again.
+    tk_cooldown: f32,
+    /// Where telekinesis is aimed (the cursor).
+    tk_aim: V2,
+    /// The second scripted moment of the current action happened.
+    act_fired2: bool,
     /// Seconds of being stroked by the cursor.
     pet: f32,
     pet_cooldown: f32,
@@ -463,6 +516,10 @@ impl Agent {
             air_attack: false,
             combo: 0,
             sit_plan: false,
+            super_air: false,
+            tk_cooldown: 1.5,
+            tk_aim: V2::ZERO,
+            act_fired2: false,
             pet: 0.0,
             pet_cooldown: 0.0,
             spin_from: 0.0,
@@ -491,12 +548,14 @@ impl Agent {
     }
 
     /// Start a named action right away (debugging and demos): `sleep`,
-    /// `dance`, `cheer` or `doodle`. Returns whether the name was known.
+    /// `dance`, `cheer`, `doodle`, `superjump` or `mindwords`. Returns whether the name was known.
     pub fn perform(&mut self, name: &str, events: &mut Vec<Event>) -> bool {
         match name.trim() {
             "sleep" => self.set_action(Action::Sleep),
             "dance" => self.set_action(Action::Dance),
             "cheer" => self.set_action(Action::Cheer),
+            "superjump" => self.super_jump_to(self.pos - v2(0.0, 600.0)),
+            "mindwords" => self.set_action(Action::Telekinesis { on: Mind::Words }),
             "doodle" => {
                 let size = 20.0 * (self.scale / 0.55);
                 let origin = self.shoulder() + v2(self.facing * (self.reach() + size + 4.0), -8.0);
@@ -538,6 +597,7 @@ impl Agent {
             self.hit_landed = false;
         }
         self.act_fired = false;
+        self.act_fired2 = false;
         if a == Action::GetUp {
             self.spin_from = self.spin;
         }
@@ -611,6 +671,10 @@ impl Agent {
                 poses::punch(0.5, self.aim_at(pen, -0.75, 0.9))
             }
             Action::Shove { .. } => poses::stomp(k(self.action)),
+            Action::Charge { .. } => poses::charge(t),
+            Action::Telekinesis { .. } => {
+                poses::telekinesis(t, self.aim_at(self.tk_aim, -0.75, 0.9))
+            }
             Action::FlyingKick { aim } => poses::flying_kick(k(self.action), aim),
             Action::Tumble => poses::tumble(),
             Action::Ko => idle_pose(0.0),
@@ -724,6 +788,24 @@ impl Agent {
 
     fn doodle_k(&self) -> f32 {
         ((self.t - DOODLE_LEAD) / DOODLE_DRAW).clamp(0.0, 1.0)
+    }
+
+    /// Flying high on a super jump (for the glowing trail).
+    pub fn super_flight(&self) -> bool {
+        self.super_air && self.ground.is_none()
+    }
+
+    /// Powering up: crouched for a super jump.
+    pub fn charging(&self) -> bool {
+        matches!(self.action, Action::Charge { .. })
+    }
+
+    /// The reaching hand while using telekinesis, and on what.
+    pub fn telekinesis(&self) -> Option<(V2, Mind)> {
+        match self.action {
+            Action::Telekinesis { on } => Some((self.segments()[FOREARM[0]].end.into(), on)),
+            _ => None,
+        }
     }
 
     /// The pen tip and the hand holding it, while doodling.
@@ -939,6 +1021,8 @@ impl Agent {
     /// One tick of normal life: reflexes, actions, behaviour, physics.
     fn act(&mut self, s: &Senses, world: &World, events: &mut Vec<Event>) {
         self.pet_cooldown -= FIXED_DT;
+        self.tk_cooldown -= FIXED_DT;
+        self.tk_aim = s.cursor;
         // Asleep: wake up when the user is back, or a fight starts.
         if matches!(self.action, Action::Sleep | Action::LieDown)
             && (s.user_idle < 0.5 || s.clicked || s.mode == Mode::Combat)
@@ -972,6 +1056,9 @@ impl Agent {
             Action::SnatchCursor { .. } => self.act_fired && !self.holding_cursor,
             Action::HoldCursor => !self.holding_cursor,
             Action::ThrowCursor { .. } => !self.holding_cursor && !self.act_fired,
+            Action::Telekinesis { on: Mind::Cursor } => {
+                self.act_fired && !self.act_fired2 && !self.holding_cursor
+            }
             _ => false,
         };
         if lost_grip {
@@ -1077,6 +1164,13 @@ impl Agent {
                 self.ground = None;
                 self.set_action(Action::Air);
                 events.push(Event::Jumped { at: self.pos });
+            }
+            Action::Charge { vel } => {
+                self.vel = vel;
+                self.ground = None;
+                self.super_air = true;
+                self.set_action(Action::Air);
+                events.push(Event::SuperJumped { at: self.pos });
             }
             Action::Ko => self.set_action(Action::GetUp),
             Action::LieDown => self.set_action(Action::Sleep),
@@ -1190,6 +1284,43 @@ impl Agent {
             }
             _ => {}
         }
+        match self.action {
+            Action::Telekinesis { on: Mind::Cursor } => {
+                if !self.act_fired && self.t >= 0.2 {
+                    self.act_fired = true;
+                    self.holding_cursor = true;
+                    events.push(Event::MindLiftCursor { at: s.cursor });
+                }
+                if self.act_fired && !self.act_fired2 && self.t >= 1.1 && self.holding_cursor {
+                    self.act_fired2 = true;
+                    self.holding_cursor = false;
+                    // Away from the figure and up.
+                    let away = (s.cursor - self.center()).normalize_or(v2(self.facing, 0.0));
+                    let vel = v2(away.x.signum() * 1100.0, -650.0 + away.y * 300.0);
+                    events.push(Event::MindFlingCursor {
+                        from: s.cursor,
+                        vel,
+                    });
+                    self.frustration = (self.frustration - 25.0).max(0.0);
+                }
+                return;
+            }
+            Action::Telekinesis { on: Mind::Words } => {
+                if !self.act_fired && self.t >= 0.25 {
+                    self.act_fired = true;
+                    events.push(Event::MindLiftWords { at: self.center() });
+                }
+                if !self.act_fired2 && self.t >= 1.6 {
+                    self.act_fired2 = true;
+                    events.push(Event::MindFireWords {
+                        target: s.cursor + s.cursor_vel * 0.15,
+                    });
+                    self.frustration = (self.frustration - 25.0).max(0.0);
+                }
+                return;
+            }
+            _ => {}
+        }
         if let Action::Shove { dx } = self.action {
             if !self.act_fired && self.t >= 0.3 {
                 self.act_fired = true;
@@ -1254,13 +1385,52 @@ impl Agent {
 
     /// Ballistic launch that lands on `target` (feet), clearing it by 40 pt.
     fn jump_to(&mut self, target: V2) {
+        let vel = self.jump_vel(target);
+        self.face(vel.x.signum());
+        self.set_action(Action::Crouch { vel });
+    }
+
+    /// A power-up and a huge leap to `target` (powers).
+    fn super_jump_to(&mut self, target: V2) {
+        let vel = self.jump_vel(target);
+        self.face(vel.x.signum());
+        self.set_action(Action::Charge { vel });
+    }
+
+    /// Ballistic launch velocity that lands on `target`, clearing it by 40 pt.
+    fn jump_vel(&self, target: V2) -> V2 {
         let rise = (self.pos.y - target.y + 40.0).max(30.0);
         let vy = -(2.0 * GRAVITY * rise).sqrt();
         let t_up = -vy / GRAVITY;
         let t_down = (2.0 * (rise - (self.pos.y - target.y)).max(1.0) / GRAVITY).sqrt();
-        let vx = (target.x - self.pos.x) / (t_up + t_down);
-        self.face(vx.signum());
-        self.set_action(Action::Crouch { vel: v2(vx, vy) });
+        v2((target.x - self.pos.x) / (t_up + t_down), vy)
+    }
+
+    /// Use telekinesis in combat, now and then.
+    fn mind_powers(&mut self, s: &Senses) -> bool {
+        if !self.traits.powers || self.tk_cooldown > 0.0 || self.holding {
+            return false;
+        }
+        let dist = (s.cursor - self.center()).length();
+        let on = if s.tk_words_near >= 2 && dist > self.reach() + 60.0 && dist < 1400.0 {
+            Mind::Words
+        } else if s.can_grab_cursor
+            && (self.reach() + 60.0..1000.0).contains(&dist)
+            && s.cursor_vel.length() < 400.0
+        {
+            Mind::Cursor
+        } else {
+            return false;
+        };
+        let chance = if on == Mind::Words { 0.5 } else { 0.35 };
+        if self.random(0.0, 1.0) >= chance {
+            self.tk_cooldown = 2.0; // not this time
+            return false;
+        }
+        self.tk_cooldown = 7.0;
+        self.face((s.cursor.x - self.pos.x).signum());
+        self.set_action(Action::Telekinesis { on });
+        true
     }
 
     fn behave(&mut self, s: &Senses, world: &World, events: &mut Vec<Event>) {
@@ -1278,6 +1448,9 @@ impl Agent {
         }
         match s.mode {
             Mode::Combat => {
+                if self.mind_powers(s) {
+                    return;
+                }
                 if self.holding {
                     // Pelt the cursor, leading it a little.
                     if self.attack_cooldown <= 0.0 && (s.cursor - self.pos).length() < 1500.0 {
@@ -1311,9 +1484,21 @@ impl Agent {
                     && self.attack_cooldown <= 0.0
                 {
                     // Cursor above punching reach: leap at it (and flying-kick it).
-                    let rise = (self.pos.y - s.cursor.y).min(MAX_JUMP_RISE);
+                    // Way up high: a super jump, with powers.
+                    let high = self.pos.y - s.cursor.y > MAX_JUMP_RISE;
+                    let max = if self.traits.powers {
+                        SUPER_RISE
+                    } else {
+                        MAX_JUMP_RISE
+                    };
+                    let rise = (self.pos.y - s.cursor.y).min(max);
                     self.attack_cooldown = 1.2;
-                    self.jump_to(v2(s.cursor.x, self.pos.y - rise + 40.0));
+                    let target = v2(s.cursor.x, self.pos.y - rise + 40.0);
+                    if high && self.traits.powers {
+                        self.super_jump_to(target);
+                    } else {
+                        self.jump_to(target);
+                    }
                     self.air_attack = true;
                 } else if dx.abs() > self.reach() * 0.8 {
                     let stop = s.cursor.x - dx.signum() * self.reach() * 0.7;
@@ -1378,6 +1563,10 @@ impl Agent {
             }
             if rise <= MAX_JUMP_RISE {
                 self.jump_to(v2(a.at.x, a.line_y));
+                return true;
+            }
+            if self.traits.powers && rise <= SUPER_RISE {
+                self.super_jump_to(v2(a.at.x, a.line_y));
                 return true;
             }
             // Too high: climb a step toward it.
@@ -1467,14 +1656,27 @@ impl Agent {
             })
             .copied();
         match target {
-            Some(p) if self.pos.y - top <= MAX_JUMP_RISE && top < self.pos.y - 20.0 => {
+            Some(p)
+                if self.pos.y - top
+                    <= if self.traits.powers {
+                        SUPER_RISE
+                    } else {
+                        MAX_JUMP_RISE
+                    }
+                    && top < self.pos.y - 20.0 =>
+            {
                 let launch = self.pos.x.clamp(p.x0 + 40.0, p.x1 - 40.0);
                 let launch = launch.clamp(ground.x0 + 10.0, ground.x1 - 10.0);
                 if (launch - self.pos.x).abs() > 25.0 {
                     self.walk_to(launch, false);
                 } else {
                     let land_x = self.pos.x.clamp(p.x0 + 30.0, p.x1 - 30.0) + self.facing * 10.0;
-                    self.jump_to(v2(land_x.clamp(p.x0 + 20.0, p.x1 - 20.0), p.y));
+                    let target = v2(land_x.clamp(p.x0 + 20.0, p.x1 - 20.0), p.y);
+                    if self.pos.y - top > MAX_JUMP_RISE {
+                        self.super_jump_to(target);
+                    } else {
+                        self.jump_to(target);
+                    }
                 }
             }
             _ => {
@@ -1518,6 +1720,18 @@ impl Agent {
                 let x = self.pos.x.clamp(p.x0 + 30.0, p.x1 - 30.0);
                 if (x - self.pos.x).abs() < 200.0 {
                     return self.jump_to(v2(x, p.y));
+                }
+            } else if self.traits.powers && roll < 0.05 {
+                // Nothing in reach: show off with a super jump to somewhere high.
+                if let Some(i) = world.platform_above(
+                    self.pos,
+                    SUPER_RISE,
+                    self.pos.x - 300.0,
+                    self.pos.x + 300.0,
+                ) {
+                    let p = world.platforms()[i];
+                    let x = self.pos.x.clamp(p.x0 + 30.0, p.x1 - 30.0);
+                    return self.super_jump_to(v2(x, p.y));
                 }
             }
         }
@@ -1668,6 +1882,7 @@ impl Agent {
             self.vel = V2::ZERO;
             self.ground = Some(p);
             self.air_attack = false;
+            self.super_air = false;
             if impact > 700.0 {
                 events.push(Event::Dust {
                     at: next,
@@ -1746,6 +1961,7 @@ mod tests {
             held: false,
             user_idle: 0.0,
             can_shove: false,
+            tk_words_near: 0,
         }
     }
 
@@ -2335,6 +2551,87 @@ mod tests {
         let mut ev2 = vec![];
         run(&mut b, &world(vec![top]), &s, 15.0, &mut ev2);
         assert!(!ev2.iter().any(|e| matches!(e, Event::ShoveWindow { .. })));
+    }
+
+    #[test]
+    fn super_jumps_at_a_cursor_way_up_high() {
+        let w = world(vec![]);
+        let mut a = agent();
+        let mut s = senses(Mode::Combat);
+        s.cursor = v2(960.0, GROUND_Y - 800.0);
+        let mut ev = vec![];
+        let mut peak = 0.0f32;
+        let mut charged = false;
+        for _ in 0..(5.0 / FIXED_DT) as usize {
+            a.update(&s, &w, &mut ev);
+            peak = peak.max(GROUND_Y - a.pos.y);
+            charged |= a.charging();
+        }
+        assert!(charged, "never powered up");
+        assert!(ev.iter().any(|e| matches!(e, Event::SuperJumped { .. })));
+        assert!(peak > MAX_JUMP_RISE + 200.0, "only rose {peak}");
+        // Without powers: an ordinary jump.
+        let mut b = agent();
+        b.traits.powers = false;
+        let mut ev2 = vec![];
+        let mut peak2 = 0.0f32;
+        for _ in 0..(5.0 / FIXED_DT) as usize {
+            b.update(&s, &w, &mut ev2);
+            peak2 = peak2.max(GROUND_Y - b.pos.y);
+        }
+        assert!(!ev2.iter().any(|e| matches!(e, Event::SuperJumped { .. })));
+        assert!(peak2 <= MAX_JUMP_RISE + 60.0, "rose {peak2} without powers");
+    }
+
+    #[test]
+    fn telekinesis_lifts_and_flings_the_cursor_from_afar() {
+        let w = world(vec![]);
+        let mut a = agent();
+        let mut s = senses(Mode::Combat);
+        s.can_grab_cursor = true;
+        s.cursor = v2(1400.0, GROUND_Y - 150.0);
+        let mut ev = vec![];
+        let mut lifted = false;
+        let mut flung = None;
+        for _ in 0..(30.0 / FIXED_DT) as usize {
+            a.update(&s, &w, &mut ev);
+            lifted |= ev.iter().any(|e| matches!(e, Event::MindLiftCursor { .. }));
+            if let Some(Event::MindFlingCursor { vel, .. }) = ev
+                .iter()
+                .find(|e| matches!(e, Event::MindFlingCursor { .. }))
+            {
+                flung = Some(*vel);
+                break;
+            }
+        }
+        assert!(lifted, "never lifted the cursor");
+        let vel = flung.expect("never flung it");
+        assert!(vel.x > 500.0 && vel.y < 0.0, "flung away and up: {vel:?}");
+        assert!((a.pos.x - 900.0).abs() < 600.0 || a.telekinesis().is_none());
+    }
+
+    #[test]
+    fn telekinesis_raises_words_and_fires_them() {
+        let w = world(vec![]);
+        let mut a = agent();
+        let mut s = senses(Mode::Combat);
+        s.cursor = v2(1500.0, GROUND_Y - 300.0);
+        s.tk_words_near = 6;
+        let mut ev = vec![];
+        run(&mut a, &w, &s, 30.0, &mut ev);
+        let lift = ev
+            .iter()
+            .position(|e| matches!(e, Event::MindLiftWords { .. }));
+        let fire = ev
+            .iter()
+            .position(|e| matches!(e, Event::MindFireWords { .. }));
+        assert!(lift.is_some() && fire > lift, "lift {lift:?} fire {fire:?}");
+        // Powers off: never.
+        let mut b = agent();
+        b.traits.powers = false;
+        let mut ev2 = vec![];
+        run(&mut b, &w, &s, 30.0, &mut ev2);
+        assert!(!ev2.iter().any(|e| matches!(e, Event::MindLiftWords { .. })));
     }
 
     #[test]

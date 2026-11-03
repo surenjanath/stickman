@@ -63,6 +63,21 @@ pub struct Projectile {
     pub age: f32,
 }
 
+/// A word held up by telekinesis, orbiting the figure.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Hover {
+    pub sprite: u32,
+    pub half: V2,
+    /// Where it was ripped from (it floats up from there).
+    pub from: V2,
+    pub t: f32,
+    pub slot: usize,
+    pub pos: V2,
+}
+
+/// Seconds for a lifted word to float from the page into orbit.
+const HOVER_RISE: f32 = 0.7;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Carried {
     pub sprite: u32,
@@ -104,6 +119,13 @@ pub struct WordPlay {
     rng: u64,
     /// How long landed words stay before fading; `None` keeps them for good.
     pub rest_time: Option<f32>,
+    /// Telekinesis: captures still on their way, and words in orbit.
+    tk_pending: Vec<CaptureNeeded>,
+    pub hovering: Vec<Hover>,
+    /// What lifted words orbit (above the figure's head); set every tick.
+    pub hover_center: V2,
+    /// Volley in progress: (target, seconds until the next word goes).
+    volley: Option<(V2, f32)>,
 }
 
 fn overlaps(a: &Rect, b: &Rect) -> f64 {
@@ -146,7 +168,94 @@ impl WordPlay {
             .iter()
             .any(|p| p.resting == 0.0 || p.fade.is_some())
             || self.carried.is_some()
+            || !self.hovering.is_empty()
             || self.holes.iter().any(|h| h.age > HOLE_LIFETIME)
+    }
+
+    /// Words telekinesis could lift: on the active window, within `radius` of
+    /// `near`, not already taken.
+    pub fn tk_candidates(&self, near: V2, radius: f32, active: Option<u32>) -> usize {
+        self.tk_words(near, radius, active).count()
+    }
+
+    fn tk_words(
+        &self,
+        near: V2,
+        radius: f32,
+        active: Option<u32>,
+    ) -> impl Iterator<Item = &ScreenWord> {
+        let target = self.target.map(|t| t.0.id);
+        self.words.iter().filter(move |w| {
+            Some(w.window) == active
+                && Some(w.id) != target
+                && (center(&w.rect) - near).length() < radius
+                && !self.holes.iter().any(|h| overlaps(&h.rect, &w.rect) > 0.3)
+        })
+    }
+
+    /// Lift up to `max` words near `near` with telekinesis. Returns the
+    /// captures to request; each arrives through [`captured`](Self::captured).
+    pub fn tk_lift(
+        &mut self,
+        near: V2,
+        radius: f32,
+        max: usize,
+        active: Option<u32>,
+    ) -> Vec<CaptureNeeded> {
+        let mut picked: Vec<ScreenWord> = self.tk_words(near, radius, active).copied().collect();
+        picked.sort_by(|a, b| {
+            (center(&a.rect) - near)
+                .length()
+                .total_cmp(&(center(&b.rect) - near).length())
+        });
+        picked.truncate(max);
+        let needs: Vec<CaptureNeeded> = picked
+            .iter()
+            .map(|w| CaptureNeeded {
+                id: w.id,
+                rect: w.rect,
+                window: w.window,
+            })
+            .collect();
+        self.words.retain(|w| !picked.iter().any(|p| p.id == w.id));
+        self.tk_pending.extend(needs.iter().copied());
+        needs
+    }
+
+    /// Fire every lifted word at `target`, one after another.
+    pub fn tk_fling(&mut self, target: V2) {
+        self.volley = Some((target, 0.0));
+        self.tk_pending.clear(); // late captures just drop
+    }
+
+    /// Telekinesis broke (the figure got hit): lifted words fall.
+    pub fn tk_drop(&mut self) {
+        self.tk_pending.clear();
+        self.volley = None;
+        for h in std::mem::take(&mut self.hovering) {
+            self.launch(
+                Carried {
+                    sprite: h.sprite,
+                    half: h.half,
+                },
+                h.pos,
+                v2(0.0, 0.0),
+            );
+        }
+    }
+
+    pub fn tk_active(&self) -> bool {
+        !self.hovering.is_empty() || !self.tk_pending.is_empty()
+    }
+
+    /// Orbit position for slot `i` of `n` at time `t`.
+    fn orbit(&self, i: usize, n: usize, t: f32) -> V2 {
+        let a = i as f32 / n.max(1) as f32 * std::f32::consts::TAU + t * 1.6;
+        self.hover_center
+            + v2(
+                a.cos() * 85.0,
+                a.sin() * 30.0 + (t * 3.0 + i as f32).sin() * 4.0,
+            )
     }
 
     /// New OCR words for `window` (overlay rects). `text` are the text-line
@@ -267,6 +376,31 @@ impl WordPlay {
         holding: bool,
         hands: V2,
     ) -> bool {
+        if let Some(i) = self.tk_pending.iter().position(|p| p.id == id) {
+            let need = self.tk_pending.remove(i);
+            let Some(sprite) = sprite else { return false };
+            self.holes.push(Hole {
+                rect: need.rect,
+                color: background.map(|c| f32::from(c) / 255.0),
+                window: need.window,
+                window_rect,
+                age: 0.0,
+            });
+            let pad = crate::ocr::GRAB_PAD_Y as f32;
+            let from = center(&need.rect);
+            self.hovering.push(Hover {
+                sprite,
+                half: v2(
+                    need.rect.width as f32 / 2.0,
+                    need.rect.height as f32 / 2.0 + pad,
+                ),
+                from,
+                t: 0.0,
+                slot: self.hovering.len(),
+                pos: from,
+            });
+            return true;
+        }
         let Some(need) = self.pending.filter(|p| p.id == id) else {
             return false;
         };
@@ -350,6 +484,40 @@ impl WordPlay {
             h.age += dt;
         }
         self.holes.retain(|h| h.age < HOLE_LIFETIME + HOLE_FADE);
+        // Lifted words float up from the page into orbit.
+        let n = self.hovering.len();
+        for i in 0..n {
+            let h = self.hovering[i];
+            let t = h.t + dt;
+            let goal = self.orbit(h.slot, n, t);
+            let k = crate::stickman::smoothstep(t / HOVER_RISE);
+            self.hovering[i].t = t;
+            self.hovering[i].pos = h.from.lerp(goal, k);
+        }
+        // The volley: one word every 0.09 s, straight-ish at the target.
+        if let Some((target, wait)) = &mut self.volley {
+            *wait -= dt;
+            if *wait <= 0.0 {
+                *wait = 0.09;
+                let target = *target;
+                if let Some(h) = (!self.hovering.is_empty()).then(|| self.hovering.remove(0)) {
+                    let d = target - h.pos;
+                    // Fast and flat: flight time grows gently with distance.
+                    let t = (d.length() / 1800.0).clamp(0.15, 0.45);
+                    let vel = v2(d.x / t, d.y / t - 0.5 * PROJECTILE_GRAVITY * t);
+                    self.launch(
+                        Carried {
+                            sprite: h.sprite,
+                            half: h.half,
+                        },
+                        h.pos,
+                        vel,
+                    );
+                } else {
+                    self.volley = None;
+                }
+            }
+        }
         let rest_time = self.rest_time;
         for p in &mut self.projectiles {
             p.age += dt;
@@ -457,6 +625,17 @@ impl WordPlay {
                 alpha: 1.0,
             });
         }
+        for h in &self.hovering {
+            // A faint aura behind each lifted word.
+            out.rect(h.pos, h.half + V2::splat(5.0), 8.0, [0.65, 0.4, 1.0, 0.22]);
+            out.sprite(SpriteDraw {
+                id: h.sprite,
+                center: h.pos,
+                half: h.half,
+                rotation: 0.12 * (h.t * 2.0 + h.slot as f32).sin(),
+                alpha: 1.0,
+            });
+        }
         for p in &self.projectiles {
             let alpha = p.fade.map_or(1.0, |f| 1.0 - f / FADE_TIME);
             out.sprite(SpriteDraw {
@@ -475,6 +654,7 @@ impl WordPlay {
             .iter()
             .map(|c| c.sprite)
             .chain(self.projectiles.iter().map(|p| p.sprite))
+            .chain(self.hovering.iter().map(|h| h.sprite))
             .collect()
     }
 }
@@ -693,12 +873,19 @@ mod tests {
         };
         assert!(step(&mut p, &w, 120.0).is_empty(), "faded despite Forever");
         assert_eq!(p.projectiles.len(), 1);
-        assert!((p.projectiles[0].pos.y - 492.0).abs() < 1.0, "resting on the window");
+        assert!(
+            (p.projectiles[0].pos.y - 492.0).abs() < 1.0,
+            "resting on the window"
+        );
         assert!(!p.animating(), "a word lying still needs no frames");
         // The window closes: the word drops to the ground and stays there.
         w.set_platforms(vec![ground]);
         step(&mut p, &w, 3.0);
-        assert!((p.projectiles[0].pos.y - 992.0).abs() < 1.0, "{:?}", p.projectiles[0].pos);
+        assert!(
+            (p.projectiles[0].pos.y - 992.0).abs() < 1.0,
+            "{:?}",
+            p.projectiles[0].pos
+        );
         // A timed setting fades it.
         p.rest_time = Some(15.0);
         let freed = step(&mut p, &w, 17.0);
@@ -720,6 +907,61 @@ mod tests {
         }
         assert_eq!(p.projectiles.len(), MAX_RESTING);
         assert_eq!(freed.len(), 5);
+    }
+
+    #[test]
+    fn telekinesis_lifts_a_group_of_words_and_fires_them_at_the_cursor() {
+        let mut w = World::new();
+        w.set_platforms(vec![Platform::ground(2000.0, 1000.0)]);
+        let mut p = play_with_words();
+        let near = v2(300.0, 300.0);
+        let available = p.tk_candidates(near, 2000.0, Some(WIN));
+        assert!(available >= 3, "{available}");
+        let needs = p.tk_lift(near, 2000.0, 3, Some(WIN));
+        assert_eq!(needs.len(), 3);
+        assert_eq!(p.tk_candidates(near, 2000.0, Some(WIN)), available - 3);
+        let wr = r(0.0, 0.0, 1000.0, 800.0);
+        for (i, n) in needs.iter().enumerate() {
+            assert!(p.captured(n.id, Some(20 + i as u32), [255; 3], wr, false, V2::ZERO));
+        }
+        assert_eq!(p.hovering.len(), 3);
+        assert_eq!(p.holes.len(), 3, "each leaves a hole");
+        p.hover_center = v2(600.0, 500.0);
+        for _ in 0..60 {
+            p.update(1.0 / 60.0, v2(-999.0, -999.0), &w, 0.0, 2000.0);
+        }
+        for h in &p.hovering {
+            assert!(
+                (h.pos - p.hover_center).length() < 100.0,
+                "not in orbit: {:?}",
+                h.pos
+            );
+        }
+        let cursor = v2(1400.0, 300.0);
+        p.tk_fling(cursor);
+        let mut hits = 0;
+        for _ in 0..120 {
+            let (ev, _) = p.update(1.0 / 60.0, cursor, &w, 0.0, 2000.0);
+            hits += ev
+                .iter()
+                .filter(|e| matches!(e, WordEvent::HitCursor { .. }))
+                .count();
+        }
+        assert!(p.hovering.is_empty());
+        assert!(hits >= 2, "only {hits} of 3 words hit the cursor");
+    }
+
+    #[test]
+    fn broken_telekinesis_drops_the_words() {
+        let mut p = play_with_words();
+        let needs = p.tk_lift(v2(300.0, 300.0), 2000.0, 2, Some(WIN));
+        let wr = r(0.0, 0.0, 1000.0, 800.0);
+        p.captured(needs[0].id, Some(1), [255; 3], wr, false, V2::ZERO);
+        p.tk_drop();
+        assert!(p.hovering.is_empty() && !p.tk_active());
+        assert_eq!(p.projectiles.len(), 1, "falls instead of vanishing");
+        // The other capture arriving late is not lifted.
+        assert!(!p.captured(needs[1].id, Some(2), [255; 3], wr, false, V2::ZERO));
     }
 
     #[test]

@@ -206,6 +206,88 @@ impl Particles {
         }
     }
 
+    /// A wisp of telekinetic glow at `at` (call every tick while it lasts).
+    pub fn aura(&mut self, at: V2, strength: f32) {
+        let n = if self.rand(0.0, 1.0) < strength.fract() {
+            strength as usize + 1
+        } else {
+            strength as usize
+        };
+        for _ in 0..n {
+            let d = self.dir(0.0, std::f32::consts::PI);
+            let r = self.rand(4.0, 16.0);
+            let vel = d * self.rand(20.0, 70.0) + v2(0.0, -30.0);
+            let size = self.rand(2.0, 4.0);
+            self.push(Particle {
+                pos: at + d * r,
+                vel,
+                age: 0.0,
+                life: 0.45,
+                size0: size,
+                size1: 0.5,
+                color: [0.72, 0.45, 1.0, 0.9],
+                shape: Shape::Disc,
+                gravity: 0.0,
+                drag: 2.0,
+            });
+        }
+    }
+
+    /// Crackling energy while powering up a super jump.
+    pub fn charge_sparks(&mut self, at: V2) {
+        for _ in 0..2 {
+            let d = self.dir(-std::f32::consts::FRAC_PI_2, 1.2);
+            let vel = d * self.rand(120.0, 260.0);
+            let x = self.rand(-18.0, 18.0);
+            self.push(Particle {
+                pos: at + v2(x, 0.0),
+                vel,
+                age: 0.0,
+                life: 0.3,
+                size0: 1.6,
+                size1: 0.6,
+                color: [0.55, 0.85, 1.0, 1.0],
+                shape: Shape::Streak,
+                gravity: 0.0,
+                drag: 4.0,
+            });
+        }
+    }
+
+    /// The glowing trail of a super jump.
+    pub fn trail(&mut self, at: V2) {
+        let j = v2(self.rand(-6.0, 6.0), self.rand(-6.0, 6.0));
+        self.push(Particle {
+            pos: at + j,
+            vel: V2::ZERO,
+            age: 0.0,
+            life: 0.35,
+            size0: 7.0,
+            size1: 1.0,
+            color: [0.55, 0.85, 1.0, 0.55],
+            shape: Shape::Disc,
+            gravity: 0.0,
+            drag: 0.0,
+        });
+    }
+
+    /// A ground-level shockwave ring (super jump launch).
+    pub fn shockwave(&mut self, at: V2) {
+        self.push(Particle {
+            pos: at,
+            vel: V2::ZERO,
+            age: 0.0,
+            life: 0.45,
+            size0: 8.0,
+            size1: 90.0,
+            color: [0.7, 0.9, 1.0, 0.9],
+            shape: Shape::Ring,
+            gravity: 0.0,
+            drag: 0.0,
+        });
+        self.dust(at, 1.0);
+    }
+
     /// Hearts floating up from a happy head.
     pub fn hearts(&mut self, at: V2) {
         for i in 0..6 {

@@ -94,7 +94,7 @@ pub fn lerp_pose(a: &Pose, b: &Pose, k: f32) -> Pose {
     std::array::from_fn(|i| lerp_angle(a[i], b[i], k))
 }
 
-pub(crate) fn smoothstep(u: f32) -> f32 {
+pub fn smoothstep(u: f32) -> f32 {
     let u = u.clamp(0.0, 1.0);
     u * u * (3.0 - 2.0 * u)
 }

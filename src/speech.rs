@@ -47,6 +47,9 @@ pub enum Moment {
     Dancing,
     Doodling,
     Shove,
+    SuperJump,
+    MindCursor,
+    MindWords,
 }
 
 impl Moment {
@@ -88,6 +91,12 @@ impl Moment {
             Moment::Dancing => (&["♪ ♫", "Dance break!", "Watch this!"], 0.6),
             Moment::Doodling => (&["Art time.", "Hold still…", "A masterpiece!"], 0.4),
             Moment::Shove => (&["Scoot over!", "Move it!", "Wheee, window ride!"], 0.5),
+            Moment::SuperJump => (&["Up, up and away!", "Super jump!", "Hup!"], 0.6),
+            Moment::MindCursor => (
+                &["With my mind!", "Hmmmmm…", "You're under my control."],
+                0.8,
+            ),
+            Moment::MindWords => (&["Words, rise!", "Behold!", "Incoming!"], 0.9),
         }
     }
 }
