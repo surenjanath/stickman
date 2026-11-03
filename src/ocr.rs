@@ -226,6 +226,8 @@ fn recognize(image: &CGImage) -> (Vec<Rect>, Vec<Word>, Vec<Letter>) {
     let mut out = Vec::new();
     let mut words = Vec::new();
     let mut letters: Vec<Letter> = Vec::new();
+    // Words and their boxes, split into letters once the font is known.
+    let mut pending: Vec<(String, Rect)> = Vec::new();
     objc::rc::autoreleasepool(|| {
         // SAFETY: documented Vision API; every object is either autoreleased or
         // released below, and nothing escapes the pool. `image` outlives the call.
@@ -296,25 +298,15 @@ fn recognize(image: &CGImage) -> (Vec<Rect>, Vec<Word>, Vec<Letter>) {
                         let utf16: Vec<u16> = text.encode_utf16().collect();
                         let word: String =
                             String::from_utf16_lossy(utf16.get(loc..loc + len).unwrap_or(&[]));
-                        let n = word.chars().count().max(1);
-                        for (k, ch) in word.chars().enumerate() {
-                            let up = ch.to_ascii_uppercase();
-                            let enough = letters.len() >= MAX_LETTERS
-                                || letters.iter().filter(|l| l.ch == up).count()
-                                    >= LETTERS_PER_CHAR;
-                            if ch.is_ascii_alphanumeric() && !enough {
-                                let cw = wb.w / n as f64;
-                                letters.push(Letter {
-                                    ch: up,
-                                    rect: Rect {
-                                        x: wb.x + cw * k as f64,
-                                        y: wb.y,
-                                        width: cw,
-                                        height: wb.h,
-                                    },
-                                });
-                            }
-                        }
+                        pending.push((
+                            word,
+                            Rect {
+                                x: wb.x,
+                                y: wb.y,
+                                width: wb.w,
+                                height: wb.h,
+                            },
+                        ));
                         words.push(Word {
                             rect: Rect {
                                 x: wb.x,
@@ -331,7 +323,95 @@ fn recognize(image: &CGImage) -> (Vec<Rect>, Vec<Word>, Vec<Letter>) {
             let _: () = msg_send![request, release];
         }
     });
+    // Single letters (for ransom notes): each word's box cut by its
+    // characters' widths, fixed or proportional, whichever fits this window.
+    // (Vision's own per-character boxes often land on a neighbour.)
+    let proportional = looks_proportional(&pending);
+    for (word, rect) in &pending {
+        for (ch, r) in split_word(word, *rect, proportional) {
+            let enough = letters.len() >= MAX_LETTERS
+                || letters.iter().filter(|l| l.ch == ch).count() >= LETTERS_PER_CHAR;
+            if !enough {
+                letters.push(Letter { ch, rect: r });
+            }
+        }
+    }
     (out, words, letters)
+}
+
+/// Rough advance width of `c` in a Helvetica-like font, in em/1000.
+fn glyph_w(c: char) -> f64 {
+    let w = match c {
+        'I' => 278,
+        'J' => 500,
+        'L' => 556,
+        'F' | 'T' | 'Z' => 611,
+        'C' | 'D' | 'H' | 'N' | 'R' | 'U' => 722,
+        'G' | 'O' | 'Q' => 778,
+        'M' => 833,
+        'W' => 944,
+        'A'..='Z' => 667,
+        'i' | 'j' | 'l' => 222,
+        'f' | 't' => 278,
+        'r' => 333,
+        'c' | 'k' | 's' | 'v' | 'x' | 'y' | 'z' => 500,
+        'w' => 722,
+        'm' => 833,
+        'a'..='z' | '0'..='9' => 556,
+        _ => 400,
+    };
+    f64::from(w)
+}
+
+/// Whether the words' widths fit a proportional font better than a
+/// fixed-width one: compares how much width-per-predicted-unit varies
+/// across words under each model.
+fn looks_proportional(words: &[(String, Rect)]) -> bool {
+    let spread = |unit: &dyn Fn(&str) -> f64| -> f64 {
+        let r: Vec<f64> = words
+            .iter()
+            .filter(|(w, _)| w.chars().count() >= 3)
+            .map(|(w, rect)| rect.width / unit(w).max(1e-6))
+            .collect();
+        if r.len() < 3 {
+            return f64::MAX;
+        }
+        let mean = r.iter().sum::<f64>() / r.len() as f64;
+        let var = r.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / r.len() as f64;
+        var.sqrt() / mean
+    };
+    let fixed = spread(&|w: &str| w.chars().count() as f64);
+    let prop = spread(&|w: &str| w.chars().map(glyph_w).sum());
+    prop < fixed
+}
+
+/// The letters of `word` (upper-cased, letters and digits only) with their
+/// share of `rect`.
+fn split_word(word: &str, rect: Rect, proportional: bool) -> Vec<(char, Rect)> {
+    let widths: Vec<f64> = word
+        .chars()
+        .map(|c| if proportional { glyph_w(c) } else { 1.0 })
+        .collect();
+    let total: f64 = widths.iter().sum::<f64>().max(1e-6);
+    let mut x = rect.x;
+    let mut out = Vec::new();
+    for (c, w) in word.chars().zip(widths) {
+        let cw = rect.width * w / total;
+        if c.is_ascii_alphanumeric() {
+            // Trimmed a little at each side, so neighbours don't bleed in.
+            out.push((
+                c.to_ascii_uppercase(),
+                Rect {
+                    x: x + cw * 0.06,
+                    y: rect.y,
+                    width: cw * 0.88,
+                    height: rect.height,
+                },
+            ));
+        }
+        x += cw;
+    }
+    out
 }
 
 /// Letters of a window in global points (letters too small, too big or in
@@ -622,6 +702,41 @@ pub fn spawn_worker(rx: Receiver<Job>, tx: Sender<Output>) -> JoinHandle<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn r(width: f64) -> Rect {
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            width,
+            height: 20.0,
+        }
+    }
+
+    #[test]
+    fn words_split_by_glyph_width_in_proportional_fonts() {
+        // Helvetica-ish: width follows the glyphs ("ill" is narrow).
+        let at = |w: &str| w.chars().map(glyph_w).sum::<f64>() * 0.03;
+        let prop: Vec<(String, Rect)> = ["minimum", "ill", "WOW", "little", "remember"]
+            .iter()
+            .map(|w| (w.to_string(), r(at(w))))
+            .collect();
+        assert!(looks_proportional(&prop));
+        // Monospace: width is the character count.
+        let mono: Vec<(String, Rect)> = ["minimum", "ill", "WOW", "little", "remember"]
+            .iter()
+            .map(|w| (w.to_string(), r(w.chars().count() as f64 * 10.0)))
+            .collect();
+        assert!(!looks_proportional(&mono));
+        // In "Mil" the M takes most of the width.
+        let l = split_word("Mil", r(100.0), true);
+        assert_eq!(l.iter().map(|x| x.0).collect::<String>(), "MIL");
+        assert!(l[0].1.width > 2.0 * l[1].1.width);
+        assert!(l[2].1.x + l[2].1.width < 100.0 && l[2].1.x + l[2].1.width > 97.0);
+        // Punctuation takes room but isn't a letter.
+        let e = split_word("cat.", r(40.0), false);
+        assert_eq!(e.len(), 3);
+        assert!((e[2].1.x - 20.6).abs() < 1e-6);
+    }
 
     #[test]
     fn icon_corners_are_rounded_and_the_middle_kept() {
