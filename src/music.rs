@@ -16,6 +16,81 @@ struct AudioObjectPropertyAddress {
     element: u32,
 }
 
+#[link(name = "CoreMediaIO", kind = "framework")]
+extern "C" {
+    fn CMIOObjectGetPropertyDataSize(
+        object: u32,
+        address: *const AudioObjectPropertyAddress,
+        qualifier_size: u32,
+        qualifier: *const std::ffi::c_void,
+        size: *mut u32,
+    ) -> i32;
+    fn CMIOObjectGetPropertyData(
+        object: u32,
+        address: *const AudioObjectPropertyAddress,
+        qualifier_size: u32,
+        qualifier: *const std::ffi::c_void,
+        size: u32,
+        used: *mut u32,
+        data: *mut std::ffi::c_void,
+    ) -> i32;
+}
+
+const CMIO_DEVICES: u32 = four_cc(b"dev#");
+
+/// Whether any app is using a camera (a video call, most likely). Doesn't
+/// open the camera: it asks CoreMediaIO whether each device is running.
+pub fn camera_in_use() -> bool {
+    let addr = AudioObjectPropertyAddress {
+        selector: CMIO_DEVICES,
+        scope: SCOPE_GLOBAL,
+        element: ELEMENT_MAIN,
+    };
+    let mut size = 0u32;
+    // SAFETY: read-only CoreMediaIO queries with valid addresses and
+    // out-parameters sized as reported; device ids are u32 (CMIOObjectID).
+    unsafe {
+        if CMIOObjectGetPropertyDataSize(SYSTEM_OBJECT, &addr, 0, std::ptr::null(), &mut size) != 0
+        {
+            return false;
+        }
+        let n = size as usize / std::mem::size_of::<u32>();
+        let mut ids = vec![0u32; n];
+        let mut used = 0u32;
+        if CMIOObjectGetPropertyData(
+            SYSTEM_OBJECT,
+            &addr,
+            0,
+            std::ptr::null(),
+            size,
+            &mut used,
+            ids.as_mut_ptr() as *mut std::ffi::c_void,
+        ) != 0
+        {
+            return false;
+        }
+        ids.into_iter().any(|id| {
+            let running = AudioObjectPropertyAddress {
+                selector: IS_RUNNING_SOMEWHERE,
+                scope: SCOPE_GLOBAL,
+                element: ELEMENT_MAIN,
+            };
+            let mut v = 0u32;
+            let mut used = 0u32;
+            CMIOObjectGetPropertyData(
+                id,
+                &running,
+                0,
+                std::ptr::null(),
+                4,
+                &mut used,
+                &mut v as *mut u32 as *mut std::ffi::c_void,
+            ) == 0
+                && v != 0
+        })
+    }
+}
+
 #[link(name = "CoreAudio", kind = "framework")]
 extern "C" {
     fn AudioObjectGetPropertyData(
@@ -69,20 +144,36 @@ pub fn output_in_use() -> bool {
         .is_some_and(|v| v != 0)
 }
 
-/// Poll [`output_in_use`] every second on a background thread.
-pub fn spawn_watcher() -> Arc<AtomicBool> {
-    let flag = Arc::new(AtomicBool::new(false));
-    let out = flag.clone();
+/// What's going on around the user, polled in the background.
+#[derive(Clone, Default)]
+pub struct Presence {
+    /// Some app is playing audio.
+    pub music: Arc<AtomicBool>,
+    /// Some app is using a camera.
+    pub camera: Arc<AtomicBool>,
+}
+
+/// Poll audio every second and the camera every two, on a background thread.
+pub fn spawn_watcher() -> Presence {
+    let p = Presence::default();
+    let out = p.clone();
     let spawned = std::thread::Builder::new()
-        .name("stickman-music".into())
-        .spawn(move || loop {
-            out.store(output_in_use(), Ordering::Relaxed);
-            std::thread::sleep(Duration::from_secs(1));
+        .name("stickman-presence".into())
+        .spawn(move || {
+            let mut tick = 0u32;
+            loop {
+                out.music.store(output_in_use(), Ordering::Relaxed);
+                if tick % 2 == 0 {
+                    out.camera.store(camera_in_use(), Ordering::Relaxed);
+                }
+                tick = tick.wrapping_add(1);
+                std::thread::sleep(Duration::from_secs(1));
+            }
         });
     if spawned.is_err() {
-        log::warn!("music: could not start the watcher");
+        log::warn!("presence: could not start the watcher");
     }
-    flag
+    p
 }
 
 #[cfg(test)]
@@ -98,5 +189,6 @@ mod tests {
     #[test]
     fn query_does_not_crash() {
         let _ = output_in_use();
+        let _ = camera_in_use();
     }
 }

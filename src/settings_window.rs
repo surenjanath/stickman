@@ -502,6 +502,11 @@ impl SettingsWindow {
         // Locked hats are greyed out (we enable items ourselves).
         let _: () = msg_send![hat, setAutoenablesItems: NO];
         self.hat_popup = hat;
+        let calls = self.check(
+            "Quiet and harmless during video calls",
+            Command::TogglePoliteCalls,
+        );
+        let nights = self.check("Sleepy late at night", Command::ToggleSleepyNights);
         let earn = self.check("Earn moves by levelling up", Command::ToggleEarnMoves);
         let aggression = self.slider(SLIDER_AGGRESSION);
         let chattiness = self.slider(SLIDER_CHATTINESS);
@@ -546,6 +551,12 @@ impl SettingsWindow {
             )),
             Row::Section("What it does"),
             Row::Field("Behaviour:", behaviour),
+            Row::Under(calls),
+            Row::Under(nights),
+            Row::Under(Self::hint(
+                "While a camera is in use it whispers once, then goes silent and leaves your \
+                 cursor and windows alone. After 11 pm it naps much sooner.",
+            )),
             Row::Under(earn),
             Row::Under(Self::hint(
                 "Like a game: super jump at level 2, telekinesis at 3, swords at 4, \

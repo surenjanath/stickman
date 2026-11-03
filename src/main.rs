@@ -312,7 +312,13 @@ struct Scene {
     zzz_sprites: Vec<(u32, V2)>,
     sound: Sound,
     /// Some app is playing audio (polled in the background).
-    music: Arc<AtomicBool>,
+    /// Music playing and camera in use (polled in the background).
+    presence: stickman::music::Presence,
+    /// A camera is in use: be quiet and harmless.
+    on_call: bool,
+    /// Late at night: sleepy.
+    night: bool,
+    night_checked: Instant,
     ocr_target: Option<ocr::Request>,
     ocr_candidate: Option<ocr::Request>,
     ocr_candidate_since: Instant,
@@ -525,8 +531,14 @@ impl Scene {
             forced.is_none() && self.settings.visible && !self.settings.paused,
             Ordering::Relaxed,
         );
+        // On a call: just watch, quietly.
+        if self.on_call && forced.is_none() && self.mode != Mode::Observe {
+            self.mode = Mode::Observe;
+            self.mode_since = Instant::now();
+        }
         // Enraged (and left to its own devices): it's war.
         if self.mind.enraged
+            && !self.on_call
             && forced.is_none()
             && self.rival.is_none()
             && self.mode != Mode::Combat
@@ -618,7 +630,20 @@ impl Scene {
             language: self.settings.language,
             grudge: self.stats.grudge.round() as u8,
             rank: format!("level {} {}", self.stats.level(), self.stats.title()),
-            mind: self.mind.summary(),
+            mind: format!(
+                "{}{}{}",
+                self.mind.summary(),
+                if self.night {
+                    " It is late at night and it is sleepy."
+                } else {
+                    ""
+                },
+                if self.on_call {
+                    " The user is on a video call: it keeps quiet and still."
+                } else {
+                    ""
+                }
+            ),
         });
     }
 
@@ -665,7 +690,7 @@ impl Scene {
     /// Rasterise and show lines accepted by [`Speech`] (no-op when bubbles are off).
     fn speak(&mut self, lines: Option<Vec<String>>) {
         let Some(lines) = lines else { return };
-        if !self.settings.speech {
+        if !self.settings.speech || self.on_call {
             self.speech.clear();
             return;
         }
@@ -1168,6 +1193,9 @@ impl Scene {
     }
 
     fn maybe_write_note(&mut self) {
+        if self.on_call {
+            return;
+        }
         // The fresh read didn't come back in time: use what we have.
         if let Some((text, at)) = self.pending_note.clone() {
             if at.elapsed() > Duration::from_secs(2) {
@@ -1316,7 +1344,7 @@ impl Scene {
             let dir = f.vel.normalize_or(v2(1.0, 0.0));
             self.particles.sparks(self.cursor.pos, dir, 30);
             self.sfx(Sfx::Boom, 0.6, self.cursor.pos);
-            if self.settings.cursor_push {
+            if self.cursor_fx() {
                 let area = self.layout.screen_at(self.cursor.pos).frame;
                 self.cursor.push(dir * 140.0, area);
                 self.last_cursor = self.cursor.pos;
@@ -1342,7 +1370,7 @@ impl Scene {
         let held_too_long =
             matches!(self.captive, Captive::Held { since, .. } if since.elapsed() > MAX_HOLD);
         let yanked = (self.cursor.pos - at).length() > ESCAPE_PT;
-        if yanked || held_too_long || !self.settings.cursor_push {
+        if yanked || held_too_long || !self.cursor_fx() {
             let was_held = matches!(self.captive, Captive::Held { .. });
             self.captive = Captive::Free;
             self.agent.holding_cursor = false;
@@ -1412,7 +1440,7 @@ impl Scene {
 
     /// Play a sound effect panned to where it happens.
     fn sfx(&mut self, sfx: Sfx, gain: f32, at: V2) {
-        if self.settings.sound {
+        if self.settings.sound && !self.on_call {
             let b = self.layout.bounds();
             let pan = ((at.x - b.x as f32) / b.width as f32) * 2.0 - 1.0;
             // 70 (the default) plays effects at their designed loudness.
@@ -1476,7 +1504,7 @@ impl Scene {
                 WordEvent::HitCursor { at, dir } => {
                     self.particles.sparks(at, dir, 22);
                     self.sfx(Sfx::Punch, 0.7, at);
-                    if self.settings.cursor_push {
+                    if self.cursor_fx() {
                         self.cursor.push(dir * CURSOR_PUSH, area);
                     }
                     log::info!("event: a thrown word hit the cursor");
@@ -1512,7 +1540,7 @@ impl Scene {
                     self.particles.sparks(at, dir, 18);
                     let kick = matches!(self.agent.action, stickman::agent::Action::Kick { .. });
                     self.sfx(if kick { Sfx::Kick } else { Sfx::Punch }, 0.8, at);
-                    if self.settings.cursor_push {
+                    if self.cursor_fx() {
                         self.cursor.push(dir * CURSOR_PUSH, area);
                     }
                     log::info!("event: struck cursor");
@@ -1539,7 +1567,7 @@ impl Scene {
                 Event::Stomp { at, window } => {
                     self.particles.dust(at, 0.5);
                     self.sfx(Sfx::Stomp, 0.8, at);
-                    if self.settings.window_shake && self.accessibility {
+                    if self.window_fx() && self.accessibility {
                         if let Some(w) = self.snapshot.windows.iter().find(|w| w.id == window) {
                             let dx = if self.frames % 2 == 0 { 9.0 } else { -9.0 };
                             let _ = self
@@ -1561,7 +1589,7 @@ impl Scene {
                 }
                 Event::Dropped { at } => self.words.dropped(at),
                 Event::CaughtCursor { at } => {
-                    if self.settings.cursor_push {
+                    if self.cursor_fx() {
                         self.captive = Captive::Held {
                             at: self.cursor.pos,
                             since: Instant::now(),
@@ -1605,7 +1633,7 @@ impl Scene {
                     self.particles.sparks(at, dir, 26);
                     self.sfx(Sfx::Clank, 0.8, at);
                     self.sfx(Sfx::Punch, 0.6, at);
-                    if self.settings.cursor_push {
+                    if self.cursor_fx() {
                         let area = self.layout.screen_at(self.cursor.pos).frame;
                         self.cursor.push(dir * CURSOR_PUSH * 1.8, area);
                         self.last_cursor = self.cursor.pos;
@@ -1633,7 +1661,7 @@ impl Scene {
                     self.quip(Moment::SuperJump);
                 }
                 Event::MindLiftCursor { at } => {
-                    if self.settings.cursor_push && matches!(self.captive, Captive::Free) {
+                    if self.cursor_fx() && matches!(self.captive, Captive::Free) {
                         self.captive = Captive::Levitating {
                             origin: self.cursor.pos,
                             at: self.cursor.pos,
@@ -1662,8 +1690,9 @@ impl Scene {
                     }
                 }
                 Event::MindLiftWindow { at } => {
-                    let can =
-                        self.settings.throw_windows && self.accessibility && self.flight.is_none();
+                    let can = (self.settings.throw_windows && !self.on_call)
+                        && self.accessibility
+                        && self.flight.is_none();
                     if let (true, Some(w)) = (can, self.snapshot.active()) {
                         let screen = self.layout.screen_at(v2(
                             (w.rect.x + w.rect.width / 2.0) as f32,
@@ -1746,10 +1775,7 @@ impl Scene {
                 }
                 Event::ShoveWindow { at, window, dx } => {
                     self.sfx(Sfx::Stomp, 0.9, at);
-                    if self.settings.window_shoves
-                        && self.settings.window_shake
-                        && self.accessibility
-                    {
+                    if self.settings.window_shoves && self.window_fx() && self.accessibility {
                         if let Some(w) = self.snapshot.windows.iter().find(|w| w.id == window) {
                             // Keep the window on its screen.
                             let screen = self.layout.screen_at(v2(at.x, at.y + 1.0)).frame;
@@ -2127,6 +2153,49 @@ impl Scene {
         }
     }
 
+    /// Effects on the user's cursor are allowed (setting on, not on a call).
+    fn cursor_fx(&self) -> bool {
+        self.settings.cursor_push && !self.on_call
+    }
+
+    /// Effects on the user's windows are allowed.
+    fn window_fx(&self) -> bool {
+        self.settings.window_shake && !self.on_call
+    }
+
+    /// Video calls and the time of day.
+    fn sense_surroundings(&mut self) {
+        let call = self.settings.polite_calls && self.presence.camera.load(Ordering::Relaxed);
+        if call != self.on_call {
+            if call {
+                log::info!("presence: a camera is on: going quiet");
+                let lines = self
+                    .speech
+                    .say("Shh… you're on a call. I'll be good.", Priority::Event);
+                self.speak(lines);
+                self.on_call = true;
+                self.captive = Captive::Free;
+                self.agent.holding_cursor = false;
+            } else {
+                self.on_call = false;
+                log::info!("presence: the camera is off");
+                let lines = self.speech.say("Phew, call's over!", Priority::Event);
+                self.speak(lines);
+            }
+        }
+        if self.night_checked.elapsed() > Duration::from_secs(60) {
+            self.night_checked = Instant::now();
+            let h = macos::local_hour();
+            let night = self.settings.sleepy_nights && !(6..23).contains(&h);
+            if night && !self.night {
+                log::info!("presence: it's late ({h}:00): sleepy");
+                let lines = self.speech.say("*yawn* It's so late…", Priority::Quip);
+                self.speak(lines);
+            }
+            self.night = night;
+        }
+    }
+
     /// Moves unlocked at `level` (always, with "Earn moves" off).
     fn unlocked(&self, level: u32) -> bool {
         !self.settings.earn_moves || self.stats.level() >= level
@@ -2389,6 +2458,7 @@ impl Scene {
             self.last_cursor = self.cursor.pos;
         }
         self.track_press();
+        self.sense_surroundings();
         self.track_drawing();
         self.debug_do();
         self.agent.traits = stickman::agent::Traits {
@@ -2481,6 +2551,7 @@ impl Scene {
         }
         // Now and then, a rival comes to fight.
         if self.settings.rival_visits
+            && !self.on_call
             && self.settings.behaviour == Behaviour::Auto
             && Instant::now() >= self.next_rival
         {
@@ -2500,7 +2571,8 @@ impl Scene {
             .sound
             .last_played
             .is_some_and(|t| t.elapsed() < Duration::from_secs(4));
-        let music = self.settings.dance_to_music && self.music.load(Ordering::Relaxed) && !ours;
+        let music =
+            self.settings.dance_to_music && self.presence.music.load(Ordering::Relaxed) && !ours;
         let tk_words = if self.settings.powers && self.settings.throw_words && self.ocr_tx.is_some()
         {
             let active = self.snapshot.active().map(|w| w.id);
@@ -2536,9 +2608,11 @@ impl Scene {
                 max_x: range.max_x,
                 top: range.top,
                 ammo,
-                can_grab_cursor: self.settings.cursor_push,
+                can_grab_cursor: self.cursor_fx(),
                 held: self.dragging,
-                user_idle: self.last_mouse_move.elapsed().as_secs_f32(),
+                // Late at night it dozes off four times sooner.
+                user_idle: self.last_mouse_move.elapsed().as_secs_f32()
+                    * if self.night { 4.0 } else { 1.0 },
                 tk_words_near: tk_words,
                 music,
                 weapon_available: self.settings.weapons
@@ -2549,14 +2623,12 @@ impl Scene {
                     && self.sword_pending.is_none()
                     && Instant::now() >= self.sword_retry
                     && self.snapshot.active().is_some(),
-                can_throw_window: self.settings.throw_windows
+                can_throw_window: (self.settings.throw_windows && !self.on_call)
                     && self.unlocked(5)
                     && self.accessibility
                     && self.flight.is_none()
                     && self.snapshot.active().is_some(),
-                can_shove: self.settings.window_shoves
-                    && self.settings.window_shake
-                    && self.accessibility,
+                can_shove: self.settings.window_shoves && self.window_fx() && self.accessibility,
             };
             let dueling = self.rival.as_ref().is_some_and(|r| r.fighting());
             if !dueling {
@@ -3259,7 +3331,10 @@ impl App {
             zzz_sprites: Vec::new(),
             last_director_line: now,
             sound,
-            music: stickman::music::spawn_watcher(),
+            presence: stickman::music::spawn_watcher(),
+            on_call: false,
+            night: false,
+            night_checked: now - Duration::from_secs(120),
             ocr_target: None,
             ocr_candidate: None,
             ocr_candidate_since: now,

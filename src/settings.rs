@@ -273,6 +273,10 @@ pub struct Settings {
     pub self_reflection: bool,
     /// Spell out messages with letters torn from the screen.
     pub notes: bool,
+    /// Go quiet and harmless while a camera is in use (video calls).
+    pub polite_calls: bool,
+    /// Sleepy late at night (naps sooner).
+    pub sleepy_nights: bool,
     /// Lose its temper when resentment boils over (rage: swearing, red,
     /// relentless attacks).
     pub lose_temper: bool,
@@ -316,6 +320,8 @@ impl Default for Settings {
             self_reflection: true,
             notes: true,
             lose_temper: true,
+            polite_calls: true,
+            sleepy_nights: true,
             visible: true,
             paused: false,
         }
@@ -361,6 +367,8 @@ pub enum Command {
     ToggleReflection,
     ToggleNotes,
     ToggleTemper,
+    TogglePoliteCalls,
+    ToggleSleepyNights,
     /// Reflect on its memories right now.
     ReflectNow,
     /// Forget everything it remembers and feels.
@@ -414,6 +422,8 @@ impl Command {
             Command::ToggleReflection => 323,
             Command::ToggleNotes => 324,
             Command::ToggleTemper => 325,
+            Command::TogglePoliteCalls => 327,
+            Command::ToggleSleepyNights => 328,
             Command::ReflectNow => 408,
             Command::ResetMind => 406,
             Command::WriteNote => 407,
@@ -473,6 +483,8 @@ impl Command {
             323 => Command::ToggleReflection,
             324 => Command::ToggleNotes,
             325 => Command::ToggleTemper,
+            327 => Command::TogglePoliteCalls,
+            328 => Command::ToggleSleepyNights,
             408 => Command::ReflectNow,
             406 => Command::ResetMind,
             407 => Command::WriteNote,
@@ -520,6 +532,8 @@ impl Settings {
             Command::ToggleReflection => self.self_reflection = !self.self_reflection,
             Command::ToggleNotes => self.notes = !self.notes,
             Command::ToggleTemper => self.lose_temper = !self.lose_temper,
+            Command::TogglePoliteCalls => self.polite_calls = !self.polite_calls,
+            Command::ToggleSleepyNights => self.sleepy_nights = !self.sleepy_nights,
             Command::SetLanguage(l) => self.language = l,
             Command::ToggleBleep => self.bleep = !self.bleep,
             Command::SetColor(c) => self.color = c,
@@ -564,6 +578,8 @@ impl Settings {
             Command::ToggleReflection => self.self_reflection,
             Command::ToggleNotes => self.notes,
             Command::ToggleTemper => self.lose_temper,
+            Command::TogglePoliteCalls => self.polite_calls,
+            Command::ToggleSleepyNights => self.sleepy_nights,
             Command::ToggleBleep => self.bleep,
             Command::ToggleVisible => self.visible,
             Command::TogglePaused => self.paused,
@@ -669,6 +685,8 @@ mod tests {
             Command::ToggleReflection,
             Command::ToggleNotes,
             Command::ToggleTemper,
+            Command::TogglePoliteCalls,
+            Command::ToggleSleepyNights,
             Command::ReflectNow,
             Command::ResetMind,
             Command::WriteNote,

@@ -455,6 +455,21 @@ fn focused_window(pid: i64) -> Option<AxElement> {
     ))
 }
 
+/// The local hour, 0..23. Main thread only.
+pub fn local_hour() -> u32 {
+    // SAFETY: documented NSCalendar/NSDate API; autoreleased objects.
+    unsafe {
+        let cal: *mut Object = msg_send![class!(NSCalendar), currentCalendar];
+        let now: *mut Object = msg_send![class!(NSDate), date];
+        if cal.is_null() || now.is_null() {
+            return 12;
+        }
+        // NSCalendarUnitHour = 1 << 5.
+        let h: isize = msg_send![cal, component: 32usize fromDate: now];
+        h.clamp(0, 23) as u32
+    }
+}
+
 /// The process id of the Dock. Main thread only.
 pub fn dock_pid() -> Option<i64> {
     // SAFETY: documented NSRunningApplication API on the main thread; the
