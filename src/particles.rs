@@ -1,0 +1,276 @@
+//! Particle effects: hit explosions, sparks, landing dust, shockwave rings and KO
+//! stars. Simulated on the CPU (a few hundred particles at most) and drawn on the
+//! GPU as instanced SDF discs, streaks and rings in the figure's draw call.
+
+use crate::geom::{v2, V2};
+use crate::render::DrawList;
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Shape {
+    Disc,
+    /// A line along the velocity (sparks).
+    Streak,
+    /// Expanding outline (shockwave).
+    Ring,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Particle {
+    pos: V2,
+    vel: V2,
+    age: f32,
+    life: f32,
+    size0: f32,
+    size1: f32,
+    color: [f32; 4],
+    shape: Shape,
+    gravity: f32,
+    drag: f32,
+}
+
+pub const MAX_PARTICLES: usize = 600;
+
+const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+const HOT: [f32; 4] = [1.0, 0.86, 0.35, 1.0];
+const FIRE: [f32; 4] = [1.0, 0.45, 0.12, 1.0];
+const SMOKE: [f32; 4] = [0.55, 0.55, 0.58, 0.8];
+const STAR: [f32; 4] = [1.0, 0.85, 0.2, 1.0];
+
+pub struct Particles {
+    list: Vec<Particle>,
+    rng: u64,
+}
+
+impl Particles {
+    pub fn new(seed: u64) -> Particles {
+        Particles {
+            list: Vec::with_capacity(MAX_PARTICLES),
+            rng: seed | 1,
+        }
+    }
+
+    fn rand(&mut self, lo: f32, hi: f32) -> f32 {
+        self.rng ^= self.rng >> 12;
+        self.rng ^= self.rng << 25;
+        self.rng ^= self.rng >> 27;
+        let r = self.rng.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40;
+        lo + (hi - lo) * (r as f32 / (1u64 << 24) as f32)
+    }
+
+    fn push(&mut self, p: Particle) {
+        if self.list.len() < MAX_PARTICLES {
+            self.list.push(p);
+        }
+    }
+
+    fn dir(&mut self, base: f32, spread: f32) -> V2 {
+        let a = base + self.rand(-spread, spread);
+        v2(a.cos(), a.sin())
+    }
+
+    pub fn len(&self) -> usize {
+        self.list.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+
+    /// Click explosion: fireball, sparks and a shockwave ring, biased along `dir`.
+    pub fn explosion(&mut self, at: V2, dir: V2) {
+        let base = dir.y.atan2(dir.x);
+        self.push(Particle {
+            pos: at,
+            vel: V2::ZERO,
+            age: 0.0,
+            life: 0.35,
+            size0: 8.0,
+            size1: 70.0,
+            color: WHITE,
+            shape: Shape::Ring,
+            gravity: 0.0,
+            drag: 0.0,
+        });
+        for i in 0..30 {
+            let d = if i % 3 == 0 {
+                self.dir(base, 0.9)
+            } else {
+                self.dir(0.0, std::f32::consts::PI)
+            };
+            let speed = self.rand(120.0, 520.0);
+            let hot = self.rand(0.0, 1.0) < 0.4;
+            let (life, size0) = (self.rand(0.35, 0.75), self.rand(6.0, 13.0));
+            self.push(Particle {
+                pos: at,
+                vel: d * speed,
+                age: 0.0,
+                life,
+                size0,
+                size1: 0.0,
+                color: if hot { HOT } else { FIRE },
+                shape: Shape::Disc,
+                gravity: 350.0,
+                drag: 2.5,
+            });
+        }
+        self.sparks(at, dir, 16);
+        for _ in 0..8 {
+            let d = self.dir(-std::f32::consts::FRAC_PI_2, 1.2);
+            let speed = self.rand(30.0, 90.0);
+            let (life, size0) = (self.rand(0.6, 1.1), self.rand(8.0, 14.0));
+            self.push(Particle {
+                pos: at,
+                vel: d * speed,
+                age: 0.0,
+                life,
+                size0,
+                size1: 18.0,
+                color: SMOKE,
+                shape: Shape::Disc,
+                gravity: -40.0,
+                drag: 1.5,
+            });
+        }
+    }
+
+    /// Bright streaks flying mostly along `dir` (punch impacts).
+    pub fn sparks(&mut self, at: V2, dir: V2, n: usize) {
+        let base = dir.y.atan2(dir.x);
+        for _ in 0..n {
+            let d = self.dir(base, 0.8);
+            let speed = self.rand(450.0, 950.0);
+            let life = self.rand(0.15, 0.32);
+            let color = if self.rand(0.0, 1.0) < 0.5 {
+                WHITE
+            } else {
+                HOT
+            };
+            self.push(Particle {
+                pos: at,
+                vel: d * speed,
+                age: 0.0,
+                life,
+                size0: 2.2,
+                size1: 0.6,
+                color,
+                shape: Shape::Streak,
+                gravity: 900.0,
+                drag: 1.0,
+            });
+        }
+    }
+
+    /// Puffs kicked up sideways along the ground.
+    pub fn dust(&mut self, at: V2, strength: f32) {
+        let n = (6.0 + 14.0 * strength) as usize;
+        for i in 0..n {
+            let side = if i % 2 == 0 { 1.0 } else { -1.0 };
+            let speed = self.rand(40.0, 160.0) * (0.5 + strength);
+            let up = self.rand(-60.0, -10.0);
+            let (life, size0) = (self.rand(0.35, 0.7), self.rand(3.0, 6.0));
+            let offset = side * self.rand(0.0, 10.0);
+            self.push(Particle {
+                pos: at + v2(offset, -2.0),
+                vel: v2(side * speed, up),
+                age: 0.0,
+                life,
+                size0,
+                size1: size0 * 2.2,
+                color: SMOKE,
+                shape: Shape::Disc,
+                gravity: 60.0,
+                drag: 3.0,
+            });
+        }
+    }
+
+    /// Little stars circling a knocked-out head.
+    pub fn stars(&mut self, at: V2) {
+        for i in 0..5 {
+            let a = i as f32 / 5.0 * std::f32::consts::TAU;
+            self.push(Particle {
+                pos: at + v2(a.cos() * 22.0, a.sin() * 6.0 - 10.0),
+                vel: v2(-a.sin() * 50.0, a.cos() * 14.0),
+                age: 0.0,
+                life: 2.2,
+                size0: 3.5,
+                size1: 2.0,
+                color: STAR,
+                shape: Shape::Disc,
+                gravity: 0.0,
+                drag: 0.0,
+            });
+        }
+    }
+
+    pub fn update(&mut self, dt: f32) {
+        for p in &mut self.list {
+            p.age += dt;
+            p.vel.y += p.gravity * dt;
+            p.vel *= (-p.drag * dt).exp();
+            p.pos += p.vel * dt;
+        }
+        self.list.retain(|p| p.age < p.life);
+    }
+
+    pub fn draw(&self, out: &mut DrawList) {
+        for p in &self.list {
+            let k = (p.age / p.life).clamp(0.0, 1.0);
+            let size = p.size0 + (p.size1 - p.size0) * k;
+            let fade = 1.0 - k * k;
+            let color = [p.color[0], p.color[1], p.color[2], p.color[3] * fade];
+            match p.shape {
+                Shape::Disc => out.disc(p.pos, size, color),
+                Shape::Streak => out.capsule(p.pos, p.pos - p.vel * 0.025, size, color),
+                Shape::Ring => out.ring(p.pos, size, 3.0 * (1.0 - k) + 0.5, color),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explosion_spawns_and_burns_out() {
+        let mut p = Particles::new(1);
+        p.explosion(v2(100.0, 100.0), v2(1.0, 0.0));
+        assert!(p.len() > 40);
+        for _ in 0..30 {
+            p.update(1.0 / 60.0);
+        }
+        assert!(!p.is_empty(), "too short-lived");
+        for _ in 0..90 {
+            p.update(1.0 / 60.0);
+        }
+        assert!(p.is_empty(), "{} particles still alive after 2 s", p.len());
+    }
+
+    #[test]
+    fn sparks_fly_along_the_hit_direction() {
+        let mut p = Particles::new(2);
+        p.sparks(v2(0.0, 0.0), v2(1.0, 0.0), 40);
+        p.update(0.05);
+        let mean_x: f32 = p.list.iter().map(|q| q.pos.x).sum::<f32>() / p.len() as f32;
+        assert!(mean_x > 15.0, "{mean_x}");
+    }
+
+    #[test]
+    fn capped_at_max() {
+        let mut p = Particles::new(3);
+        for _ in 0..50 {
+            p.explosion(v2(0.0, 0.0), v2(0.0, -1.0));
+        }
+        assert_eq!(p.len(), MAX_PARTICLES);
+    }
+
+    #[test]
+    fn draws_one_instance_per_particle() {
+        let mut p = Particles::new(4);
+        p.dust(v2(0.0, 0.0), 1.0);
+        let mut dl = DrawList::default();
+        p.draw(&mut dl);
+        assert_eq!(dl.len(), p.len());
+    }
+}

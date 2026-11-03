@@ -1,5 +1,6 @@
-//! The stick figure: StykAnimate's "Walker" rig, a procedural walk with planted
-//! feet, an idle pose, and a small behaviour state machine.
+//! The stick figure: StykAnimate's "Walker" rig, forward kinematics, two-bone leg
+//! IK, the procedural walk and the idle pose. Action poses live in `poses.rs`,
+//! behaviour in `agent.rs`.
 //!
 //! The rig is ported verbatim from StykAnimate's `src/demo.mjs`
 //! (`defaultFigure()`, see docs/STYKANIMATE_ANALYSIS.md). StykAnimate's own demo
@@ -63,12 +64,12 @@ pub const WALKER: [Bone; BONES] = [
 ];
 
 // Bone indices (0-based).
-const TORSO: usize = 0;
-const HEAD: usize = 1;
-const UPPER_ARM: [usize; 2] = [2, 4];
-const FOREARM: [usize; 2] = [3, 5];
-const THIGH: [usize; 2] = [6, 8];
-const SHIN: [usize; 2] = [7, 9];
+pub(crate) const TORSO: usize = 0;
+pub(crate) const HEAD: usize = 1;
+pub(crate) const UPPER_ARM: [usize; 2] = [2, 4];
+pub(crate) const FOREARM: [usize; 2] = [3, 5];
+pub(crate) const THIGH: [usize; 2] = [6, 8];
+pub(crate) const SHIN: [usize; 2] = [7, 9];
 
 /// StykAnimate figure colour `rgb(43, 43, 43)`.
 pub const WALKER_RGB: [u8; 3] = [43, 43, 43];
@@ -86,7 +87,7 @@ pub fn mirror_pose(p: &Pose) -> Pose {
     std::array::from_fn(|i| PI - p[i])
 }
 
-fn lerp_angle(a: f32, b: f32, k: f32) -> f32 {
+pub(crate) fn lerp_angle(a: f32, b: f32, k: f32) -> f32 {
     let d = (b - a + PI).rem_euclid(TAU) - PI; // shortest arc
     a + d * k
 }
@@ -95,7 +96,7 @@ pub fn lerp_pose(a: &Pose, b: &Pose, k: f32) -> Pose {
     std::array::from_fn(|i| lerp_angle(a[i], b[i], k))
 }
 
-fn smoothstep(u: f32) -> f32 {
+pub(crate) fn smoothstep(u: f32) -> f32 {
     let u = u.clamp(0.0, 1.0);
     u * u * (3.0 - 2.0 * u)
 }
@@ -124,30 +125,36 @@ pub fn idle_pose(t: f32) -> Pose {
 // --- Procedural walk --------------------------------------------------------------
 // All lengths in source pixels (scale 1); the Figure scales everything.
 
-const THIGH_LEN: f32 = 66.0;
-const SHIN_LEN: f32 = 63.0;
-const LEG_LEN: f32 = THIGH_LEN + SHIN_LEN;
+pub(crate) const THIGH_LEN: f32 = 66.0;
+pub(crate) const SHIN_LEN: f32 = 63.0;
+pub(crate) const LEG_LEN: f32 = THIGH_LEN + SHIN_LEN;
 
 /// Seconds for a full gait cycle (two steps).
 pub const GAIT_PERIOD: f32 = 1.05;
 /// Fraction of the cycle each foot spends planted (> 0.5 gives double support).
-const DUTY: f32 = 0.6;
+pub(crate) const DUTY: f32 = 0.6;
 /// Planted foot travels from +R to -R relative to the hip.
-const HALF_STANCE: f32 = 0.26 * LEG_LEN;
+pub(crate) const HALF_STANCE: f32 = 0.26 * LEG_LEN;
 /// Hip height above the ankles and its bob (highest over the planted foot).
-const HIP_HEIGHT: f32 = 0.955 * LEG_LEN;
+pub(crate) const HIP_HEIGHT: f32 = 0.955 * LEG_LEN;
 const HIP_BOB: f32 = 0.018 * LEG_LEN;
 /// Peak height of the swinging foot.
 const FOOT_LIFT: f32 = 0.10 * LEG_LEN;
 
-/// Body speed (source px/s) at which planted feet don't slide.
+/// Body speed (source px/s) at which planted feet don't slide, for a gait cycle of
+/// `period` seconds (shorter period = faster cadence = run).
+pub fn gait_speed_for(period: f32) -> f32 {
+    2.0 * HALF_STANCE / (DUTY * period)
+}
+
+/// Walking speed (source px/s).
 pub fn gait_speed() -> f32 {
-    2.0 * HALF_STANCE / (DUTY * GAIT_PERIOD)
+    gait_speed_for(GAIT_PERIOD)
 }
 
 /// Ankle position relative to the hip for a foot at local phase `q` ∈ [0, 1):
 /// (forward offset, height above the ground).
-fn foot_track(q: f32) -> (f32, f32) {
+pub(crate) fn foot_track(q: f32) -> (f32, f32) {
     if q < DUTY {
         let u = q / DUTY;
         (HALF_STANCE * (1.0 - 2.0 * u), 0.0)
@@ -162,7 +169,7 @@ fn foot_track(q: f32) -> (f32, f32) {
 
 /// Two-bone IK: thigh/shin angles placing the ankle at `target` (relative to the
 /// hip, y down) with the knee bending forward (+x).
-fn leg_ik(target: [f32; 2]) -> (f32, f32) {
+pub(crate) fn leg_ik(target: [f32; 2]) -> (f32, f32) {
     let (a, b) = (THIGH_LEN, SHIN_LEN);
     let len = (target[0] * target[0] + target[1] * target[1]).sqrt();
     let d = len.clamp((a - b).abs() + 1e-3, a + b - 1e-3);
@@ -252,163 +259,6 @@ pub fn depth_below_root(pose: &Pose, scale: f32) -> f32 {
         .iter()
         .map(|s| s.start[1].max(s.end[1]) + s.thickness / 2.0)
         .fold(f32::MIN, f32::max)
-}
-
-// --- Behaviour ----------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum State {
-    Idle,
-    Walk,
-}
-
-const BLEND_SECONDS: f32 = 0.3;
-
-/// The on-screen agent: walks back and forth along the ground line, pausing to
-/// idle now and then and turning around at the edges. Units are screen points.
-pub struct Figure {
-    pub state: State,
-    pub x: f32,
-    pub facing: f32,
-    pub scale: f32,
-    state_left: f32,
-    clock: f32,
-    gait_phase: f32,
-    blend_from: Pose,
-    blend_left: f32,
-    speed: f32,
-    rng: u64,
-    hold_idle: bool,
-}
-
-impl Figure {
-    pub fn new(x: f32, scale: f32, seed: u64) -> Self {
-        let mut f = Figure {
-            state: State::Walk,
-            x,
-            facing: 1.0,
-            scale,
-            state_left: 0.0,
-            clock: 0.0,
-            gait_phase: 0.0,
-            blend_from: rest_pose(),
-            blend_left: BLEND_SECONDS, // ease out of the rest pose on launch
-            speed: gait_speed() * scale,
-            rng: seed | 1,
-            hold_idle: false,
-        };
-        f.state_left = f.random(5.0, 10.0);
-        f
-    }
-
-    fn random(&mut self, lo: f32, hi: f32) -> f32 {
-        // xorshift64*
-        self.rng ^= self.rng >> 12;
-        self.rng ^= self.rng << 25;
-        self.rng ^= self.rng >> 27;
-        let r = self.rng.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40;
-        lo + (hi - lo) * (r as f32 / (1u64 << 24) as f32)
-    }
-
-    fn target_pose(&self) -> Pose {
-        match self.state {
-            State::Walk => walk_pose(self.gait_phase),
-            State::Idle => idle_pose(self.clock),
-        }
-    }
-
-    fn blend_k(&self) -> f32 {
-        smoothstep(1.0 - self.blend_left / BLEND_SECONDS)
-    }
-
-    pub fn pose(&self) -> Pose {
-        let target = self.target_pose();
-        if self.blend_left > 0.0 {
-            lerp_pose(&self.blend_from, &target, self.blend_k())
-        } else {
-            target
-        }
-    }
-
-    /// Diagnostics: stand idle forever (used to measure idle CPU).
-    pub fn hold_idle(&mut self) {
-        self.hold_idle = true;
-        self.switch(State::Idle);
-    }
-
-    /// Frames per second worth rendering right now: full rate while moving,
-    /// a low rate for slow idle breathing (PRD: < 5% CPU when idle).
-    pub fn wanted_fps(&self) -> u32 {
-        if self.state == State::Walk || self.blend_left > 0.0 {
-            60
-        } else {
-            20
-        }
-    }
-
-    fn switch(&mut self, to: State) {
-        self.blend_from = self.pose();
-        self.blend_left = BLEND_SECONDS;
-        self.state = to;
-        self.clock = 0.0;
-        self.gait_phase = 0.0;
-        self.state_left = match to {
-            State::Walk => self.random(5.0, 12.0),
-            State::Idle => self.random(1.5, 4.0),
-        };
-    }
-
-    /// Flip facing; the current pose is mirrored so the turn blends smoothly.
-    fn turn_around(&mut self) {
-        self.blend_from = mirror_pose(&self.pose());
-        self.blend_left = BLEND_SECONDS;
-        self.facing = -self.facing;
-    }
-
-    /// Advance by `dt` seconds within the horizontal range `[min_x, max_x]`.
-    pub fn update(&mut self, dt: f32, min_x: f32, max_x: f32) {
-        self.clock += dt;
-        self.state_left -= dt;
-
-        if self.state == State::Walk {
-            // Ramp speed in with the blend so feet don't skate while starting.
-            let ramp = if self.blend_left > 0.0 {
-                self.blend_k()
-            } else {
-                1.0
-            };
-            self.gait_phase = (self.gait_phase + dt / GAIT_PERIOD * ramp).rem_euclid(1.0);
-            self.x += self.facing * self.speed * ramp * dt;
-            let hit_edge =
-                (self.facing > 0.0 && self.x >= max_x) || (self.facing < 0.0 && self.x <= min_x);
-            if hit_edge {
-                self.x = self.x.clamp(min_x, max_x);
-                self.switch(State::Idle); // stop, glance around, then head back
-                self.state_left = self.random(0.6, 1.5);
-                self.turn_around();
-            }
-        }
-        self.blend_left = (self.blend_left - dt).max(0.0);
-
-        if self.state_left <= 0.0 && !self.hold_idle {
-            let next = if self.state == State::Walk {
-                State::Idle
-            } else {
-                State::Walk
-            };
-            self.switch(next);
-            if next == State::Walk && self.random(0.0, 1.0) < 0.35 {
-                self.turn_around();
-            }
-        }
-    }
-
-    /// Bones in screen points, feet resting on `ground_y` (y down).
-    pub fn segments(&self, ground_y: f32) -> [Segment; BONES] {
-        let pose = self.pose();
-        let root_y = ground_y - depth_below_root(&pose, self.scale);
-        forward_kinematics(&pose, [self.x, root_y], self.scale, self.facing)
-    }
 }
 
 #[cfg(test)]
@@ -507,55 +357,12 @@ mod tests {
         assert!((220.0..270.0).contains(&(bottom - top)), "{}", bottom - top);
     }
 
-    /// The defining property of a good walk: a planted foot doesn't move in the
-    /// world while the body travels over it.
-    #[test]
-    fn planted_foot_does_not_slide() {
-        let mut f = Figure::new(500.0, 1.0, 9);
-        f.blend_left = 0.0;
-        f.state_left = 100.0;
-        let dt = 1.0 / 240.0;
-        let mut worst: f32 = 0.0;
-        let mut prev = f.segments(800.0);
-        let mut prev_phase = f.gait_phase;
-        for _ in 0..(240.0 * GAIT_PERIOD * 3.0) as usize {
-            f.update(dt, 0.0, 1.0e6);
-            let now = f.segments(800.0);
-            for side in 0..2 {
-                let q0 = (prev_phase + side as f32 * 0.5).rem_euclid(1.0);
-                let q1 = (f.gait_phase + side as f32 * 0.5).rem_euclid(1.0);
-                if q0 < DUTY && q1 < DUTY && q1 > q0 {
-                    let a = prev[SHIN[side]].end;
-                    let b = now[SHIN[side]].end;
-                    worst = worst.max((a[0] - b[0]).abs()).max((a[1] - b[1]).abs());
-                }
-            }
-            prev = now;
-            prev_phase = f.gait_phase;
-        }
-        assert!(worst < 0.05, "planted foot slid {worst} px in one tick");
-    }
-
     #[test]
     fn swing_foot_clears_the_ground() {
         let peak = (0..100)
             .map(|i| foot_track(DUTY + (1.0 - DUTY) * i as f32 / 100.0).1)
             .fold(0.0, f32::max);
         assert!(peak > 0.08 * LEG_LEN, "foot lift {peak}");
-    }
-
-    #[test]
-    fn feet_rest_on_ground_every_frame() {
-        let mut f = Figure::new(500.0, 0.55, 7);
-        for _ in 0..600 {
-            f.update(1.0 / 60.0, 0.0, 1000.0);
-            let s = f.segments(800.0);
-            let lowest = s
-                .iter()
-                .map(|g| g.start[1].max(g.end[1]) + g.thickness / 2.0)
-                .fold(f32::MIN, f32::max);
-            assert!(approx(lowest, 800.0, 0.01), "lowest point {lowest}");
-        }
     }
 
     #[test]
@@ -566,54 +373,5 @@ mod tests {
             (0.7..1.4).contains(&legs_per_s),
             "{legs_per_s} leg lengths/s"
         );
-    }
-
-    #[test]
-    fn figure_stays_in_bounds_and_turns_around() {
-        let mut f = Figure::new(50.0, 1.0, 42);
-        let mut saw_left = false;
-        for _ in 0..60 * 120 {
-            f.update(1.0 / 60.0, 0.0, 300.0);
-            assert!((0.0..=300.0).contains(&f.x));
-            saw_left |= f.facing < 0.0;
-        }
-        assert!(saw_left, "never turned around");
-    }
-
-    #[test]
-    fn state_machine_alternates_and_never_pops() {
-        let mut f = Figure::new(500.0, 1.0, 3);
-        let (mut idles, mut walks, mut last) = (0, 0, f.state);
-        let mut prev = f.segments(800.0);
-        for _ in 0..60 * 120 {
-            f.update(1.0 / 60.0, 100.0, 900.0);
-            if f.state != last {
-                match f.state {
-                    State::Idle => idles += 1,
-                    State::Walk => walks += 1,
-                }
-                last = f.state;
-            }
-            // No joint may jump more than a few px between 60 Hz frames,
-            // including across state changes and turnarounds.
-            let now = f.segments(800.0);
-            for i in 0..BONES {
-                let d = ((now[i].end[0] - prev[i].end[0]).powi(2)
-                    + (now[i].end[1] - prev[i].end[1]).powi(2))
-                .sqrt();
-                assert!(d < 12.0, "bone {i} jumped {d} px in one frame");
-            }
-            prev = now;
-        }
-        assert!(idles > 2 && walks > 2, "idles={idles} walks={walks}");
-    }
-
-    #[test]
-    fn idle_renders_at_low_rate() {
-        let mut f = Figure::new(500.0, 1.0, 5);
-        assert_eq!(f.wanted_fps(), 60);
-        f.switch(State::Idle);
-        f.update(1.0, 0.0, 1000.0);
-        assert_eq!(f.wanted_fps(), 20);
     }
 }

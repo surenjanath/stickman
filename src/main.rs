@@ -1,95 +1,75 @@
 //! StykAnimate desktop overlay: a transparent, click-through, always-on-top window
-//! covering the main display, with the StykAnimate "Walker" stick figure strolling
-//! along the top of the Dock.
+//! covering the main display, with an AI-directed stick figure living on it.
 //!
-//! Threading model (claude.md rule 1): winit/AppKit and the wgpu render loop own
-//! the main thread. The tokio runtime runs on its own worker threads and is
-//! reserved for the AI Director (Ollama), window polling and OCR.
+//! Threads (claude.md rule 1):
+//! - **main**: winit/AppKit event loop, fixed-step simulation, wgpu rendering.
+//! - **styk-windows**: polls the window server for app windows (platforms).
+//! - **styk-ocr**: Vision text detection on the active window (text platforms).
+//! - **styk-os**: Accessibility IPC (window shakes), which can block.
+//! - **tokio**: the AI director talking to Ollama.
 //!
-//! Diagnostics: `STYK_CLICK_THROUGH=0` starts the overlay *catching* mouse events
-//! (it then blocks clicks to the whole screen — debugging/tests only).
-//! `STYK_HOLD_IDLE=1` keeps the figure standing idle (used to measure idle CPU).
+//! Environment (diagnostics and opt-outs):
+//! - `STYK_MODE=IDLE|OBSERVE|SABOTAGE|COMBAT`: force a mode; the director is off.
+//! - `STYK_HOLD_IDLE=1`: stand still (used to measure idle CPU).
+//! - `STYK_CLICK_THROUGH=0`: the overlay catches every click (blocks the screen).
+//! - `STYK_NO_CURSOR_PUSH=1`, `STYK_NO_WINDOW_SHAKE=1`, `STYK_NO_OCR=1`: disable
+//!   the effects that touch the user's cursor, windows or screen contents.
+//! - `STYK_NO_PROMPTS=1`: don't show macOS permission dialogs.
+//! - `STYK_OLLAMA_URL`, `STYK_OLLAMA_MODEL`, `STYK_DIRECTOR_INTERVAL_S`: director.
 
-mod macos;
-mod render;
-mod stickman;
-
+use std::collections::VecDeque;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+use stykanimate_overlay::agent::{Agent, Event, Mode, Senses, FIXED_DT};
+use stykanimate_overlay::director::{self, Directive, Observation};
+use stykanimate_overlay::geom::{cg_to_cocoa, v2, Rect, V2};
+use stykanimate_overlay::input::Cursor;
+use stykanimate_overlay::macos::{
+    self, OsAction, OverlayWindow, OVERLAY_COLLECTION_BEHAVIOR, OVERLAY_WINDOW_LEVEL,
+};
+use stykanimate_overlay::ocr;
+use stykanimate_overlay::particles::Particles;
+use stykanimate_overlay::physics::{window_platforms, Platform, World};
+use stykanimate_overlay::render::{DrawList, Renderer};
+use stykanimate_overlay::stickman::{Segment, BONES, WALKER_RGB};
+use stykanimate_overlay::windows::{self, Snapshot};
+use tokio::sync::watch;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
-use winit::event::WindowEvent;
+use winit::event::{ElementState, MouseButton, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::window::{WindowAttributes, WindowId, WindowLevel};
+use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
 
 #[cfg(not(target_os = "macos"))]
 compile_error!("stykanimate-overlay targets macOS (aarch64-apple-darwin) only");
 
-// NSWindowCollectionBehavior bits (AppKit/NSWindow.h).
-const CAN_JOIN_ALL_SPACES: usize = 1 << 0;
-const STATIONARY: usize = 1 << 4;
-const IGNORES_CYCLE: usize = 1 << 6;
-const FULL_SCREEN_AUXILIARY: usize = 1 << 8;
-
-/// Present on every Space, don't slide during Space swipes, stay out of Cmd-`
-/// cycling, and allow overlaying other apps' full-screen Spaces.
-const OVERLAY_COLLECTION_BEHAVIOR: usize =
-    CAN_JOIN_ALL_SPACES | STATIONARY | IGNORES_CYCLE | FULL_SCREEN_AUXILIARY;
-
-/// NSStatusWindowLevel (kCGStatusWindowLevel = 25): above normal and floating
-/// windows and the menu bar, below system alerts and the screen saver.
-const OVERLAY_WINDOW_LEVEL: isize = 25;
-
 /// Figure scale: the source rig is ~250 pt tall, this makes it ~140 pt.
 const FIGURE_SCALE: f32 = 0.55;
 /// Keep the figure this far (pt) from the screen edges.
-const EDGE_MARGIN: f32 = 60.0;
-
+const EDGE_MARGIN: f32 = 30.0;
+/// Simulation and input sampling rate (PRD: 60 fps, < 50 ms reactions).
+const TICK: Duration = Duration::from_nanos(1_000_000_000 / 60);
+/// Tick interval while nothing is happening (still < 50 ms reaction time).
+const IDLE_TICK: Duration = Duration::from_nanos(1_000_000_000 / 30);
 /// Smallest joint movement worth presenting a frame for: half a Retina pixel.
 const MIN_VISIBLE_SHIFT_PT: f32 = 0.25;
+/// Re-read the active window's text this often while it stays put.
+const OCR_INTERVAL: Duration = Duration::from_secs(12);
+/// The active window must sit still this long before it is read.
+const OCR_SETTLE: Duration = Duration::from_secs(1);
+/// How far a punch shoves the cursor, points.
+const CURSOR_PUSH: f32 = 70.0;
 
-/// Largest distance any joint moved between two placements of the figure.
-fn max_joint_shift(a: &[stickman::Segment], b: &[stickman::Segment]) -> f32 {
-    a.iter()
-        .zip(b)
-        .flat_map(|(a, b)| [(a.start, b.start), (a.end, b.end)])
-        .map(|(p, q)| ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt())
-        .fold(0.0, f32::max)
-}
-
-/// A rectangle in points: `x`, `y` is the origin, in whichever coordinate space the
-/// caller documents.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Rect {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-}
-
-/// Convert between CoreGraphics rects (global, top-left origin, y down) and AppKit
-/// screen frames (bottom-left origin of the primary display, y up). The mapping
-/// is its own inverse.
-fn cg_to_cocoa(rect: Rect, primary_height: f64) -> Rect {
-    Rect {
-        y: primary_height - (rect.y + rect.height),
-        ..rect
-    }
-}
-
-/// Ground line for the figure, in window points (y down from the display top):
-/// the top edge of the Dock, or the bottom of the screen if the Dock is hidden
-/// or on the side.
-fn ground_line(display: Rect, visible_cocoa: Option<Rect>, primary_height: f64) -> f32 {
-    let bottom = display.height;
-    let ground = visible_cocoa
-        .map(|v| cg_to_cocoa(v, primary_height))
-        .map(|v| v.y + v.height - display.y)
-        .filter(|g| *g > display.height * 0.5 && *g <= bottom)
-        .unwrap_or(bottom);
-    ground as f32
+fn env_flag(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|v| {
+        !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no" | "off"
+        )
+    })
 }
 
 /// Click-through defaults to on; only an explicit `0`/`false`/`off`/`no` disables it.
@@ -100,35 +80,414 @@ fn click_through_from_env(value: Option<&str>) -> bool {
     )
 }
 
+/// Ground line for the figure, in overlay points (y down from the display top):
+/// the top edge of the Dock, or the bottom of the screen if the Dock is hidden or
+/// on the side.
+fn ground_line(display: Rect, visible_cocoa: Option<Rect>, primary_height: f64) -> f32 {
+    let bottom = display.height;
+    let ground = visible_cocoa
+        .map(|v| cg_to_cocoa(v, primary_height))
+        .map(|v| v.y + v.height - display.y)
+        .filter(|g| *g > display.height * 0.5 && *g <= bottom)
+        .unwrap_or(bottom);
+    ground as f32
+}
+
+/// Largest distance any joint moved between two placements of the figure.
+fn max_joint_shift(a: &[Segment], b: &[Segment]) -> f32 {
+    a.iter()
+        .zip(b)
+        .flat_map(|(a, b)| [(a.start, b.start), (a.end, b.end)])
+        .map(|(p, q)| ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt())
+        .fold(0.0, f32::max)
+}
+
+/// The display carrying the menu bar, in global top-left-origin points — the same
+/// space winit's `LogicalPosition` uses on macOS.
+fn main_display_rect() -> Rect {
+    let b = core_graphics::display::CGDisplay::main().bounds();
+    Rect {
+        x: b.origin.x,
+        y: b.origin.y,
+        width: b.size.width,
+        height: b.size.height,
+    }
+}
+
+// The instance buffer must fit the figure (outline + fill), every particle and
+// the health bar.
+const _: () = assert!(
+    stykanimate_overlay::render::MAX_INSTANCES
+        >= 2 * BONES + stykanimate_overlay::particles::MAX_PARTICLES + 4
+);
+
+/// How long the user must hover over the figure before clicks are intercepted.
+const AIM_DWELL: Duration = Duration::from_millis(120);
+
+/// Tracks whether the user is deliberately pointing at the figure, so clicks
+/// meant for their own app aren't stolen when the figure wanders under a parked
+/// cursor (e.g. while stomping on the window they're working in).
+#[derive(Debug, Default, Clone, Copy)]
+struct ClickIntent {
+    hover_since: Option<Instant>,
+    aimed: bool,
+}
+
+impl ClickIntent {
+    /// Update with this tick's state; returns whether to intercept clicks.
+    fn update(&mut self, over: bool, cursor_moved: bool, now: Instant) -> bool {
+        if !over {
+            *self = ClickIntent::default();
+            return false;
+        }
+        let since = *self.hover_since.get_or_insert(now);
+        // Only the user moving the pointer onto/over the figure counts as aiming.
+        self.aimed |= cursor_moved;
+        self.aimed && now.duration_since(since) >= AIM_DWELL
+    }
+}
+
+/// Minimum time in a mode before the director may change it, so behaviour reads
+/// as a mood rather than jitter.
+const MIN_MODE_DWELL: Duration = Duration::from_secs(12);
+
+/// Whether to switch from `current` to `proposed` now. Retaliation (COMBAT after
+/// being hit) is always allowed immediately.
+fn accept_directive(current: Mode, proposed: Mode, in_mode: Duration, recently_hit: bool) -> bool {
+    current != proposed && (in_mode >= MIN_MODE_DWELL || (proposed == Mode::Combat && recently_hit))
+}
+
+/// What was last presented, to skip frames that would look identical.
+struct Shown {
+    segments: [Segment; BONES],
+    had_effects: bool,
+}
+
 struct Scene {
-    renderer: render::Renderer,
-    figure: stickman::Figure,
-    ground_y: f32,
-    last_frame: Instant,
-    next_frame: Instant,
-    /// What is currently on screen; frames that wouldn't visibly differ are skipped.
-    drawn: Option<[stickman::Segment; stickman::BONES]>,
+    overlay: OverlayWindow,
+    renderer: Renderer,
+    world: World,
+    agent: Agent,
+    particles: Particles,
+    cursor: Cursor,
+    display: Rect,
+    ground: Platform,
+    // Window and text platforms.
+    windows_rx: Receiver<Snapshot>,
+    snapshot: Snapshot,
+    ocr_tx: Option<Sender<ocr::Request>>,
+    ocr_rx: Receiver<ocr::Result>,
+    ocr_target: Option<ocr::Request>,
+    ocr_candidate: Option<ocr::Request>,
+    ocr_candidate_since: Instant,
+    ocr_sent: Instant,
+    text: Vec<Platform>,
+    // AI director.
+    directive_rx: Receiver<Directive>,
+    obs_tx: watch::Sender<Observation>,
+    mode: Mode,
+    mode_since: Instant,
+    forced_mode: Option<Mode>,
+    // Effects on the user's desktop.
+    os_tx: Sender<OsAction>,
+    cursor_push: bool,
+    window_shake: bool,
+    force_catch_clicks: bool,
+    // Input bookkeeping.
+    pending_click: bool,
+    /// App to give focus back to after a click on the figure activated us.
+    focus_restore: Option<(i64, Instant)>,
+    intent: ClickIntent,
+    hits: VecDeque<Instant>,
+    last_mouse_move: Instant,
+    last_cursor: V2,
+    // Timing.
+    last_tick: Instant,
+    next_tick: Instant,
+    accumulator: f32,
+    shown: Option<Shown>,
+    draw: DrawList,
+    frames: u64,
+    /// Something is moving: tick at the full rate.
+    busy: bool,
+    // Debug statistics.
+    ticks: u64,
+    stats_frames: u64,
+    stats_at: Instant,
 }
 
 impl Scene {
-    /// Advance the simulation to now and draw one frame.
-    fn frame(&mut self, display_width: f32) {
-        let now = Instant::now();
-        // Clamp so a stall (sleep, Space switch) doesn't teleport the figure.
-        let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.1);
-        self.last_frame = now;
-        self.figure
-            .update(dt, EDGE_MARGIN, display_width - EDGE_MARGIN);
-        let segments = self.figure.segments(self.ground_y);
-        // Each present costs ~2 ms of CPU in Metal/WindowServer plumbing, so don't
-        // pay it for a frame that would look identical (mostly idle breathing).
-        if let Some(drawn) = &self.drawn {
-            if max_joint_shift(drawn, &segments) < MIN_VISIBLE_SHIFT_PT {
-                return;
+    fn platforms(&self) -> Vec<Platform> {
+        let wins: Vec<(u32, Rect)> = self
+            .snapshot
+            .windows
+            .iter()
+            .map(|w| (w.id, w.rect))
+            .collect();
+        let mut ps = vec![self.ground];
+        ps.extend(window_platforms(&wins, self.display.width as f32, 40.0));
+        ps.extend(self.text.iter().copied());
+        ps
+    }
+
+    fn sync_world(&mut self) {
+        let mut changed = false;
+        while let Ok(s) = self.windows_rx.try_recv() {
+            self.snapshot = s;
+            changed = true;
+        }
+        let active = self.snapshot.active().map(|w| ocr::Request {
+            id: w.id,
+            rect: w.rect,
+        });
+        if changed && active != self.ocr_target {
+            // The active window moved or changed: its old text lines are stale.
+            self.text.clear();
+        }
+        // OCR results for the window that is still active, unmoved.
+        while let Ok(r) = self.ocr_rx.try_recv() {
+            if active
+                == Some(ocr::Request {
+                    id: r.id,
+                    rect: r.rect,
+                })
+            {
+                let mut lines = ocr::text_platforms(r.id, r.rect, &r.lines);
+                lines.truncate(120);
+                log::debug!("ocr: {} text platforms on window {}", lines.len(), r.id);
+                self.text = lines;
             }
         }
-        self.renderer.render(&segments, stickman::WALKER_RGB);
-        self.drawn = Some(segments);
+        // Debounce: only read a window once it has stopped moving for a second
+        // (a drag would otherwise trigger an expensive Vision pass per frame).
+        if active != self.ocr_candidate {
+            self.ocr_candidate = active;
+            self.ocr_candidate_since = Instant::now();
+        }
+        let settled = self.ocr_candidate_since.elapsed() >= OCR_SETTLE;
+        if let (Some(tx), Some(req), true) = (&self.ocr_tx, active, settled) {
+            if self.ocr_target != Some(req) || self.ocr_sent.elapsed() >= OCR_INTERVAL {
+                let _ = tx.send(req);
+                self.ocr_target = Some(req);
+                self.ocr_sent = Instant::now();
+            }
+        }
+        if self.world.set_platforms(self.platforms()) {
+            self.agent.on_platforms_changed(&self.world);
+        }
+    }
+
+    fn sync_director(&mut self) {
+        while let Ok(d) = self.directive_rx.try_recv() {
+            let recently_hit = self
+                .hits
+                .back()
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(10));
+            if self.forced_mode.is_none()
+                && d.mode != self.mode
+                && accept_directive(self.mode, d.mode, self.mode_since.elapsed(), recently_hit)
+            {
+                log::info!(
+                    "mode: {} -> {} ({})",
+                    self.mode.as_str(),
+                    d.mode.as_str(),
+                    d.reason
+                );
+                self.mode = d.mode;
+                self.mode_since = Instant::now();
+            }
+        }
+        let now = Instant::now();
+        while self
+            .hits
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > Duration::from_secs(60))
+        {
+            self.hits.pop_front();
+        }
+        let v = self.cursor.velocity();
+        self.obs_tx.send_replace(Observation {
+            active_app_name: self
+                .snapshot
+                .active()
+                .map(|w| w.owner.clone())
+                .unwrap_or_default(),
+            mouse_velocity_x: v.x.round(),
+            mouse_velocity_y: v.y.round(),
+            mouse_speed_avg: self.cursor.mean_speed().round(),
+            agent_health: self.agent.health.max(0.0).round(),
+            agent_frustration: self.agent.frustration.round(),
+            current_state: self.mode.as_str(),
+            seconds_in_state: self.mode_since.elapsed().as_secs_f32().round(),
+            hits_last_minute: self.hits.len() as u32,
+            user_idle_seconds: self.last_mouse_move.elapsed().as_secs_f32().round(),
+        });
+    }
+
+    fn handle(&mut self, events: &[Event]) {
+        let size = v2(self.display.width as f32, self.display.height as f32);
+        for e in events {
+            match *e {
+                Event::Knockback { at, dir } => {
+                    self.particles.explosion(at, -dir);
+                    self.hits.push_back(Instant::now());
+                    log::info!("event: knockback (health {:.0})", self.agent.health);
+                }
+                Event::StruckCursor { at, dir } => {
+                    self.particles.sparks(at, dir, 18);
+                    if self.cursor_push {
+                        self.cursor.push(dir * CURSOR_PUSH, size);
+                    }
+                    log::info!("event: struck cursor");
+                }
+                Event::Dust { at, strength } => self.particles.dust(at, strength),
+                Event::Jumped { at } => self.particles.dust(at, 0.2),
+                Event::Stomp { at, window } => {
+                    self.particles.dust(at, 0.5);
+                    if self.window_shake {
+                        if let Some(w) = self.snapshot.windows.iter().find(|w| w.id == window) {
+                            let dx = if self.frames % 2 == 0 { 9.0 } else { -9.0 };
+                            let _ = self
+                                .os_tx
+                                .send(OsAction::ShakeFocusedWindow { pid: w.pid, dx });
+                        }
+                    }
+                    log::info!("event: stomp on window {window}");
+                }
+                Event::KnockedOut { .. } => {
+                    self.particles.stars(self.agent.head());
+                    log::info!("event: knocked out");
+                }
+            }
+        }
+    }
+
+    fn tick(&mut self) {
+        self.cursor.sample();
+        let cursor_moved = (self.cursor.pos - self.last_cursor).length() > 0.5;
+        if cursor_moved {
+            self.last_mouse_move = Instant::now();
+            self.last_cursor = self.cursor.pos;
+        }
+        self.sync_world();
+        self.sync_director();
+        // Clicking the figure activates our app; give focus back to the user's app
+        // as soon as that happens (retrying each tick for up to a second).
+        if let Some((pid, since)) = self.focus_restore {
+            if macos::app_is_active() {
+                macos::restore_focus(pid);
+            } else if since.elapsed() > Duration::from_millis(300) {
+                self.focus_restore = None;
+            }
+            if since.elapsed() > Duration::from_secs(1) {
+                self.focus_restore = None;
+            }
+        }
+
+        let now = Instant::now();
+        self.accumulator += now.duration_since(self.last_tick).as_secs_f32().min(0.1);
+        self.last_tick = now;
+        let mut events = Vec::new();
+        while self.accumulator >= FIXED_DT {
+            let senses = Senses {
+                cursor: self.cursor.pos,
+                cursor_vel: self.cursor.velocity(),
+                clicked: std::mem::take(&mut self.pending_click),
+                mode: self.mode,
+                active_window: self.snapshot.active().map(|w| (w.id, w.rect)),
+                min_x: EDGE_MARGIN,
+                max_x: self.display.width as f32 - EDGE_MARGIN,
+            };
+            self.agent.update(&senses, &self.world, &mut events);
+            self.particles.update(FIXED_DT);
+            self.accumulator -= FIXED_DT;
+        }
+        self.handle(&events);
+
+        // PRD 3.1: intercept clicks only while the user is aiming at the figure.
+        let over = self.agent.hit_test(self.cursor.pos);
+        let catch = self.intent.update(over, cursor_moved, Instant::now());
+        let through = !(catch || self.force_catch_clicks);
+        if through != self.overlay.click_through() {
+            log::debug!(
+                "click-through {through} (cursor {:?}, over {over})",
+                self.cursor.pos
+            );
+        }
+        self.overlay.set_click_through(through);
+
+        self.ticks += 1;
+        if self.stats_at.elapsed() >= Duration::from_secs(5) {
+            log::debug!(
+                "perf: {} ticks, {} presents in {:.1}s; action {:?}, platforms {}",
+                self.ticks,
+                self.frames - self.stats_frames,
+                self.stats_at.elapsed().as_secs_f32(),
+                self.agent.action,
+                self.world.platforms().len()
+            );
+            self.ticks = 0;
+            self.stats_frames = self.frames;
+            self.stats_at = Instant::now();
+        }
+        self.busy = cursor_moved
+            || !self.particles.is_empty()
+            || self.agent.since_hit() < 4.0
+            || !self.agent.action.is_still();
+        self.present();
+    }
+
+    fn present(&mut self) {
+        let segments = self.agent.segments();
+        let effects = !self.particles.is_empty() || self.agent.since_hit() < 4.0;
+        if let Some(shown) = &self.shown {
+            if !effects
+                && !shown.had_effects
+                && max_joint_shift(&shown.segments, &segments) < MIN_VISIBLE_SHIFT_PT
+            {
+                return; // would look identical: skip the ~2 ms present
+            }
+        }
+        self.draw.clear();
+        self.draw.figure(&segments, WALKER_RGB);
+        self.particles.draw(&mut self.draw);
+        self.health_bar();
+        if !self.renderer.render(&self.draw) {
+            // Not on screen (occluded/timeout): don't record it, or a still figure
+            // might never be drawn at all.
+            return;
+        }
+        self.frames += 1;
+        self.shown = Some(Shown {
+            segments,
+            had_effects: effects,
+        });
+    }
+
+    /// Small health bar over the head for a few seconds after a hit.
+    fn health_bar(&mut self) {
+        let since = self.agent.since_hit();
+        if since >= 4.0 {
+            return;
+        }
+        let alpha = (1.0 - (since - 3.0).max(0.0)).clamp(0.0, 1.0);
+        let head = self.agent.head();
+        let (w, y) = (44.0, head.y - 26.0);
+        let left = v2(head.x - w / 2.0, y);
+        let frac = (self.agent.health / 100.0).clamp(0.0, 1.0);
+        let color = if frac > 0.5 {
+            [0.3, 0.85, 0.4, alpha]
+        } else if frac > 0.25 {
+            [1.0, 0.75, 0.2, alpha]
+        } else {
+            [1.0, 0.25, 0.2, alpha]
+        };
+        self.draw
+            .capsule(left, left + v2(w, 0.0), 3.5, [0.1, 0.1, 0.1, 0.75 * alpha]);
+        if frac > 0.0 {
+            self.draw
+                .capsule(left, left + v2(w * frac, 0.0), 2.2, color);
+        }
     }
 }
 
@@ -136,8 +495,7 @@ struct App {
     scene: Option<Scene>,
     display: Rect,
     click_through: bool,
-    /// Background runtime for async work; kept alive for the life of the app.
-    _runtime: tokio::runtime::Runtime,
+    runtime: tokio::runtime::Runtime,
 }
 
 impl App {
@@ -155,21 +513,17 @@ impl App {
             .with_position(LogicalPosition::new(d.x, d.y))
             .with_inner_size(LogicalSize::new(d.width, d.height))
             .with_has_shadow(false);
-
-        let window = Arc::new(
+        let window: Arc<Window> = Arc::new(
             event_loop
                 .create_window(attributes)
                 .context("failed to create overlay window")?,
         );
 
-        // AppKit-level overlay configuration (click-through, Spaces, level, exact frame).
+        // AppKit-level overlay configuration (click-through, Spaces, level, frame).
         let primary_height = main_display_rect().height;
-        let state = {
-            let overlay = macos::OverlayWindow::from_winit(&window)?;
-            overlay.configure(cg_to_cocoa(d, primary_height), self.click_through);
-            overlay.state()
-        };
-        // Read back from AppKit so a silently ignored call is caught.
+        let mut overlay = OverlayWindow::new(window.clone())?;
+        overlay.configure(cg_to_cocoa(d, primary_height), self.click_through);
+        let state = overlay.state();
         if state.ignores_mouse_events != self.click_through
             || state.collection_behavior & OVERLAY_COLLECTION_BEHAVIOR
                 != OVERLAY_COLLECTION_BEHAVIOR
@@ -178,21 +532,60 @@ impl App {
             log::warn!("AppKit did not apply every overlay property: {state:?}");
         }
 
-        let renderer = render::Renderer::new(window.clone())?;
+        let renderer = Renderer::new(window.clone())?;
         let ground_y = ground_line(d, macos::primary_visible_frame(), primary_height);
+        let ground = Platform::ground(d.width as f32, ground_y);
         let seed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|t| t.as_nanos() as u64)
             .unwrap_or(1);
-        let mut figure = stickman::Figure::new((d.width / 2.0) as f32, FIGURE_SCALE, seed);
-        if std::env::var_os("STYK_HOLD_IDLE").is_some() {
-            figure.hold_idle();
+        let mut agent = Agent::new((d.width / 2.0) as f32, ground, FIGURE_SCALE, seed);
+        agent.hold_still = env_flag("STYK_HOLD_IDLE");
+
+        // Permissions: Accessibility (window shakes) and Screen Recording (OCR).
+        let prompts = !env_flag("STYK_NO_PROMPTS");
+        let ax = macos::accessibility_trusted(prompts);
+        let ocr_wanted = !env_flag("STYK_NO_OCR");
+        let mut ocr_allowed = ocr_wanted && ocr::screen_capture_allowed();
+        if ocr_wanted && !ocr_allowed && prompts {
+            ocr_allowed = ocr::request_screen_capture();
         }
+        if !ax {
+            log::warn!(
+                "Accessibility not granted: stomps won't shake windows \
+                 (System Settings → Privacy & Security → Accessibility)"
+            );
+        }
+        if !ocr_allowed {
+            log::warn!("Screen Recording not granted or OCR disabled: no walking on text");
+        }
+
+        // Background workers.
+        let own_pid = i64::from(std::process::id());
+        let (win_tx, windows_rx) = mpsc::channel();
+        windows::spawn_poller(own_pid, d, Duration::from_millis(250), win_tx);
+        let (ocr_req_tx, ocr_req_rx) = mpsc::channel();
+        let (ocr_res_tx, ocr_rx) = mpsc::channel();
+        let ocr_tx = if ocr_allowed {
+            ocr::spawn_worker(ocr_req_rx, ocr_res_tx);
+            Some(ocr_req_tx)
+        } else {
+            None
+        };
+        let (dir_tx, directive_rx) = mpsc::channel();
+        let (obs_tx, obs_rx) = watch::channel(Observation::default());
+        let forced_mode = std::env::var("STYK_MODE")
+            .ok()
+            .and_then(|m| Mode::parse(&m));
+        if forced_mode.is_none() && !agent.hold_still {
+            director::spawn(&self.runtime, director::Config::from_env(), obs_rx, dir_tx);
+        }
+        let mode = forced_mode.unwrap_or(Mode::Idle);
 
         // Single machine-readable line; the integration tests parse it.
         log::info!(
-            "overlay up: window_number={} frame={},{},{}x{} level={} behavior={:#x} \
-             click_through={} scale={} ground_y={} figure_scale={}",
+            "overlay up: window_number={} frame={},{},{}x{} level={} behavior={:#x} click_through={} \
+             scale={} ground_y={} figure_scale={} mode={} accessibility={} ocr={}",
             state.window_number,
             d.x,
             d.y,
@@ -204,16 +597,56 @@ impl App {
             window.scale_factor(),
             ground_y,
             FIGURE_SCALE,
+            mode.as_str(),
+            ax,
+            ocr_allowed,
         );
 
         let now = Instant::now();
+        let origin = v2(d.x as f32, d.y as f32);
         self.scene = Some(Scene {
+            overlay,
             renderer,
-            figure,
-            ground_y,
-            last_frame: now,
-            next_frame: now,
-            drawn: None,
+            world: World::new(),
+            agent,
+            particles: Particles::new(seed ^ 0xA5A5),
+            cursor: Cursor::new(origin),
+            display: d,
+            ground,
+            windows_rx,
+            snapshot: Snapshot::default(),
+            ocr_tx,
+            ocr_rx,
+            ocr_target: None,
+            ocr_candidate: None,
+            ocr_candidate_since: now,
+            ocr_sent: now,
+            text: Vec::new(),
+            directive_rx,
+            obs_tx,
+            mode,
+            mode_since: now,
+            forced_mode,
+            os_tx: macos::os_actions(),
+            cursor_push: !env_flag("STYK_NO_CURSOR_PUSH"),
+            window_shake: ax && !env_flag("STYK_NO_WINDOW_SHAKE"),
+            force_catch_clicks: !self.click_through,
+            pending_click: false,
+            focus_restore: None,
+            intent: ClickIntent::default(),
+            hits: VecDeque::new(),
+            last_mouse_move: now,
+            last_cursor: V2::ZERO,
+            last_tick: now,
+            next_tick: now,
+            accumulator: 0.0,
+            shown: None,
+            draw: DrawList::default(),
+            frames: 0,
+            busy: true,
+            ticks: 0,
+            stats_frames: 0,
+            stats_at: now,
         });
         Ok(())
     }
@@ -237,9 +670,30 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested | WindowEvent::Destroyed => event_loop.exit(),
             WindowEvent::Resized(size) => scene.renderer.resize(size.width, size.height),
-            // Only sent by AppKit itself (e.g. on first show); our frames come
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Left,
+                ..
+            } => {
+                // Only reaches us while the cursor is over the figure.
+                log::debug!("click on figure at {:?}", scene.cursor.pos);
+                scene.pending_click = true;
+                if let Some(w) = scene.snapshot.active() {
+                    scene.focus_restore = Some((w.pid, Instant::now()));
+                }
+            }
+            WindowEvent::Focused(true) => {
+                // A click on the figure activated us; hand focus straight back.
+                if scene.focus_restore.is_none() {
+                    if let Some(w) = scene.snapshot.active() {
+                        scene.focus_restore = Some((w.pid, Instant::now()));
+                    }
+                }
+            }
+            // AppKit asks for redraws on its own schedule; the Metal layer keeps its
+            // contents, so only draw if nothing has been shown yet. Frames come
             // from the timer in `about_to_wait`.
-            WindowEvent::RedrawRequested => scene.frame(self.display.width as f32),
+            WindowEvent::RedrawRequested if scene.shown.is_none() => scene.present(),
             _ => {}
         }
     }
@@ -249,32 +703,18 @@ impl ApplicationHandler for App {
             return;
         };
         let now = Instant::now();
-        if now >= scene.next_frame {
-            // Render directly instead of `window.request_redraw()`: on macOS that
-            // marks the full-screen NSView dirty and runs an AppKit display pass
-            // every frame, which alone cost ~14% CPU at 60 fps. Metal presents
-            // straight to the layer, so AppKit doesn't need to be involved.
-            scene.frame(self.display.width as f32);
-            // Adaptive rate: 60 fps while moving, 20 fps for idle breathing.
-            let interval = Duration::from_secs_f64(1.0 / f64::from(scene.figure.wanted_fps()));
-            scene.next_frame += interval;
-            if scene.next_frame < now {
-                scene.next_frame = now + interval; // fell behind; don't burst
+        if now >= scene.next_tick {
+            // Simulate and render straight from the timer: `window.request_redraw()`
+            // would mark the full-screen NSView dirty and run an AppKit display
+            // pass every frame (~14% CPU by itself).
+            scene.tick();
+            let interval = if scene.busy { TICK } else { IDLE_TICK };
+            scene.next_tick += interval;
+            if scene.next_tick < now {
+                scene.next_tick = now + interval; // fell behind; don't burst
             }
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(scene.next_frame));
-    }
-}
-
-/// The display carrying the menu bar, in global top-left-origin points — the same
-/// space winit's `LogicalPosition` uses on macOS.
-fn main_display_rect() -> Rect {
-    let b = core_graphics::display::CGDisplay::main().bounds();
-    Rect {
-        x: b.origin.x,
-        y: b.origin.y,
-        width: b.size.width,
-        height: b.size.height,
+        event_loop.set_control_flow(ControlFlow::WaitUntil(scene.next_tick));
     }
 }
 
@@ -311,7 +751,7 @@ fn main() -> Result<()> {
         scene: None,
         display: main_display_rect(),
         click_through,
-        _runtime: runtime,
+        runtime,
     };
     event_loop.run_app(&mut app).context("event loop error")?;
     Ok(())
@@ -320,71 +760,7 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn collection_behavior_matches_appkit_bits() {
-        // canJoinAllSpaces(1) | stationary(16) | ignoresCycle(64) | fullScreenAuxiliary(256)
-        assert_eq!(OVERLAY_COLLECTION_BEHAVIOR, 0x151);
-        // moveToActiveSpace (1 << 1) conflicts with canJoinAllSpaces; must be off.
-        assert_eq!(OVERLAY_COLLECTION_BEHAVIOR & (1 << 1), 0);
-        // transient (1 << 3) would hide the overlay in Mission Control; must be off.
-        assert_eq!(OVERLAY_COLLECTION_BEHAVIOR & (1 << 3), 0);
-    }
-
-    #[test]
-    fn window_level_is_status_level() {
-        // NSStatusWindowLevel = kCGStatusWindowLevel = 25 (above menu bar = 24).
-        assert_eq!(OVERLAY_WINDOW_LEVEL, 25);
-    }
-
-    #[test]
-    fn primary_display_maps_to_origin() {
-        let d = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 1800.0,
-            height: 1169.0,
-        };
-        assert_eq!(cg_to_cocoa(d, 1169.0), d);
-    }
-
-    #[test]
-    fn display_below_primary_gets_negative_cocoa_y() {
-        let d = Rect {
-            x: 0.0,
-            y: 1169.0,
-            width: 1920.0,
-            height: 1080.0,
-        };
-        let c = cg_to_cocoa(d, 1169.0);
-        assert_eq!(
-            (c.x, c.y, c.width, c.height),
-            (0.0, -1080.0, 1920.0, 1080.0)
-        );
-    }
-
-    #[test]
-    fn display_above_primary_gets_positive_cocoa_y() {
-        let d = Rect {
-            x: -200.0,
-            y: -900.0,
-            width: 1600.0,
-            height: 900.0,
-        };
-        let c = cg_to_cocoa(d, 1169.0);
-        assert_eq!((c.x, c.y), (-200.0, 1169.0));
-    }
-
-    #[test]
-    fn conversion_round_trips() {
-        let d = Rect {
-            x: 37.5,
-            y: -412.25,
-            width: 1280.0,
-            height: 720.0,
-        };
-        assert_eq!(cg_to_cocoa(cg_to_cocoa(d, 982.0), 982.0), d);
-    }
+    use stykanimate_overlay::physics::PlatformKind;
 
     #[test]
     fn ground_sits_on_top_of_bottom_dock() {
@@ -412,7 +788,6 @@ mod tests {
             width: 1800.0,
             height: 1169.0,
         };
-        // Hidden / side Dock: visible area reaches the bottom.
         let visible = Rect {
             x: 70.0,
             y: 0.0,
@@ -424,46 +799,99 @@ mod tests {
     }
 
     #[test]
+    fn clicks_are_caught_only_when_aiming() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        // Figure walks under a parked cursor: never intercept.
+        let mut c = ClickIntent::default();
+        for n in 0..50 {
+            assert!(!c.update(true, false, ms(n * 16)));
+        }
+        // User moves onto it: intercept after the dwell.
+        let mut c = ClickIntent::default();
+        assert!(!c.update(true, true, ms(0)));
+        assert!(!c.update(true, false, ms(60)));
+        assert!(c.update(true, false, ms(130)));
+        // Leaving resets everything.
+        assert!(!c.update(false, true, ms(140)));
+        assert!(!c.update(true, false, ms(300)));
+    }
+
+    #[test]
+    fn director_changes_respect_dwell_except_retaliation() {
+        let s = Duration::from_secs;
+        assert!(!accept_directive(Mode::Idle, Mode::Sabotage, s(3), false));
+        assert!(accept_directive(Mode::Idle, Mode::Sabotage, s(13), false));
+        assert!(accept_directive(Mode::Observe, Mode::Combat, s(1), true));
+        assert!(!accept_directive(Mode::Observe, Mode::Combat, s(1), false));
+        assert!(!accept_directive(Mode::Combat, Mode::Combat, s(60), true));
+    }
+
+    #[test]
+    fn env_parsing() {
+        assert!(click_through_from_env(None));
+        assert!(click_through_from_env(Some("1")));
+        for off in ["0", "false", "FALSE", " off ", "No"] {
+            assert!(!click_through_from_env(Some(off)), "{off:?} should disable");
+        }
+    }
+
+    #[test]
     fn idle_breathing_skips_most_frames_but_walking_never_does() {
-        use stickman::{Figure, State};
-        // Presents per second over `secs`, after a 1 s settle. Walking lasts at
-        // least 5 s from launch, so the walk sample stays inside it.
-        let count_presents = |idle: bool, secs: u32| {
-            let mut f = Figure::new(500.0, FIGURE_SCALE, 11);
-            if idle {
-                f.hold_idle();
+        use stykanimate_overlay::agent::Action;
+        let ground = Platform {
+            x0: 0.0,
+            x1: 1800.0,
+            y: 800.0,
+            kind: PlatformKind::Ground,
+            owner: 0,
+        };
+        let mut world = World::new();
+        world.set_platforms(vec![ground]);
+        let senses = Senses {
+            cursor: v2(5000.0, 0.0),
+            cursor_vel: V2::ZERO,
+            clicked: false,
+            mode: Mode::Idle,
+            active_window: None,
+            min_x: 30.0,
+            max_x: 1770.0,
+        };
+        let count = |hold: bool| {
+            let mut a = Agent::new(900.0, ground, FIGURE_SCALE, 11);
+            a.hold_still = hold;
+            if !hold {
+                a.action = Action::Walk {
+                    to: 1700.0,
+                    run: false,
+                };
             }
+            let mut ev = vec![];
             for _ in 0..60 {
-                f.update(1.0 / 60.0, 0.0, 1.0e6);
+                a.update(&senses, &world, &mut ev);
             }
-            let fps = f.wanted_fps();
-            let mut drawn = f.segments(800.0);
+            let mut drawn = a.segments();
             let mut presents = 0;
-            for _ in 0..fps * secs {
-                f.update(1.0 / fps as f32, 0.0, 1.0e6);
-                let s = f.segments(800.0);
+            for _ in 0..180 {
+                a.update(&senses, &world, &mut ev);
+                let s = a.segments();
                 if max_joint_shift(&drawn, &s) >= MIN_VISIBLE_SHIFT_PT {
                     presents += 1;
                     drawn = s;
                 }
             }
-            assert_eq!(f.state == State::Idle, idle);
-            presents as f32 / secs as f32
+            presents as f32 / 3.0
         };
-        let (idle, walk) = (count_presents(true, 10), count_presents(false, 3));
-        println!("presents/s: idle {idle}, walk {walk}");
+        let (idle, walk) = (count(true), count(false));
         assert!(idle < 12.0, "idle presents {idle}/s");
         assert!(walk > 55.0, "walk presents only {walk}/s");
     }
 
     #[test]
-    fn click_through_env_parsing() {
-        assert!(click_through_from_env(None));
-        assert!(click_through_from_env(Some("1")));
-        assert!(click_through_from_env(Some("")));
-        assert!(click_through_from_env(Some("yes")));
-        for off in ["0", "false", "FALSE", " off ", "No"] {
-            assert!(!click_through_from_env(Some(off)), "{off:?} should disable");
-        }
+    fn draw_list_figure_has_outline_and_fill() {
+        let a = Agent::new(100.0, Platform::ground(1000.0, 500.0), FIGURE_SCALE, 1);
+        let mut dl = DrawList::default();
+        dl.figure(&a.segments(), WALKER_RGB);
+        assert_eq!(dl.len(), 2 * BONES);
     }
 }

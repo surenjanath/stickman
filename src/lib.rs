@@ -1,0 +1,16 @@
+//! StykAnimate desktop overlay: an AI-directed stick figure that lives on the
+//! macOS desktop. The binary (`src/main.rs`) wires these modules into the winit
+//! event loop.
+
+pub mod agent;
+pub mod director;
+pub mod geom;
+pub mod input;
+pub mod macos;
+pub mod ocr;
+pub mod particles;
+pub mod physics;
+pub mod poses;
+pub mod render;
+pub mod stickman;
+pub mod windows;

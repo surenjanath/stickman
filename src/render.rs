@@ -1,5 +1,5 @@
-//! wgpu (Metal) renderer for the overlay: clears to fully transparent and draws
-//! the stick figure as instanced SDF strokes in a single draw call.
+//! wgpu (Metal) renderer for the overlay: clears to fully transparent and draws a
+//! [`DrawList`] of SDF primitives (capsules, rings, discs) in one instanced call.
 
 use std::sync::Arc;
 
@@ -7,23 +7,103 @@ use anyhow::{anyhow, Context, Result};
 use bytemuck::{Pod, Zeroable};
 use winit::window::Window;
 
-use crate::stickman::{BoneKind, Segment, BONES};
+use crate::geom::V2;
+use crate::stickman::{BoneKind, Segment};
 
 /// Light halo drawn under every bone so the dark figure reads on dark wallpapers.
 const OUTLINE_RGBA: [f32; 4] = [1.0, 1.0, 1.0, 0.85];
-const OUTLINE_PX_PER_PT: f32 = 1.5;
-/// Two passes (outline, fill) per bone.
-const MAX_INSTANCES: usize = BONES * 2;
+const OUTLINE_PT: f32 = 1.5;
+/// Upper bound on primitives per frame (figure + particles + HUD).
+pub const MAX_INSTANCES: usize = 2048;
 
+const KIND_CAPSULE: f32 = 0.0;
+const KIND_RING: f32 = 1.0;
+const KIND_DISC: f32 = 2.0;
+
+/// One SDF primitive, in points (converted to pixels at upload).
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct Instance {
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
+pub struct Instance {
     a: [f32; 2],
     b: [f32; 2],
     screen: [f32; 2],
-    /// half stroke width (px), kind (0 capsule, 1 ring)
+    /// half stroke width / radius, kind (0 capsule, 1 ring, 2 disc)
     params: [f32; 2],
     color: [f32; 4],
+}
+
+/// Primitives to draw this frame, back to front, in overlay points.
+#[derive(Default, Debug, Clone, PartialEq)]
+pub struct DrawList {
+    items: Vec<Instance>,
+}
+
+impl DrawList {
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.items.clear();
+    }
+
+    fn push(&mut self, a: V2, b: V2, half: f32, kind: f32, color: [f32; 4]) {
+        if self.items.len() < MAX_INSTANCES && color[3] > 0.0 {
+            self.items.push(Instance {
+                a: a.into(),
+                b: b.into(),
+                screen: [0.0; 2],
+                params: [half, kind],
+                color,
+            });
+        }
+    }
+
+    /// A line from `a` to `b` with round caps, `half` points thick on each side.
+    pub fn capsule(&mut self, a: V2, b: V2, half: f32, color: [f32; 4]) {
+        self.push(a, b, half, KIND_CAPSULE, color);
+    }
+
+    /// A circle outline of `radius` with stroke half-width `half`.
+    pub fn ring(&mut self, center: V2, radius: f32, half: f32, color: [f32; 4]) {
+        let r = V2::new(radius, 0.0);
+        self.push(center - r, center + r, half, KIND_RING, color);
+    }
+
+    /// A filled circle.
+    pub fn disc(&mut self, center: V2, radius: f32, color: [f32; 4]) {
+        self.push(center, center, radius, KIND_DISC, color);
+    }
+
+    /// The stick figure: a light outline pass under a solid fill pass.
+    pub fn figure(&mut self, segments: &[Segment], rgb: [u8; 3]) {
+        let fill = [
+            rgb[0] as f32 / 255.0,
+            rgb[1] as f32 / 255.0,
+            rgb[2] as f32 / 255.0,
+            1.0,
+        ];
+        for (extra, color) in [(OUTLINE_PT, OUTLINE_RGBA), (0.0, fill)] {
+            for s in segments {
+                let kind = if s.kind == BoneKind::Circle {
+                    KIND_RING
+                } else {
+                    KIND_CAPSULE
+                };
+                self.push(
+                    s.start.into(),
+                    s.end.into(),
+                    s.thickness / 2.0 + extra,
+                    kind,
+                    color,
+                );
+            }
+        }
+    }
 }
 
 pub struct Renderer {
@@ -165,44 +245,38 @@ impl Renderer {
         self.surface.configure(&self.device, &self.config);
     }
 
-    /// Draw the figure. `segments` are in points; `rgb` is the fill colour.
-    pub fn render(&mut self, segments: &[Segment; BONES], rgb: [u8; 3]) {
+    /// Draw one frame (an empty list clears the overlay to fully transparent).
+    /// Returns whether the frame actually reached the screen.
+    pub fn render(&mut self, list: &DrawList) -> bool {
         let scale = self.window.scale_factor() as f32;
         let screen = [self.config.width as f32, self.config.height as f32];
-        let fill = [
-            rgb[0] as f32 / 255.0,
-            rgb[1] as f32 / 255.0,
-            rgb[2] as f32 / 255.0,
-            1.0,
-        ];
-        let to_px = |p: [f32; 2]| [p[0] * scale, p[1] * scale];
-        let mut data = Vec::with_capacity(MAX_INSTANCES);
-        for (extra, color) in [(OUTLINE_PX_PER_PT * scale, OUTLINE_RGBA), (0.0, fill)] {
-            data.extend(segments.iter().map(|s| Instance {
-                a: to_px(s.start),
-                b: to_px(s.end),
+        let data: Vec<Instance> = list
+            .items
+            .iter()
+            .map(|i| Instance {
+                a: [i.a[0] * scale, i.a[1] * scale],
+                b: [i.b[0] * scale, i.b[1] * scale],
                 screen,
-                params: [
-                    s.thickness * scale / 2.0 + extra,
-                    if s.kind == BoneKind::Circle { 1.0 } else { 0.0 },
-                ],
-                color,
-            }));
+                params: [i.params[0] * scale, i.params[1]],
+                color: i.color,
+            })
+            .collect();
+        if !data.is_empty() {
+            self.queue
+                .write_buffer(&self.instances, 0, bytemuck::cast_slice(&data));
         }
-        self.queue
-            .write_buffer(&self.instances, 0, bytemuck::cast_slice(&data));
 
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f)
             | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.device, &self.config);
-                return;
+                return false;
             }
             // Occluded / timeout / validation: skip this frame.
             other => {
                 log::debug!("skipping frame: {other:?}");
-                return;
+                return false;
             }
         };
         let view = frame
@@ -232,10 +306,13 @@ impl Renderer {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_vertex_buffer(0, self.instances.slice(..));
-            pass.draw(0..6, 0..data.len() as u32);
+            if !data.is_empty() {
+                pass.draw(0..6, 0..data.len() as u32);
+            }
         }
         self.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
         self.queue.present(frame);
+        true
     }
 }

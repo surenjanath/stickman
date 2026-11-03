@@ -6,13 +6,15 @@
 //! tests must run one at a time — two overlays would intercept each other's checks.
 //! Needs a logged-in GUI session; set `STYK_SKIP_GUI_TESTS=1` to skip (e.g. on CI).
 //! While the click-through control test runs (~1 s) the screen briefly ignores clicks.
+//! The click test drives the real pointer, so it only runs with
+//! `STYK_INTERACTIVE_TESTS=1` (keep your hands off the mouse while it runs).
 
 #![allow(unexpected_cfgs)] // objc 0.2 macros
 
 use std::io::{BufRead, BufReader};
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use core_foundation::base::{CFType, TCFType};
@@ -42,6 +44,7 @@ struct Overlay {
     window_number: u32,
     log_line: String,
     startup: Duration,
+    logs: Arc<Mutex<Vec<String>>>,
 }
 
 impl Overlay {
@@ -49,6 +52,12 @@ impl Overlay {
         let started = Instant::now();
         let mut child = Command::new(BIN)
             .env("RUST_LOG", "info")
+            // Defaults keep test runs off the user's cursor, windows and dialogs,
+            // and the behaviour deterministic (no LLM). Tests override as needed.
+            .env("STYK_NO_PROMPTS", "1")
+            .env("STYK_NO_CURSOR_PUSH", "1")
+            .env("STYK_NO_WINDOW_SHAKE", "1")
+            .env("STYK_MODE", "IDLE")
             .envs(envs.iter().copied())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -58,11 +67,14 @@ impl Overlay {
         // Forward the "overlay up" line; keep draining stderr so the pipe never fills.
         let stderr = child.stderr.take().unwrap();
         let (tx, rx) = mpsc::channel();
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let sink = logs.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 if line.contains("overlay up:") || line.contains("ERROR") {
-                    let _ = tx.send(line);
+                    let _ = tx.send(line.clone());
                 }
+                sink.lock().unwrap().push(line);
             }
         });
         let log_line = match rx.recv_timeout(STARTUP_TIMEOUT) {
@@ -84,6 +96,7 @@ impl Overlay {
             window_number,
             log_line,
             startup: started.elapsed(),
+            logs,
         };
         // Let the window server finish ordering the window in.
         pump_run_loop(Duration::from_millis(400));
@@ -93,12 +106,38 @@ impl Overlay {
     fn pid(&self) -> i64 {
         i64::from(self.child.id())
     }
+
+    /// First log line containing `pattern`, waiting up to `timeout`.
+    fn wait_for(&self, pattern: &str, timeout: Duration) -> Option<String> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Some(l) = self
+                .logs
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|l| l.contains(pattern))
+            {
+                return Some(l.clone());
+            }
+            if Instant::now() > deadline {
+                return None;
+            }
+            pump_run_loop(Duration::from_millis(50));
+        }
+    }
 }
 
 impl Drop for Overlay {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // Wait for the window server to drop the window so the next test starts
+        // from a clean screen.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while window_info(self.window_number).is_some() && Instant::now() < deadline {
+            pump_run_loop(Duration::from_millis(30));
+        }
     }
 }
 
@@ -473,9 +512,10 @@ fn test_cpu_while_walking_is_bounded(o: &Overlay) {
 /// PRD 5: under 5% CPU during idle observation.
 fn test_idle_cpu_is_under_prd_budget() {
     let o = Overlay::spawn(&[("STYK_HOLD_IDLE", "1")]);
-    pump_run_loop(Duration::from_millis(500)); // let the idle blend finish
-    let pct = cpu_percent(&o, 4);
-    println!("      CPU while idle (20 fps): {pct:.2}% of one core");
+    // Warm up: first OCR pass loads Vision's model, first frames compile pipelines.
+    pump_run_loop(Duration::from_secs(5));
+    let pct = cpu_percent(&o, 8);
+    println!("      CPU while idle (steady state): {pct:.2}% of one core");
     // The budget applies to the shipped build. Debug builds enable wgpu's
     // validation layer and skip optimisation, so they only report the number.
     if cfg!(debug_assertions) {
@@ -535,6 +575,119 @@ fn test_exits_cleanly_on_sigint_and_removes_window() {
     );
 }
 
+// --- Full-app behaviour ----------------------------------------------------------
+
+fn post_mouse(kind: core_graphics::event::CGEventType, x: f64, y: f64) {
+    use core_graphics::event::{CGEvent, CGEventTapLocation, CGMouseButton};
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    let src = CGEventSource::new(CGEventSourceStateID::HIDSystemState).expect("event source");
+    let e = CGEvent::new_mouse_event(src, kind, CGPoint::new(x, y), CGMouseButton::Left)
+        .expect("mouse event");
+    e.post(CGEventTapLocation::HID);
+}
+
+fn cursor_now() -> CGPoint {
+    use core_graphics::event::CGEvent;
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    let src = CGEventSource::new(CGEventSourceStateID::CombinedSessionState).unwrap();
+    CGEvent::new(src).unwrap().location()
+}
+
+/// PRD 3.1 + 3.3: aim at the figure and click it. It must intercept the click
+/// (dynamic click-through), get knocked back, burst into GPU particles, and hand
+/// keyboard focus straight back to the app the user was in.
+fn test_click_on_figure_knocks_it_back() {
+    use core_graphics::event::CGEventType;
+    if std::env::var_os("STYK_INTERACTIVE_TESTS").is_none() {
+        println!("      (skipped: moves the real pointer; run with STYK_INTERACTIVE_TESTS=1 and hands off the mouse)");
+        return;
+    }
+    let o = Overlay::spawn(&[
+        ("STYK_HOLD_IDLE", "1"),
+        ("RUST_LOG", "info,stykanimate_overlay=debug"),
+    ]);
+    let before_app = frontmost_app_pid();
+    let resting = capture(&o);
+    let b = resting.bbox.expect("figure visible");
+    let (cx, cy) = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0);
+    let home = cursor_now();
+    // Glide onto the figure like a user aiming at it, hover, then click.
+    for i in 0..=12 {
+        let k = i as f64 / 12.0;
+        post_mouse(CGEventType::MouseMoved, cx - 160.0 * (1.0 - k), cy);
+        pump_run_loop(Duration::from_millis(16));
+    }
+    pump_run_loop(Duration::from_millis(200));
+    // Re-place the pointer right before clicking, in case the real mouse moved.
+    post_mouse(CGEventType::MouseMoved, cx + 1.0, cy);
+    pump_run_loop(Duration::from_millis(200));
+    post_mouse(CGEventType::LeftMouseDown, cx + 1.0, cy);
+    pump_run_loop(Duration::from_millis(30));
+    post_mouse(CGEventType::LeftMouseUp, cx + 1.0, cy);
+    let hit = o.wait_for("event: knockback", Duration::from_secs(2));
+    pump_run_loop(Duration::from_millis(60));
+    let burst = capture(&o);
+    // Put the user's pointer back where it was.
+    post_mouse(CGEventType::MouseMoved, home.x, home.y);
+    if hit.is_none() {
+        for l in o.logs.lock().unwrap().iter() {
+            println!("      log: {l}");
+        }
+        println!("      figure bbox {b:?}, clicked at ({cx:.0}, {cy:.0})");
+    }
+    let hit = hit.expect("clicking the figure did not knock it back (is Accessibility granted to the terminal for posting events?)");
+    println!("      {}", hit.split("] ").nth(1).unwrap_or(&hit));
+    println!(
+        "      visible px: resting {} -> after click {}",
+        resting.visible, burst.visible
+    );
+    assert!(burst.visible > resting.visible * 2, "no particle burst");
+    pump_run_loop(Duration::from_millis(600));
+    let after_app = frontmost_app_pid();
+    assert_ne!(
+        after_app,
+        o.pid(),
+        "clicking the figure left the overlay focused"
+    );
+    assert_eq!(
+        after_app, before_app,
+        "focus was not handed back to the previous app"
+    );
+}
+
+/// PRD 3.4: the director runs on its own and its decisions reach the figure.
+fn test_ai_director_decides() {
+    let ollama_up = std::net::TcpStream::connect_timeout(
+        &"127.0.0.1:11434".parse().unwrap(),
+        Duration::from_millis(300),
+    )
+    .is_ok();
+    let o = Overlay::spawn(&[("STYK_MODE", ""), ("STYK_DIRECTOR_INTERVAL_S", "1")]);
+    // With Ollama up, a model decision must arrive (a transient fallback is fine);
+    // without it, the built-in director must keep the figure going.
+    let want = if ollama_up { "(Llm," } else { "(Fallback," };
+    let line = o
+        .wait_for(want, Duration::from_secs(20))
+        .unwrap_or_else(|| panic!("no {want} decision within 20 s (ollama up: {ollama_up})"));
+    println!("      {}", line.split("] ").nth(1).unwrap_or(&line));
+}
+
+/// PRD 3.2: OCR turns the active window's text into platforms.
+fn test_ocr_finds_text_platforms() {
+    let o = Overlay::spawn(&[("RUST_LOG", "info,stykanimate_overlay=debug")]);
+    if field(&o.log_line, "ocr") != "true" {
+        println!("      (skipped: Screen Recording not granted to the terminal)");
+        return;
+    }
+    let line = o
+        .wait_for("text platforms on window", Duration::from_secs(8))
+        .expect("OCR produced no result for the active window");
+    println!("      {}", line.split("] ").nth(1).unwrap_or(&line));
+    // How many lines depends on what's in the user's active window; recognition
+    // itself is verified against known text in `ocr::tests::vision_finds_text_lines`.
+    assert!(line.contains("text platforms on window"));
+}
+
 type SharedTest = (&'static str, fn(&Overlay));
 
 fn main() {
@@ -547,7 +700,13 @@ fn main() {
     let _: *mut Object = unsafe { msg_send![class!(NSApplication), sharedApplication] };
 
     let mut failures = 0;
+    // `cargo test --test overlay -- <substring>` runs only matching tests.
+    let filter: Option<String> = std::env::args().skip(1).find(|a| !a.starts_with('-'));
+    let wanted = |name: &str| filter.as_deref().is_none_or(|f| name.contains(f));
     let mut run = |name: &str, f: &dyn Fn()| {
+        if !wanted(name) {
+            return;
+        }
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
         println!(
             "test {name} ... {}",
@@ -560,11 +719,6 @@ fn main() {
 
     println!("\nrunning overlay GUI tests against {BIN}\n");
     {
-        let o = Overlay::spawn(&[]);
-        println!(
-            "      {}",
-            o.log_line.split("overlay up: ").nth(1).unwrap_or("")
-        );
         let shared: &[SharedTest] = &[
             ("startup_time", test_startup_time),
             (
@@ -594,14 +748,27 @@ fn main() {
                 test_cpu_while_walking_is_bounded,
             ),
         ];
-        for &(name, t) in shared {
-            run(name, &|| t(&o));
+        if shared.iter().any(|(name, _)| wanted(name)) {
+            let o = Overlay::spawn(&[]);
+            println!(
+                "      {}",
+                o.log_line.split("overlay up: ").nth(1).unwrap_or("")
+            );
+            for &(name, t) in shared {
+                run(name, &|| t(&o));
+            }
         }
     }
     run(
         "idle_cpu_is_under_prd_budget",
         &test_idle_cpu_is_under_prd_budget,
     );
+    run(
+        "click_on_figure_knocks_it_back",
+        &test_click_on_figure_knocks_it_back,
+    );
+    run("ai_director_decides", &test_ai_director_decides);
+    run("ocr_finds_text_platforms", &test_ocr_finds_text_platforms);
     run(
         "control_hit_test_detects_opaque_overlay",
         &test_control_hit_test_detects_opaque_overlay,
