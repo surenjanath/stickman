@@ -673,6 +673,7 @@ impl Agent {
             }
             "superjump" => self.super_jump_to(self.pos - v2(0.0, 600.0)),
             "mindwords" => self.set_action(Action::Telekinesis { on: Mind::Words }),
+            "throwwindow" => self.set_action(Action::Telekinesis { on: Mind::Window }),
             "doodle" => {
                 let size = 20.0 * (self.scale / 0.55);
                 let origin = self.shoulder() + v2(self.facing * (self.reach() + size + 4.0), -8.0);
