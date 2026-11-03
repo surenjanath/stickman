@@ -18,9 +18,11 @@ use crate::render::{DrawList, SpriteDraw};
 /// How long a word stays missing before it "grows back".
 pub const HOLE_LIFETIME: f32 = 45.0;
 const HOLE_FADE: f32 = 1.5;
-/// Thrown words rest on the ground this long before fading away.
-const REST_TIME: f32 = 3.0;
+/// Default time thrown words rest where they land before fading away.
+pub const DEFAULT_REST: f32 = 5.0;
 const FADE_TIME: f32 = 0.8;
+/// At most this many words lie around; the oldest fades when there are more.
+pub const MAX_RESTING: usize = 40;
 
 /// A word currently visible in the active window (overlay points).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -53,7 +55,11 @@ pub struct Projectile {
     pub spin: f32,
     pub half: V2,
     pub hit: bool,
+    /// Seconds lying still where it landed (0 while flying).
     pub resting: f32,
+    /// Seconds into fading out, once it started.
+    pub fade: Option<f32>,
+    /// Seconds in flight since it last lay still.
     pub age: f32,
 }
 
@@ -96,6 +102,8 @@ pub struct WordPlay {
     pending: Option<CaptureNeeded>,
     pending_throw: Option<(V2, V2)>,
     rng: u64,
+    /// How long landed words stay before fading; `None` keeps them for good.
+    pub rest_time: Option<f32>,
 }
 
 fn overlaps(a: &Rect, b: &Rect) -> f64 {
@@ -115,6 +123,7 @@ impl WordPlay {
         WordPlay {
             rng: seed | 1,
             next_id: 1,
+            rest_time: Some(DEFAULT_REST),
             ..WordPlay::default()
         }
     }
@@ -132,7 +141,10 @@ impl WordPlay {
 
     /// Something is moving or carried: render every frame.
     pub fn animating(&self) -> bool {
-        !self.projectiles.is_empty()
+        // Words lying still don't need frames; flying or fading ones do.
+        self.projectiles
+            .iter()
+            .any(|p| p.resting == 0.0 || p.fade.is_some())
             || self.carried.is_some()
             || self.holes.iter().any(|h| h.age > HOLE_LIFETIME)
     }
@@ -295,6 +307,7 @@ impl WordPlay {
             half: c.half,
             hit: false,
             resting: 0.0,
+            fade: None,
             age: 0.0,
         });
     }
@@ -337,14 +350,27 @@ impl WordPlay {
             h.age += dt;
         }
         self.holes.retain(|h| h.age < HOLE_LIFETIME + HOLE_FADE);
+        let rest_time = self.rest_time;
         for p in &mut self.projectiles {
             p.age += dt;
+            if let Some(f) = &mut p.fade {
+                *f += dt;
+            }
+            let bottom = |pos: V2| pos + v2(0.0, p.half.y.min(p.half.x));
             if p.resting > 0.0 || (p.vel.length() < 1.0 && p.age > 0.5) {
                 p.resting += dt;
+                if p.fade.is_none() && rest_time.is_some_and(|r| p.resting > r) {
+                    p.fade = Some(0.0);
+                }
+                // The window it lay on moved or closed: fall again.
+                if world.support(bottom(p.pos)).is_none() {
+                    p.resting = 0.0;
+                    p.age = 0.0;
+                    p.vel = v2(0.0, 1.0);
+                }
                 continue;
             }
             p.vel.y += PROJECTILE_GRAVITY * dt;
-            let bottom = |pos: V2| pos + v2(0.0, p.half.y.min(p.half.x));
             let next = p.pos + p.vel * dt;
             if !p.hit && (next - cursor).length() < p.half.x.max(p.half.y) + 14.0 {
                 p.hit = true;
@@ -374,8 +400,26 @@ impl WordPlay {
             }
             p.rot += p.spin * dt;
         }
+        // Too many lying around: the oldest starts fading.
+        let resting = self
+            .projectiles
+            .iter()
+            .filter(|p| p.resting > 0.0 && p.fade.is_none())
+            .count();
+        if resting > MAX_RESTING {
+            if let Some(p) = self
+                .projectiles
+                .iter_mut()
+                .filter(|p| p.resting > 0.0 && p.fade.is_none())
+                .max_by(|a, b| a.resting.total_cmp(&b.resting))
+            {
+                p.fade = Some(0.0);
+            }
+        }
         self.projectiles.retain(|p| {
-            let keep = p.resting < REST_TIME + FADE_TIME && p.age < 20.0;
+            let faded = p.fade.is_some_and(|f| f >= FADE_TIME);
+            let lost = p.resting == 0.0 && p.age > 20.0; // flew off somewhere
+            let keep = !faded && !lost;
             if !keep {
                 freed.push(p.sprite);
             }
@@ -414,11 +458,7 @@ impl WordPlay {
             });
         }
         for p in &self.projectiles {
-            let alpha = if p.resting > REST_TIME {
-                1.0 - (p.resting - REST_TIME) / FADE_TIME
-            } else {
-                1.0
-            };
+            let alpha = p.fade.map_or(1.0, |f| 1.0 - f / FADE_TIME);
             out.sprite(SpriteDraw {
                 id: p.sprite,
                 center: p.pos,
@@ -616,6 +656,70 @@ mod tests {
         assert!(landed, "then fall and land");
         assert_eq!(freed, [11], "and finally free its sprite");
         assert!(p.projectiles.is_empty());
+    }
+
+    fn drop_word(p: &mut WordPlay, sprite: u32, at: V2) {
+        p.launch(
+            Carried {
+                sprite,
+                half: v2(20.0, 8.0),
+            },
+            at,
+            V2::ZERO,
+        );
+    }
+
+    #[test]
+    fn words_can_stay_forever_and_fall_when_their_window_goes() {
+        let ground = Platform::ground(2000.0, 1000.0);
+        let window = Platform {
+            x0: 100.0,
+            x1: 600.0,
+            y: 500.0,
+            kind: PlatformKind::Window,
+            owner: 3,
+        };
+        let mut w = World::new();
+        w.set_platforms(vec![ground, window]);
+        let mut p = WordPlay::new(1);
+        p.rest_time = None;
+        drop_word(&mut p, 5, v2(300.0, 450.0));
+        let step = |p: &mut WordPlay, w: &World, secs: f32| {
+            let mut freed = vec![];
+            for _ in 0..(secs * 60.0) as usize {
+                freed.extend(p.update(1.0 / 60.0, v2(-999.0, -999.0), w, 0.0, 2000.0).1);
+            }
+            freed
+        };
+        assert!(step(&mut p, &w, 120.0).is_empty(), "faded despite Forever");
+        assert_eq!(p.projectiles.len(), 1);
+        assert!((p.projectiles[0].pos.y - 492.0).abs() < 1.0, "resting on the window");
+        assert!(!p.animating(), "a word lying still needs no frames");
+        // The window closes: the word drops to the ground and stays there.
+        w.set_platforms(vec![ground]);
+        step(&mut p, &w, 3.0);
+        assert!((p.projectiles[0].pos.y - 992.0).abs() < 1.0, "{:?}", p.projectiles[0].pos);
+        // A timed setting fades it.
+        p.rest_time = Some(15.0);
+        let freed = step(&mut p, &w, 17.0);
+        assert_eq!(freed, [5]);
+    }
+
+    #[test]
+    fn only_so_many_words_lie_around() {
+        let mut w = World::new();
+        w.set_platforms(vec![Platform::ground(4000.0, 1000.0)]);
+        let mut p = WordPlay::new(1);
+        p.rest_time = None;
+        for i in 0..(MAX_RESTING as u32 + 5) {
+            drop_word(&mut p, i, v2(50.0 + 60.0 * i as f32, 980.0));
+        }
+        let mut freed = vec![];
+        for _ in 0..(10 * 60) {
+            freed.extend(p.update(1.0 / 60.0, v2(-999.0, -999.0), &w, 0.0, 4000.0).1);
+        }
+        assert_eq!(p.projectiles.len(), MAX_RESTING);
+        assert_eq!(freed.len(), 5);
     }
 
     #[test]

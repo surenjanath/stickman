@@ -87,6 +87,48 @@ impl Size {
     }
 }
 
+/// How long thrown words stay where they land.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum WordStay {
+    #[default]
+    Seconds5,
+    Seconds15,
+    Seconds30,
+    Minute,
+    Forever,
+}
+
+impl WordStay {
+    pub const ALL: [WordStay; 5] = [
+        WordStay::Seconds5,
+        WordStay::Seconds15,
+        WordStay::Seconds30,
+        WordStay::Minute,
+        WordStay::Forever,
+    ];
+
+    /// Seconds before fading, or `None` to stay for good.
+    pub fn seconds(self) -> Option<f32> {
+        match self {
+            WordStay::Seconds5 => Some(5.0),
+            WordStay::Seconds15 => Some(15.0),
+            WordStay::Seconds30 => Some(30.0),
+            WordStay::Minute => Some(60.0),
+            WordStay::Forever => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            WordStay::Seconds5 => "5 Seconds",
+            WordStay::Seconds15 => "15 Seconds",
+            WordStay::Seconds30 => "30 Seconds",
+            WordStay::Minute => "1 Minute",
+            WordStay::Forever => "Forever (until there are too many)",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -105,6 +147,19 @@ pub struct Settings {
     pub speech: bool,
     /// Play sound effects.
     pub sound: bool,
+    /// How long thrown words stay where they land.
+    pub word_stay: WordStay,
+    /// Hobbies: nap when the user is away, dance, doodle, sit on edges.
+    pub naps: bool,
+    pub dancing: bool,
+    pub doodles: bool,
+    pub sitting: bool,
+    /// Kick the active window so it slides (needs Accessibility).
+    pub window_shoves: bool,
+    /// Super jumps and telekinesis.
+    pub powers: bool,
+    /// Start locked in a jail cell and break out.
+    pub jail_intro: bool,
     pub visible: bool,
     pub paused: bool,
 }
@@ -120,6 +175,14 @@ impl Default for Settings {
             throw_words: true,
             speech: true,
             sound: true,
+            word_stay: WordStay::Seconds5,
+            naps: true,
+            dancing: true,
+            doodles: true,
+            sitting: true,
+            window_shoves: true,
+            powers: true,
+            jail_intro: true,
             visible: true,
             paused: false,
         }
@@ -137,6 +200,14 @@ pub enum Command {
     ToggleThrowWords,
     ToggleSpeech,
     ToggleSound,
+    SetWordStay(WordStay),
+    ToggleNaps,
+    ToggleDancing,
+    ToggleDoodles,
+    ToggleSitting,
+    ToggleWindowShoves,
+    TogglePowers,
+    ToggleJailIntro,
     ToggleVisible,
     TogglePaused,
     Respawn,
@@ -163,6 +234,16 @@ impl Command {
             Command::ToggleThrowWords => 305,
             Command::ToggleSpeech => 306,
             Command::ToggleSound => 307,
+            Command::ToggleNaps => 310,
+            Command::ToggleDancing => 311,
+            Command::ToggleDoodles => 312,
+            Command::ToggleSitting => 313,
+            Command::ToggleWindowShoves => 314,
+            Command::TogglePowers => 315,
+            Command::ToggleJailIntro => 316,
+            Command::SetWordStay(w) => {
+                600 + WordStay::ALL.iter().position(|x| *x == w).unwrap_or(0) as isize
+            }
             Command::Respawn => 400,
             Command::OpenAccessibilitySettings => 500,
             Command::OpenScreenRecordingSettings => 501,
@@ -182,6 +263,14 @@ impl Command {
             305 => Command::ToggleThrowWords,
             306 => Command::ToggleSpeech,
             307 => Command::ToggleSound,
+            310 => Command::ToggleNaps,
+            311 => Command::ToggleDancing,
+            312 => Command::ToggleDoodles,
+            313 => Command::ToggleSitting,
+            314 => Command::ToggleWindowShoves,
+            315 => Command::TogglePowers,
+            316 => Command::ToggleJailIntro,
+            600..=604 => Command::SetWordStay(WordStay::ALL[(tag - 600) as usize]),
             400 => Command::Respawn,
             500 => Command::OpenAccessibilitySettings,
             501 => Command::OpenScreenRecordingSettings,
@@ -205,6 +294,14 @@ impl Settings {
             Command::ToggleThrowWords => self.throw_words = !self.throw_words,
             Command::ToggleSpeech => self.speech = !self.speech,
             Command::ToggleSound => self.sound = !self.sound,
+            Command::SetWordStay(w) => self.word_stay = w,
+            Command::ToggleNaps => self.naps = !self.naps,
+            Command::ToggleDancing => self.dancing = !self.dancing,
+            Command::ToggleDoodles => self.doodles = !self.doodles,
+            Command::ToggleSitting => self.sitting = !self.sitting,
+            Command::ToggleWindowShoves => self.window_shoves = !self.window_shoves,
+            Command::TogglePowers => self.powers = !self.powers,
+            Command::ToggleJailIntro => self.jail_intro = !self.jail_intro,
             Command::ToggleVisible => self.visible = !self.visible,
             Command::TogglePaused => self.paused = !self.paused,
             _ => {}
@@ -272,6 +369,13 @@ mod tests {
             Command::ToggleThrowWords,
             Command::ToggleSpeech,
             Command::ToggleSound,
+            Command::ToggleNaps,
+            Command::ToggleDancing,
+            Command::ToggleDoodles,
+            Command::ToggleSitting,
+            Command::ToggleWindowShoves,
+            Command::TogglePowers,
+            Command::ToggleJailIntro,
             Command::ToggleVisible,
             Command::TogglePaused,
             Command::Respawn,
@@ -281,6 +385,7 @@ mod tests {
         ];
         all.extend(Behaviour::ALL.map(Command::SetBehaviour));
         all.extend(Size::ALL.map(Command::SetSize));
+        all.extend(WordStay::ALL.map(Command::SetWordStay));
         let mut tags: Vec<isize> = all.iter().map(|c| c.tag()).collect();
         for c in &all {
             assert_eq!(Command::from_tag(c.tag()), Some(*c));

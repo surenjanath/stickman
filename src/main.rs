@@ -831,7 +831,10 @@ impl Scene {
                 }
                 Event::ShoveWindow { at, window, dx } => {
                     self.sfx(Sfx::Stomp, 0.9, at);
-                    if self.settings.window_shake && self.accessibility {
+                    if self.settings.window_shoves
+                        && self.settings.window_shake
+                        && self.accessibility
+                    {
                         if let Some(w) = self.snapshot.windows.iter().find(|w| w.id == window) {
                             // Keep the window on its screen.
                             let screen = self.layout.screen_at(v2(at.x, at.y + 1.0)).frame;
@@ -996,6 +999,14 @@ impl Scene {
             self.last_cursor = self.cursor.pos;
         }
         self.track_press();
+        self.agent.traits = stickman::agent::Traits {
+            naps: self.settings.naps,
+            dancing: self.settings.dancing,
+            doodles: self.settings.doodles,
+            sitting: self.settings.sitting,
+            powers: self.settings.powers,
+        };
+        self.words.rest_time = self.settings.word_stay.seconds();
         self.sync_world();
         self.sync_director();
         // Clicking the figure activates our app; give focus back to the user's app
@@ -1050,7 +1061,9 @@ impl Scene {
                 can_grab_cursor: self.settings.cursor_push,
                 held: self.dragging,
                 user_idle: self.last_mouse_move.elapsed().as_secs_f32(),
-                can_shove: self.settings.window_shake && self.accessibility,
+                can_shove: self.settings.window_shoves
+                    && self.settings.window_shake
+                    && self.accessibility,
             };
             self.agent.update(&senses, &self.world, &mut events);
             self.particles.update(FIXED_DT);

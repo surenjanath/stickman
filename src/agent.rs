@@ -354,7 +354,30 @@ impl Action {
     }
 }
 
+/// Optional behaviours the user can switch off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Traits {
+    pub naps: bool,
+    pub dancing: bool,
+    pub doodles: bool,
+    pub sitting: bool,
+    pub powers: bool,
+}
+
+impl Default for Traits {
+    fn default() -> Self {
+        Traits {
+            naps: true,
+            dancing: true,
+            doodles: true,
+            sitting: true,
+            powers: true,
+        }
+    }
+}
+
 pub struct Agent {
+    pub traits: Traits,
     pub pos: V2,
     pub vel: V2,
     pub facing: f32,
@@ -416,6 +439,7 @@ impl Agent {
     /// A figure standing at `x` on `ground`.
     pub fn new(x: f32, ground: Platform, scale: f32, seed: u64) -> Agent {
         Agent {
+            traits: Traits::default(),
             pos: v2(x, ground.y),
             vel: V2::ZERO,
             facing: 1.0,
@@ -1242,7 +1266,8 @@ impl Agent {
     fn behave(&mut self, s: &Senses, world: &World, events: &mut Vec<Event>) {
         let dx = s.cursor.x - self.pos.x;
         // The user's away: nap (wherever it is).
-        if matches!(s.mode, Mode::Idle | Mode::Observe)
+        if self.traits.naps
+            && matches!(s.mode, Mode::Idle | Mode::Observe)
             && s.user_idle > SLEEP_AFTER
             && !self.holding
             && !matches!(self.action, Action::Walk { .. })
@@ -1518,6 +1543,7 @@ impl Agent {
             return self.walk_to(edge.clamp(s.min_x, s.max_x), false);
         }
         if (0.37..0.49).contains(&roll)
+            && self.traits.sitting
             && ground.kind != PlatformKind::Ground
             && ground.width() > 120.0
         {
@@ -1534,12 +1560,12 @@ impl Agent {
                 return;
             }
         }
-        if (0.49..0.54).contains(&roll) {
+        if (0.49..0.54).contains(&roll) && self.traits.dancing {
             self.set_action(Action::Dance);
             events.push(Event::StartedDancing { at: self.head() });
             return;
         }
-        if (0.54..0.6).contains(&roll) && s.mode == Mode::Idle {
+        if (0.54..0.6).contains(&roll) && self.traits.doodles && s.mode == Mode::Idle {
             // Doodle in the air in front of it, if there's room on screen.
             // Just beyond arm's reach, so the pen in its hand can trace it.
             let size = 20.0 * (self.scale / 0.55);

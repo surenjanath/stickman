@@ -17,7 +17,7 @@ use objc::{class, msg_send, sel, sel_impl, Encode, Encoding};
 
 use crate::agent::Mode;
 use crate::poses;
-use crate::settings::{Behaviour, Command, Settings, Size};
+use crate::settings::{Behaviour, Command, Settings, Size, WordStay};
 use crate::stickman::{forward_kinematics, idle_pose, BoneKind, Pose};
 
 /// Menu picks waiting for the main loop.
@@ -352,8 +352,36 @@ impl MenuBar {
             Some(Command::ToggleThrowWords),
             "",
         );
+        let stay = self.submenu(menu, "Thrown Words Stay");
+        for w in WordStay::ALL {
+            self.add(stay, w.label(), Some(Command::SetWordStay(w)), "");
+        }
         self.add(menu, "Speech Bubbles", Some(Command::ToggleSpeech), "");
         self.add(menu, "Sound Effects", Some(Command::ToggleSound), "");
+        Self::separator(menu);
+        let hobbies = self.submenu(menu, "Hobbies");
+        self.add(hobbies, "Naps When I'm Away", Some(Command::ToggleNaps), "");
+        self.add(hobbies, "Dancing", Some(Command::ToggleDancing), "");
+        self.add(hobbies, "Doodles", Some(Command::ToggleDoodles), "");
+        self.add(
+            hobbies,
+            "Sitting on Edges",
+            Some(Command::ToggleSitting),
+            "",
+        );
+        self.add(
+            hobbies,
+            "Kick My Windows Around",
+            Some(Command::ToggleWindowShoves),
+            "",
+        );
+        self.add(
+            menu,
+            "Super Powers (super jump, telekinesis)",
+            Some(Command::TogglePowers),
+            "",
+        );
+        self.add(menu, "Jail-Break Intro", Some(Command::ToggleJailIntro), "");
         Self::separator(menu);
         self.add(menu, "Show Figure", Some(Command::ToggleVisible), "h");
         self.add(menu, "Pause", Some(Command::TogglePaused), "p");
@@ -451,6 +479,19 @@ impl MenuBar {
             settings.throw_words && settings.walk_on_text,
         );
         self.set_checked(Command::ToggleSpeech, settings.speech);
+        for w in WordStay::ALL {
+            self.set_checked(Command::SetWordStay(w), settings.word_stay == w);
+        }
+        self.set_checked(Command::ToggleNaps, settings.naps);
+        self.set_checked(Command::ToggleDancing, settings.dancing);
+        self.set_checked(Command::ToggleDoodles, settings.doodles);
+        self.set_checked(Command::ToggleSitting, settings.sitting);
+        self.set_checked(
+            Command::ToggleWindowShoves,
+            settings.window_shoves && settings.window_shake,
+        );
+        self.set_checked(Command::TogglePowers, settings.powers);
+        self.set_checked(Command::ToggleJailIntro, settings.jail_intro);
         self.set_checked(Command::ToggleSound, settings.sound);
         self.set_checked(Command::ToggleVisible, settings.visible);
         self.set_checked(Command::TogglePaused, settings.paused);
