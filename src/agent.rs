@@ -561,12 +561,27 @@ impl Agent {
     /// the platform we stand on, or fall if it vanished from under us.
     pub fn on_platforms_changed(&mut self, world: &World) {
         let Some(old) = self.ground else { return };
-        let same = world.platforms().iter().copied().find(|p| {
-            p.kind == old.kind
-                && p.owner == old.owner
-                && p.contains_x(self.pos.x)
-                && (p.y - old.y).abs() < 400.0
-        });
+        // How far "the same" surface may have moved between updates: a dragged
+        // window jumps a lot between polls; a re-read text line only jitters (a
+        // bigger shift means it's a different line, or the page scrolled).
+        let tolerance = match old.kind {
+            PlatformKind::Ground => f32::MAX,
+            PlatformKind::Window => 400.0,
+            PlatformKind::Text => 12.0,
+        };
+        // The nearest matching surface, never just the first: windows have many
+        // text lines, and picking the first made the figure teleport between them.
+        let same = world
+            .platforms()
+            .iter()
+            .copied()
+            .filter(|p| {
+                p.kind == old.kind
+                    && p.owner == old.owner
+                    && p.contains_x(self.pos.x)
+                    && (p.y - old.y).abs() <= tolerance
+            })
+            .min_by(|a, b| (a.y - old.y).abs().total_cmp(&(b.y - old.y).abs()));
         match same {
             Some(p) => {
                 self.pos.y = p.y;
@@ -1525,6 +1540,42 @@ mod tests {
             );
             assert!(a.pos.x > 1800.0 && a.pos.y == 1300.0);
         }
+    }
+
+    #[test]
+    fn stays_on_its_own_text_line_when_text_is_re_read() {
+        // The figure stands on the third of four lines; OCR re-reads them with
+        // a little jitter, top line first.
+        let lines = |dy: f32| {
+            vec![
+                Platform::ground(1800.0, GROUND_Y),
+                text_line(500.0, 1100.0, 600.0 + dy),
+                text_line(500.0, 1100.0, 640.0 - dy),
+                text_line(500.0, 1100.0, 680.0 + dy),
+                text_line(500.0, 1100.0, 720.0),
+            ]
+        };
+        let mut w = world(vec![]);
+        w.set_platforms(lines(0.0));
+        let mut a = Agent::new(800.0, text_line(500.0, 1100.0, 680.0), SCALE, 3);
+        for dy in [1.0, -1.5, 2.0, 0.0] {
+            w.set_platforms(lines(dy));
+            a.on_platforms_changed(&w);
+            assert_eq!(a.pos.y, 680.0 + dy, "jumped to another line");
+            assert!(a.ground.is_some());
+        }
+        // The page scrolled: its line is gone from under it, so it falls rather
+        // than teleporting onto whichever line is now nearby.
+        w.set_platforms(vec![
+            Platform::ground(1800.0, GROUND_Y),
+            text_line(500.0, 1100.0, 650.0),
+            text_line(500.0, 1100.0, 710.0),
+        ]);
+        a.on_platforms_changed(&w);
+        assert_eq!(a.action, Action::Fall);
+        let mut ev = vec![];
+        run(&mut a, &w, &senses(Mode::Idle), 1.0, &mut ev);
+        assert_eq!(a.pos.y, 710.0, "landed on the line below");
     }
 
     #[test]
