@@ -309,6 +309,8 @@ pub struct Agent {
     swing: f32,
     /// This jump was a leap at the cursor: kick it on the way up.
     air_attack: bool,
+    /// Hits on the cursor since the last word grab.
+    combo: u32,
     spin_from: f32,
     blend_from: (Pose, f32),
     blend_left: f32,
@@ -352,6 +354,7 @@ impl Agent {
             grip: V2::ZERO,
             swing: 0.0,
             air_attack: false,
+            combo: 0,
             spin_from: 0.0,
             blend_from: (idle_pose(0.0), 0.0),
             blend_left: 0.0,
@@ -900,6 +903,7 @@ impl Agent {
         match self.action {
             Action::Grab { id } if !self.act_fired && self.t >= 0.28 => {
                 self.act_fired = true;
+                self.combo = 0;
                 self.holding = true;
                 events.push(Event::Grabbed { id });
                 events.push(Event::Dust {
@@ -971,6 +975,7 @@ impl Agent {
             self.hit_landed = true;
             let dir = v2(aim.cos() * self.facing, aim.sin()).normalize_or_zero();
             events.push(Event::StruckCursor { at: s.cursor, dir });
+            self.combo += 1;
             self.frustration = (self.frustration - 15.0).max(0.0);
         }
     }
@@ -1011,9 +1016,10 @@ impl Agent {
                         return;
                     }
                 } else if let Some(a) = s.ammo {
-                    // Close-range fists beat fetching ammo.
+                    // Close-range fists beat fetching ammo, until a few hits
+                    // in a row haven't driven the cursor off: then mix it up.
                     let near = (s.cursor - self.shoulder()).length() < self.reach() + 25.0;
-                    if !near && self.fetch(a, world) {
+                    if (!near || self.combo >= 3) && self.fetch(a, world) {
                         return;
                     }
                 }
@@ -1773,6 +1779,25 @@ mod tests {
             "kick missed"
         );
         assert!(landed_after, "never came back down");
+    }
+
+    #[test]
+    fn mixes_in_word_throws_when_punches_dont_move_the_cursor() {
+        // Standing on a text line right under a cursor that never moves.
+        let line = text_line(500.0, 1100.0, 800.0);
+        let w = world(vec![line]);
+        let mut a = Agent::new(700.0, line, SCALE, 5);
+        let mut s = senses(Mode::Combat);
+        s.cursor = v2(740.0, 800.0 - 110.0);
+        s.ammo = Some(Ammo {
+            id: 9,
+            at: v2(705.0, 806.0),
+            line_y: 800.0,
+        });
+        let mut ev = vec![];
+        run(&mut a, &w, &s, 6.0, &mut ev);
+        assert!(ev.iter().any(|e| matches!(e, Event::StruckCursor { .. })));
+        assert!(ev.contains(&Event::Grabbed { id: 9 }), "only ever punched");
     }
 
     #[test]
