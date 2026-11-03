@@ -40,6 +40,7 @@ use stykanimate_overlay::render::{DrawList, Renderer};
 use stykanimate_overlay::settings::{Behaviour, Command, Settings};
 use stykanimate_overlay::stickman::{Segment, BONES, WALKER_RGB};
 use stykanimate_overlay::windows::{self, Snapshot};
+use stykanimate_overlay::words::{WordEvent, WordPlay};
 use tokio::sync::watch;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
@@ -180,8 +181,9 @@ struct Scene {
     // Window and text platforms.
     windows_rx: Receiver<Snapshot>,
     snapshot: Snapshot,
-    ocr_tx: Option<Sender<ocr::Request>>,
-    ocr_rx: Receiver<ocr::Result>,
+    ocr_tx: Option<Sender<ocr::Job>>,
+    ocr_rx: Receiver<ocr::Output>,
+    words: WordPlay,
     ocr_target: Option<ocr::Request>,
     ocr_candidate: Option<ocr::Request>,
     ocr_candidate_since: Instant,
@@ -224,6 +226,7 @@ struct Scene {
     frames: u64,
     /// Something is moving: tick at the full rate.
     busy: bool,
+    last_ammo: Option<u64>,
     // Debug statistics.
     ticks: u64,
     stats_frames: u64,
@@ -258,18 +261,36 @@ impl Scene {
             // The active window moved or changed: its old text lines are stale.
             self.text.clear();
         }
-        // OCR results for the window that is still active, unmoved.
-        while let Ok(r) = self.ocr_rx.try_recv() {
-            if active
-                == Some(ocr::Request {
-                    id: r.id,
-                    rect: r.rect,
-                })
-            {
-                let mut lines = ocr::text_platforms(r.id, r.rect, &r.lines);
-                lines.truncate(120);
-                log::debug!("ocr: {} text platforms on window {}", lines.len(), r.id);
-                self.text = lines;
+        // OCR results for the window that is still active, unmoved; and word grabs.
+        while let Ok(out) = self.ocr_rx.try_recv() {
+            match out {
+                ocr::Output::Text(r) => {
+                    if active
+                        == Some(ocr::Request {
+                            id: r.id,
+                            rect: r.rect,
+                        })
+                    {
+                        let mut lines = ocr::text_platforms(r.id, r.rect, &r.lines);
+                        lines.truncate(120);
+                        log::debug!(
+                            "ocr: {} text platforms, {} words on window {}",
+                            lines.len(),
+                            r.words.len(),
+                            r.id
+                        );
+                        if self.settings.throw_words {
+                            let before = self.words.holes.len();
+                            self.words
+                                .set_words(r.id, &ocr::words_in(r.rect, &r.words), &lines);
+                            if self.words.holes.len() != before {
+                                self.shown = None; // a hole healed
+                            }
+                        }
+                        self.text = lines;
+                    }
+                }
+                ocr::Output::Grabbed(g) => self.word_captured(g),
             }
         }
         // Debounce: only read a window once it has stopped moving for a second
@@ -282,11 +303,27 @@ impl Scene {
         if !self.settings.walk_on_text {
             self.text.clear();
         }
+        if !(self.settings.walk_on_text && self.settings.throw_words) {
+            self.words.clear_words();
+        }
+        // Holes only belong over their own, unmoved, frontmost window.
+        if self
+            .words
+            .validate_holes(self.snapshot.active().map(|w| (w.id, w.rect)))
+        {
+            self.shown = None;
+        }
+        // Re-read faster while words are missing, to notice scrolling.
+        let interval = if self.words.holes.is_empty() {
+            OCR_INTERVAL
+        } else {
+            Duration::from_secs(3)
+        };
         if let (Some(tx), Some(req), true, true) =
             (&self.ocr_tx, active, settled, self.settings.walk_on_text)
         {
-            if self.ocr_target != Some(req) || self.ocr_sent.elapsed() >= OCR_INTERVAL {
-                let _ = tx.send(req);
+            if self.ocr_target != Some(req) || self.ocr_sent.elapsed() >= interval {
+                let _ = tx.send(ocr::Job::Read(req));
                 self.ocr_target = Some(req);
                 self.ocr_sent = Instant::now();
             }
@@ -356,6 +393,56 @@ impl Scene {
         });
     }
 
+    /// A grabbed word's pixels arrived from the OCR worker.
+    fn word_captured(&mut self, g: ocr::GrabResult) {
+        let (sprite, bg) = match &g.cutout {
+            Some(c) => (
+                self.renderer.create_sprite(&c.rgba, c.width, c.height),
+                c.background,
+            ),
+            None => (None, [0; 3]),
+        };
+        let window_rect = self.snapshot.active().map(|w| w.rect).unwrap_or(Rect {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+        });
+        let hands = self.agent.hands();
+        if self
+            .words
+            .captured(g.id, sprite, bg, window_rect, self.agent.holding, hands)
+        {
+            log::info!("event: ripped a word off the screen");
+            self.shown = None;
+        } else {
+            log::debug!("grab fizzled (busy background or capture failed)");
+            if let Some(id) = sprite {
+                self.renderer.free_sprite(id);
+            }
+            self.agent.holding = false;
+        }
+    }
+
+    fn handle_word_events(&mut self, events: &[WordEvent], freed: &[u32]) {
+        let size = v2(self.display.width as f32, self.display.height as f32);
+        for e in events {
+            match *e {
+                WordEvent::HitCursor { at, dir } => {
+                    self.particles.sparks(at, dir, 22);
+                    if self.settings.cursor_push {
+                        self.cursor.push(dir * CURSOR_PUSH, size);
+                    }
+                    log::info!("event: a thrown word hit the cursor");
+                }
+                WordEvent::Landed { at } => self.particles.dust(at, 0.25),
+            }
+        }
+        for id in freed {
+            self.renderer.free_sprite(*id);
+        }
+    }
+
     fn handle(&mut self, events: &[Event]) {
         let size = v2(self.display.width as f32, self.display.height as f32);
         for e in events {
@@ -386,6 +473,27 @@ impl Scene {
                     }
                     log::info!("event: stomp on window {window}");
                 }
+                Event::Grabbed { id } => match self.words.grabbed(id) {
+                    Some(need) => {
+                        let global = Rect {
+                            x: need.rect.x + self.display.x,
+                            y: need.rect.y + self.display.y,
+                            ..need.rect
+                        };
+                        let job = ocr::GrabRequest {
+                            id,
+                            window: need.window,
+                            below: self.overlay.state().window_number as u32,
+                            global,
+                        };
+                        if let Some(tx) = &self.ocr_tx {
+                            let _ = tx.send(ocr::Job::Grab(job));
+                        }
+                    }
+                    None => self.agent.holding = false, // nothing there after all
+                },
+                Event::Threw { from, vel } => self.words.threw(from, vel),
+                Event::Dropped { at } => self.words.dropped(at),
                 Event::KnockedOut { .. } => {
                     self.particles.stars(self.agent.head());
                     log::info!("event: knocked out");
@@ -517,7 +625,27 @@ impl Scene {
         self.accumulator += now.duration_since(self.last_tick).as_secs_f32().min(0.1);
         self.last_tick = now;
         let mut events = Vec::new();
+        let mut word_events = Vec::new();
+        let mut freed = Vec::new();
+        let wants_ammo = self.settings.throw_words
+            && self.settings.walk_on_text
+            && matches!(self.mode, Mode::Combat | Mode::Sabotage);
         while self.accumulator >= FIXED_DT {
+            let ammo = if wants_ammo && !self.agent.holding {
+                let active = self.snapshot.active().map(|w| w.id);
+                self.words
+                    .ammo(FIXED_DT, self.agent.pos, self.agent.ground, active)
+            } else {
+                None
+            };
+            if ammo.map(|a| a.id) != self.last_ammo {
+                log::debug!(
+                    "ammo: {ammo:?} (figure at {:?}, ground {:?})",
+                    self.agent.pos,
+                    self.agent.ground.map(|g| (g.kind, g.y))
+                );
+                self.last_ammo = ammo.map(|a| a.id);
+            }
             let senses = Senses {
                 cursor: self.cursor.pos,
                 cursor_vel: self.cursor.velocity(),
@@ -526,12 +654,23 @@ impl Scene {
                 active_window: self.snapshot.active().map(|w| (w.id, w.rect)),
                 min_x: EDGE_MARGIN,
                 max_x: self.display.width as f32 - EDGE_MARGIN,
+                ammo,
             };
             self.agent.update(&senses, &self.world, &mut events);
             self.particles.update(FIXED_DT);
+            let (we, fr) = self.words.update(
+                FIXED_DT,
+                self.cursor.pos,
+                &self.world,
+                EDGE_MARGIN,
+                self.display.width as f32 - EDGE_MARGIN,
+            );
+            word_events.extend(we);
+            freed.extend(fr);
             self.accumulator -= FIXED_DT;
         }
         self.handle(&events);
+        self.handle_word_events(&word_events, &freed);
 
         // PRD 3.1: intercept clicks only while the user is aiming at the figure.
         let over = self.agent.hit_test(self.cursor.pos);
@@ -548,12 +687,15 @@ impl Scene {
         self.ticks += 1;
         if self.stats_at.elapsed() >= Duration::from_secs(5) {
             log::debug!(
-                "perf: {} ticks, {} presents in {:.1}s; action {:?}, platforms {}",
+                "perf: {} ticks, {} presents in {:.1}s; action {:?}, platforms {}, active {:?}, words {}, holes {}",
                 self.ticks,
                 self.frames - self.stats_frames,
                 self.stats_at.elapsed().as_secs_f32(),
                 self.agent.action,
-                self.world.platforms().len()
+                self.world.platforms().len(),
+                self.snapshot.active().map(|w| (w.id, w.owner.as_str())),
+                self.words.words().len(),
+                self.words.holes.len()
             );
             self.ticks = 0;
             self.stats_frames = self.frames;
@@ -562,14 +704,16 @@ impl Scene {
         self.busy = cursor_moved
             || !self.particles.is_empty()
             || self.agent.since_hit() < 4.0
-            || !self.agent.action.is_still();
+            || !self.agent.action.is_still()
+            || self.words.animating();
         self.present();
         true
     }
 
     fn present(&mut self) {
         let segments = self.agent.segments();
-        let effects = !self.particles.is_empty() || self.agent.since_hit() < 4.0;
+        let effects =
+            !self.particles.is_empty() || self.agent.since_hit() < 4.0 || self.words.animating();
         if let Some(shown) = &self.shown {
             if !effects
                 && !shown.had_effects
@@ -579,6 +723,9 @@ impl Scene {
             }
         }
         self.draw.clear();
+        // Holes (painted page colour) go under everything; words as sprites on top.
+        let hands = self.agent.holding.then(|| self.agent.hands());
+        self.words.draw(&mut self.draw, hands);
         self.draw.figure(&segments, WALKER_RGB);
         self.particles.draw(&mut self.draw);
         self.health_bar();
@@ -780,6 +927,7 @@ impl App {
             snapshot: Snapshot::default(),
             ocr_tx,
             ocr_rx,
+            words: WordPlay::new(seed ^ 0x5157),
             ocr_target: None,
             ocr_candidate: None,
             ocr_candidate_since: now,
@@ -815,6 +963,7 @@ impl App {
             draw: DrawList::default(),
             frames: 0,
             busy: true,
+            last_ammo: None,
             ticks: 0,
             stats_frames: 0,
             stats_at: now,
@@ -1031,6 +1180,7 @@ mod tests {
             active_window: None,
             min_x: 30.0,
             max_x: 1770.0,
+            ammo: None,
         };
         let count = |hold: bool| {
             let mut a = Agent::new(900.0, ground, FIGURE_SCALE, 11);

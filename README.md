@@ -24,6 +24,7 @@ Written in Rust for Apple Silicon:
 | **Walking** | Procedural gait with planted feet (no sliding), two-bone IK knees, hip bob and counter-swinging arms. Running uses a longer stride, high knees and pumping arms. |
 | **Climbing** | Window title bars are one-way platforms (occluded parts removed), as are lines of text found by OCR in the active window. The figure jumps up onto them, walks along them, rides them when you drag the window, and falls when it walks off the edge or you close the window. |
 | **Combat** | Click the figure: it's knocked flying with an explosion, spins, bounces and gets back up, and a small health bar appears. Clicks land mid-air too (juggling). Enough hits knock it out, with stars. Swipe fast at it and it dodges. In combat mode it chases the cursor and punches or kicks it, physically shoving your pointer. |
+| **Word throwing** | In combat the figure jumps onto lines of text in your active window (any app, web pages included), rips a word or a single letter right off the screen and lobs it at your cursor. The word flies as the real pixels, spinning, knocks the pointer and falls to the Dock. Where it was taken from, the page looks blank: the overlay paints the exact on-screen background colour over it. Nothing in the real app changes, and the gap heals when the window scrolls, moves or loses focus, or after 45 s. In sabotage mode it steals words and flings them away. |
 | **Sabotage** | It climbs onto your active window and stomps on it, shaking the window via Accessibility. |
 | **AI director** | Every 4 s a local Ollama model (`llama3.2:1b` by default, ~200–300 ms) picks `IDLE` / `OBSERVE` / `SABOTAGE` / `COMBAT` from what you're doing: active app, mouse speed, hits, health, frustration, idle time. Modes last at least 12 s, except immediate retaliation after a hit. If Ollama is down, a built-in director takes over. |
 | **Efficiency** | 60 Hz simulation when something moves, 30 Hz otherwise; frames that wouldn't visibly change are skipped. Idle ≈ 2–3% of one core (PRD budget 5%), walking ≈ 13–16%. |
@@ -43,6 +44,7 @@ menu bars. Click it for:
 | Punches Push My Cursor | Whether combat hits move your real pointer. |
 | Stomps Shake My Windows | Whether stomps jolt your windows (needs Accessibility). |
 | Walk on Text | Whether to read the active window's text lines (needs Screen Recording). |
+| Rip Words Off the Screen & Throw Them | The word-throwing trick above. |
 | Show Figure (⌘H) | Hide or show the figure. Hidden means fully click-through, no simulation and no AI calls. |
 | Pause (⌘P) / Respawn (⌘R) | Freeze the figure / bring it back to the middle of the Dock. |
 | Grant … | Shortcuts to the right System Settings pane, shown only while a permission is missing. |
@@ -126,6 +128,8 @@ through the window server and AppKit:
 - **AI director:** makes a decision with the live model.
 - **OCR:** finds text platforms on the active window.
 - **Exit:** clean shutdown on SIGINT.
+- **Word throwing:** in combat, a word is ripped off the active window and
+  thrown at the cursor.
 - **Menu bar:** the icon is visible and placed in the menu bar.
 - **Click (opt-in):** clicking the figure knocks it back, bursts particles and
   returns focus to your app. It drives the real pointer, so it only runs with
@@ -167,6 +171,8 @@ main thread (winit / AppKit)                         background
 | `src/ocr.rs` | Window capture and Vision text-line detection, turned into text platforms. |
 | `src/director.rs` | Ollama client, prompt, structured output, fallback director. |
 | `src/macos.rs` | AppKit and Accessibility wrappers (overlay setup, focus, window shake, opening URLs). |
+| `src/words.rs` | Word throwing: ammo choice, "holes", flying words. |
+| `src/sprite.wgsl` | Textured sprites (grabbed words) with rotation and fade. |
 | `src/menubar.rs` | Menu bar extra: mood icon drawn from the rig, settings menu, Objective-C action target. |
 | `src/settings.rs` | Persistent settings and menu commands. |
 | `tests/overlay.rs` | Live GUI test harness. |
@@ -181,10 +187,17 @@ Engineering rules (from `claude.md`):
 
 ### Notable decisions
 
+- **How a word goes missing:** words are found with Vision; the grab captures
+  what's on screen just *below* the overlay. That way a translucent window's
+  background matches pixel-for-pixel, and it's decoded in its native colour
+  space. The background is keyed out so only the glyphs fly, and a patch of
+  the same colour covers the original spot. Busy backgrounds (photos,
+  gradients) are skipped, so a patch never shows.
 - **Vision instead of Tesseract (PRD 4):**
   - **Install:** Vision ships with macOS, so nothing to install.
   - **Speed:** it runs on the Neural Engine.
-  - **Privacy:** only text-line boxes are used, never the text itself.
+  - **Privacy:** only text-line and word boxes are used. The recognised text is
+    used in memory to find word boundaries and is never logged, stored or sent.
 - **Custom character controller over rapier queries:** platforms are rapier
   colliders. The figure moves with its own fixed-step integrator using rapier ray
   casts, which gives precise one-way platforms and planted feet.

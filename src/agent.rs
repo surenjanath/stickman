@@ -76,11 +76,47 @@ pub struct Senses {
     /// Horizontal walking range.
     pub min_x: f32,
     pub max_x: f32,
+    /// A word (or letter) the figure could rip off the screen and throw.
+    pub ammo: Option<Ammo>,
+}
+
+/// A grabbable word on a text line.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Ammo {
+    pub id: u64,
+    /// Centre of the word.
+    pub at: V2,
+    /// Top of the text line it belongs to: stand here to grab it.
+    pub line_y: f32,
+}
+
+/// Gravity for thrown words (lighter than the figure's, so lobs read well).
+pub const PROJECTILE_GRAVITY: f32 = 1300.0;
+
+/// Launch velocity for a lob from `from` that reaches `to` after a flight time
+/// that grows with distance.
+pub fn lob_velocity(from: V2, to: V2) -> V2 {
+    let d = to - from;
+    let t = (d.length() / 1100.0).clamp(0.28, 0.85);
+    v2(d.x / t, d.y / t - 0.5 * PROJECTILE_GRAVITY * t)
 }
 
 /// Things the rest of the app should react to (particles, cursor push, window shake).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Event {
+    /// Ripped word `id` off the screen; the figure is now carrying it.
+    Grabbed {
+        id: u64,
+    },
+    /// Let go of the carried word with this velocity (aimed throw).
+    Threw {
+        from: V2,
+        vel: V2,
+    },
+    /// Dropped the carried word (got hit).
+    Dropped {
+        at: V2,
+    },
     /// The user clicked the figure: explosion at the cursor.
     Knockback {
         at: V2,
@@ -133,6 +169,14 @@ pub enum Action {
     },
     Dodge,
     Tumble,
+    /// Bend down and rip word `id` up out of the line underfoot.
+    Grab {
+        id: u64,
+    },
+    /// Lob the carried word at `target`.
+    Throw {
+        target: V2,
+    },
     Ko,
     GetUp,
     Stomp,
@@ -148,6 +192,8 @@ impl Action {
             Action::GetUp => 0.7,
             Action::Ko => 2.5,
             Action::Stomp => 0.6,
+            Action::Grab { .. } => 0.55,
+            Action::Throw { .. } => 0.55,
             Action::Taunt => 1.6,
             Action::Think => 3.0,
             _ => return None,
@@ -185,6 +231,10 @@ pub struct Agent {
     pub action: Action,
     /// Diagnostics: stand still (no behaviour), e.g. to measure idle CPU.
     pub hold_still: bool,
+    /// Carrying a word overhead.
+    pub holding: bool,
+    /// The grab/throw moment of the current action already happened.
+    act_fired: bool,
     /// Platform currently stood on.
     pub ground: Option<Platform>,
     t: f32,
@@ -222,6 +272,8 @@ impl Agent {
             frustration: 0.0,
             action: Action::Stand,
             hold_still: false,
+            holding: false,
+            act_fired: false,
             ground: Some(ground),
             t: 0.0,
             clock: 0.0,
@@ -269,6 +321,7 @@ impl Agent {
         if matches!(a, Action::Punch { .. } | Action::Kick { .. }) {
             self.hit_landed = false;
         }
+        self.act_fired = false;
         if a == Action::GetUp {
             self.spin_from = self.spin;
         }
@@ -332,7 +385,24 @@ impl Agent {
             Action::Ko => idle_pose(0.0),
             Action::GetUp => poses::crouch(1.0 - smoothstep((t - 0.3) / 0.4)),
             Action::Stomp => poses::stomp(k(self.action)),
+            Action::Grab { .. } => poses::grab(k(self.action)),
+            Action::Throw { target } => {
+                poses::throw(k(self.action), self.aim_at(target, -1.2, 1.2))
+            }
         };
+        let mut p = p;
+        let carrying_pose = !matches!(
+            self.action,
+            Action::Grab { .. }
+                | Action::Throw { .. }
+                | Action::Tumble
+                | Action::Ko
+                | Action::GetUp
+                | Action::Fall
+        );
+        if self.holding && carrying_pose {
+            poses::hold_arms(&mut p);
+        }
         let spin = match self.action {
             Action::Tumble => self.spin,
             Action::Ko => self.spin,
@@ -429,6 +499,13 @@ impl Agent {
         }
     }
 
+    /// Between the two hands: where a carried word sits.
+    pub fn hands(&self) -> V2 {
+        let s = self.segments();
+        let (a, b) = (s[FOREARM[0]].end, s[FOREARM[1]].end);
+        v2((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
+    }
+
     /// Centre of the head ring.
     pub fn head(&self) -> V2 {
         let h = self.segments()[crate::stickman::HEAD];
@@ -511,6 +588,10 @@ impl Agent {
     fn reflexes(&mut self, s: &Senses, events: &mut Vec<Event>) {
         // Clicks land even mid-air (juggling), except while knocked out.
         if s.clicked && self.action != Action::Ko {
+            if self.holding {
+                self.holding = false;
+                events.push(Event::Dropped { at: self.hands() });
+            }
             let away = (self.center() - s.cursor).normalize_or(v2(-self.facing, 0.0));
             let mut knock = away * 620.0 + v2(0.0, -520.0) + s.cursor_vel * 0.25;
             knock = knock.clamp_length_max(1500.0);
@@ -599,6 +680,30 @@ impl Agent {
     }
 
     fn attack_contacts(&mut self, s: &Senses, events: &mut Vec<Event>) {
+        match self.action {
+            Action::Grab { id } if !self.act_fired && self.t >= 0.28 => {
+                self.act_fired = true;
+                self.holding = true;
+                events.push(Event::Grabbed { id });
+                events.push(Event::Dust {
+                    at: self.pos,
+                    strength: 0.15,
+                });
+                return;
+            }
+            Action::Throw { target } if !self.act_fired && self.t >= 0.22 && self.holding => {
+                self.act_fired = true;
+                self.holding = false;
+                let from = self.hands();
+                events.push(Event::Threw {
+                    from,
+                    vel: lob_velocity(from, target),
+                });
+                self.frustration = (self.frustration - 10.0).max(0.0);
+                return;
+            }
+            _ => {}
+        }
         let (window, bone, radius, aim) = match self.action {
             Action::Punch { aim } => ((0.16, 0.28), FOREARM[0], 30.0, aim),
             Action::Kick { aim } => ((0.22, 0.34), SHIN[0], 34.0, aim),
@@ -657,6 +762,22 @@ impl Agent {
         let dx = s.cursor.x - self.pos.x;
         match s.mode {
             Mode::Combat => {
+                if self.holding {
+                    // Pelt the cursor, leading it a little.
+                    if self.attack_cooldown <= 0.0 && (s.cursor - self.pos).length() < 1500.0 {
+                        let target = s.cursor + s.cursor_vel * 0.2;
+                        self.face((target.x - self.pos.x).signum());
+                        self.attack_cooldown = 0.6;
+                        self.set_action(Action::Throw { target });
+                        return;
+                    }
+                } else if let Some(a) = s.ammo {
+                    // Close-range fists beat fetching ammo.
+                    let near = (s.cursor - self.shoulder()).length() < self.reach() + 25.0;
+                    if !near && self.fetch(a, world) {
+                        return;
+                    }
+                }
                 if (s.cursor - self.shoulder()).length() < self.reach() + 25.0 {
                     if self.attack_cooldown <= 0.0 {
                         self.attack(s.cursor);
@@ -699,7 +820,82 @@ impl Agent {
         }
     }
 
+    /// Go and grab `a`: walk to it on this line, jump up to its line, climb toward
+    /// it, or drop down through the current platform. Returns whether it acted.
+    fn fetch(&mut self, a: Ammo, world: &World) -> bool {
+        let Some(ground) = self.ground else {
+            return false;
+        };
+        let dx = a.at.x - self.pos.x;
+        let on_line = ground.kind == PlatformKind::Text
+            && (ground.y - a.line_y).abs() < 2.0
+            && ground.contains_x(a.at.x);
+        if on_line {
+            if dx.abs() > 5.0 {
+                self.walk_to(a.at.x, dx.abs() > 200.0);
+            } else {
+                self.set_action(Action::Grab { id: a.id });
+            }
+            return true;
+        }
+        let rise = self.pos.y - a.line_y;
+        if rise > 20.0 {
+            if dx.abs() > 240.0 {
+                // Get closer before jumping.
+                self.walk_to(a.at.x - dx.signum() * 120.0, true);
+                return true;
+            }
+            if rise <= MAX_JUMP_RISE {
+                self.jump_to(v2(a.at.x, a.line_y));
+                return true;
+            }
+            // Too high: climb a step toward it.
+            if let Some(i) =
+                world.platform_above(self.pos, MAX_JUMP_RISE, a.at.x - 200.0, a.at.x + 200.0)
+            {
+                let p = world.platforms()[i];
+                self.jump_to(v2(a.at.x.clamp(p.x0 + 20.0, p.x1 - 20.0), p.y));
+                return true;
+            }
+            return false;
+        }
+        if rise < -2.0 && ground.kind != PlatformKind::Ground {
+            // Below us: walk over it and drop through this platform.
+            if dx.abs() > 8.0 && ground.contains_x(a.at.x) {
+                self.walk_to(a.at.x, false);
+            } else {
+                self.pos.y += 2.0; // just under our platform, so landing skips it
+                self.ground = None;
+                self.vel = V2::ZERO;
+                self.set_action(Action::Fall);
+            }
+            return true;
+        }
+        false
+    }
+
     fn sabotage(&mut self, s: &Senses, world: &World) {
+        // Steal words from the page and fling them away.
+        if self.holding {
+            if self.decide_left <= 0.0 {
+                let side = if self.random(0.0, 1.0) < 0.5 {
+                    -1.0
+                } else {
+                    1.0
+                };
+                let target =
+                    self.pos + v2(side * self.random(250.0, 600.0), -self.random(150.0, 400.0));
+                self.face(side);
+                self.decide_left = self.random(0.5, 1.2);
+                self.set_action(Action::Throw { target });
+            }
+            return;
+        }
+        if let Some(a) = s.ammo {
+            if self.fetch(a, world) {
+                return;
+            }
+        }
         let Some((id, win)) = s.active_window else {
             return self.wander(s, world);
         };
@@ -935,6 +1131,7 @@ mod tests {
             active_window: None,
             min_x: 60.0,
             max_x: 1740.0,
+            ammo: None,
         }
     }
 
@@ -953,6 +1150,130 @@ mod tests {
             .iter()
             .map(|g| g.start[1].max(g.end[1]) + g.thickness / 2.0)
             .fold(f32::MIN, f32::max)
+    }
+
+    fn text_line(x0: f32, x1: f32, y: f32) -> Platform {
+        Platform {
+            x0,
+            x1,
+            y,
+            kind: PlatformKind::Text,
+            owner: 77,
+        }
+    }
+
+    #[test]
+    fn lob_reaches_its_target() {
+        for (from, to) in [
+            (v2(100.0, 800.0), v2(600.0, 500.0)),
+            (v2(900.0, 700.0), v2(300.0, 750.0)),
+            (v2(0.0, 0.0), v2(60.0, -40.0)),
+        ] {
+            let mut p = from;
+            let mut v = lob_velocity(from, to);
+            let mut best = f32::MAX;
+            for _ in 0..240 {
+                v.y += PROJECTILE_GRAVITY / 240.0;
+                p += v / 240.0;
+                best = best.min((p - to).length());
+            }
+            assert!(best < 6.0, "lob from {from:?} missed {to:?} by {best}");
+        }
+    }
+
+    #[test]
+    fn combat_grabs_a_word_underfoot_and_pelts_the_cursor() {
+        let line = text_line(500.0, 1100.0, 800.0);
+        let w = world(vec![line]);
+        let mut a = Agent::new(700.0, line, SCALE, 5);
+        let mut s = senses(Mode::Combat);
+        s.cursor = v2(1400.0, 450.0);
+        s.ammo = Some(Ammo {
+            id: 9,
+            at: v2(850.0, 808.0),
+            line_y: 800.0,
+        });
+        let mut ev = vec![];
+        for _ in 0..(5.0 / FIXED_DT) as usize {
+            a.update(&s, &w, &mut ev);
+            if ev.iter().any(|e| matches!(e, Event::Grabbed { .. })) {
+                s.ammo = None; // the word is gone from the page now
+            }
+        }
+        let grabbed = ev
+            .iter()
+            .position(|e| *e == Event::Grabbed { id: 9 })
+            .expect("never grabbed the word");
+        let threw = ev
+            .iter()
+            .position(|e| matches!(e, Event::Threw { .. }))
+            .expect("never threw it");
+        assert!(threw > grabbed);
+        if let Event::Threw { from, vel } = ev[threw] {
+            assert!(vel.x > 0.0, "thrown away from the cursor: {vel:?}");
+            assert!((from - a.pos).length() < 200.0);
+        }
+        assert!(!a.holding);
+    }
+
+    #[test]
+    fn jumps_up_to_a_text_line_for_ammo() {
+        let line = text_line(600.0, 1200.0, 900.0);
+        let w = world(vec![line]);
+        let mut a = agent();
+        let mut s = senses(Mode::Combat);
+        s.cursor = v2(200.0, 300.0);
+        s.ammo = Some(Ammo {
+            id: 3,
+            at: v2(950.0, 908.0),
+            line_y: 900.0,
+        });
+        let mut ev = vec![];
+        run(&mut a, &w, &s, 6.0, &mut ev);
+        assert!(
+            ev.iter().any(|e| matches!(e, Event::Jumped { .. })),
+            "never jumped"
+        );
+        assert!(
+            ev.contains(&Event::Grabbed { id: 3 }),
+            "never grabbed after jumping up"
+        );
+    }
+
+    #[test]
+    fn drops_the_word_when_hit() {
+        let w = world(vec![]);
+        let mut a = agent();
+        a.holding = true;
+        let mut s = senses(Mode::Idle);
+        s.cursor = a.center() + v2(-15.0, 0.0);
+        s.clicked = true;
+        let mut ev = vec![];
+        a.update(&s, &w, &mut ev);
+        assert!(!a.holding);
+        assert!(ev.iter().any(|e| matches!(e, Event::Dropped { .. })));
+    }
+
+    #[test]
+    fn sabotage_steals_words_and_flings_them() {
+        let line = text_line(500.0, 1100.0, 800.0);
+        let w = world(vec![line]);
+        let mut a = Agent::new(800.0, line, SCALE, 8);
+        let mut s = senses(Mode::Sabotage);
+        s.ammo = Some(Ammo {
+            id: 4,
+            at: v2(760.0, 808.0),
+            line_y: 800.0,
+        });
+        let mut ev = vec![];
+        for _ in 0..(6.0 / FIXED_DT) as usize {
+            a.update(&s, &w, &mut ev);
+            if ev.iter().any(|e| matches!(e, Event::Grabbed { .. })) {
+                s.ammo = None;
+            }
+        }
+        assert!(ev.contains(&Event::Grabbed { id: 4 }));
+        assert!(ev.iter().any(|e| matches!(e, Event::Threw { .. })));
     }
 
     #[test]
@@ -1278,7 +1599,7 @@ mod tests {
             kind: PlatformKind::Window,
             owner: 9,
         };
-        let w = world(vec![top]);
+        let w = world(vec![top, text_line(650.0, 1150.0, 950.0)]);
         for (mode, seed) in [Mode::Idle, Mode::Observe, Mode::Sabotage, Mode::Combat]
             .into_iter()
             .flat_map(|m| [1234u64, 7, 99, 31337].map(|s| (m, s)))
@@ -1294,10 +1615,18 @@ mod tests {
                     height: 300.0,
                 },
             ));
+            // Ammo that comes back after being thrown (exercises grab/carry/throw).
+            let ammo = Ammo {
+                id: 1,
+                at: v2(900.0, 958.0),
+                line_y: 950.0,
+            };
+            s.ammo = Some(ammo);
             let mut ev = vec![];
             let mut prev = a.segments();
             let mut prev_pos = a.pos;
             for i in 0..(30.0 / FIXED_DT) as usize {
+                s.ammo = if a.holding { None } else { Some(ammo) };
                 // Move the cursor around in a slow loop.
                 let t = i as f32 * FIXED_DT;
                 s.cursor = v2(

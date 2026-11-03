@@ -98,6 +98,9 @@ pub struct Settings {
     pub window_shake: bool,
     /// Read the active window's text (OCR) so the figure can walk on it.
     pub walk_on_text: bool,
+    /// Let the figure rip words off the screen and throw them (they look missing
+    /// until the page changes).
+    pub throw_words: bool,
     pub visible: bool,
     pub paused: bool,
 }
@@ -110,6 +113,7 @@ impl Default for Settings {
             cursor_push: true,
             window_shake: true,
             walk_on_text: true,
+            throw_words: true,
             visible: true,
             paused: false,
         }
@@ -124,6 +128,7 @@ pub enum Command {
     ToggleCursorPush,
     ToggleWindowShake,
     ToggleWalkOnText,
+    ToggleThrowWords,
     ToggleVisible,
     TogglePaused,
     Respawn,
@@ -147,6 +152,7 @@ impl Command {
             Command::ToggleWalkOnText => 302,
             Command::ToggleVisible => 303,
             Command::TogglePaused => 304,
+            Command::ToggleThrowWords => 305,
             Command::Respawn => 400,
             Command::OpenAccessibilitySettings => 500,
             Command::OpenScreenRecordingSettings => 501,
@@ -163,6 +169,7 @@ impl Command {
             302 => Command::ToggleWalkOnText,
             303 => Command::ToggleVisible,
             304 => Command::TogglePaused,
+            305 => Command::ToggleThrowWords,
             400 => Command::Respawn,
             500 => Command::OpenAccessibilitySettings,
             501 => Command::OpenScreenRecordingSettings,
@@ -183,6 +190,7 @@ impl Settings {
             Command::ToggleCursorPush => self.cursor_push = !self.cursor_push,
             Command::ToggleWindowShake => self.window_shake = !self.window_shake,
             Command::ToggleWalkOnText => self.walk_on_text = !self.walk_on_text,
+            Command::ToggleThrowWords => self.throw_words = !self.throw_words,
             Command::ToggleVisible => self.visible = !self.visible,
             Command::TogglePaused => self.paused = !self.paused,
             _ => {}
@@ -247,6 +255,7 @@ mod tests {
             Command::ToggleCursorPush,
             Command::ToggleWindowShake,
             Command::ToggleWalkOnText,
+            Command::ToggleThrowWords,
             Command::ToggleVisible,
             Command::TogglePaused,
             Command::Respawn,

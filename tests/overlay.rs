@@ -689,12 +689,12 @@ fn test_ocr_finds_text_platforms() {
         return;
     }
     let line = o
-        .wait_for("text platforms on window", Duration::from_secs(8))
+        .wait_for("text platforms, ", Duration::from_secs(8))
         .expect("OCR produced no result for the active window");
     println!("      {}", line.split("] ").nth(1).unwrap_or(&line));
     // How many lines depends on what's in the user's active window; recognition
     // itself is verified against known text in `ocr::tests::vision_finds_text_lines`.
-    assert!(line.contains("text platforms on window"));
+    assert!(line.contains("text platforms, ") && line.contains(" words on window"));
 }
 
 /// The menu bar extra exists, is visible, and sits in the menu bar strip.
@@ -720,6 +720,54 @@ fn test_menu_bar_icon(o: &Overlay) {
         "not in the menu bar (y={y}, h={h})"
     );
     assert!(x >= 0.0 && x + w <= d.size.width, "off screen (x={x})");
+}
+
+/// The headline trick: in combat the figure rips words off the active window
+/// and throws them at the cursor (pointer pushes are disabled in tests).
+fn test_rips_words_and_throws_them() {
+    let o = Overlay::spawn(&[
+        ("STYK_MODE", "COMBAT"),
+        ("RUST_LOG", "info,stykanimate_overlay=debug"),
+    ]);
+    if field(&o.log_line, "ocr") != "true" {
+        println!("      (skipped: Screen Recording not granted to the terminal)");
+        return;
+    }
+    let ripped = o.wait_for(
+        "event: ripped a word off the screen",
+        Duration::from_secs(25),
+    );
+    let Some(line) = ripped else {
+        let words_seen = o
+            .logs
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("ocr: ") && !l.contains(" 0 words"));
+        assert!(
+            !words_seen,
+            "the active window had words but none were ripped off"
+        );
+        println!("      (skipped: the active window has no text right now)");
+        return;
+    };
+    println!("      {}", line.split("] ").nth(1).unwrap_or(&line));
+    let hit = o.wait_for(
+        "event: a thrown word hit the cursor",
+        Duration::from_secs(10),
+    );
+    let thrown = hit.is_some()
+        || o.logs
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|l| l.contains("ripped a word"))
+            .count()
+            > 1;
+    assert!(thrown, "a word was grabbed but never thrown");
+    if let Some(h) = hit {
+        println!("      {}", h.split("] ").nth(1).unwrap_or(&h));
+    }
 }
 
 type SharedTest = (&'static str, fn(&Overlay));
@@ -803,6 +851,10 @@ fn main() {
         &test_click_on_figure_knocks_it_back,
     );
     run("ai_director_decides", &test_ai_director_decides);
+    run(
+        "rips_words_and_throws_them",
+        &test_rips_words_and_throws_them,
+    );
     run("ocr_finds_text_platforms", &test_ocr_finds_text_platforms);
     run(
         "control_hit_test_detects_opaque_overlay",

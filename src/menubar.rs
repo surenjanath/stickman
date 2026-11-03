@@ -346,6 +346,12 @@ impl MenuBar {
             Some(Command::ToggleWalkOnText),
             "",
         );
+        self.add(
+            menu,
+            "Rip Words Off the Screen & Throw Them",
+            Some(Command::ToggleThrowWords),
+            "",
+        );
         Self::separator(menu);
         self.add(menu, "Show Figure", Some(Command::ToggleVisible), "h");
         self.add(menu, "Pause", Some(Command::TogglePaused), "p");
@@ -438,6 +444,10 @@ impl MenuBar {
         self.set_checked(Command::ToggleCursorPush, settings.cursor_push);
         self.set_checked(Command::ToggleWindowShake, settings.window_shake);
         self.set_checked(Command::ToggleWalkOnText, settings.walk_on_text);
+        self.set_checked(
+            Command::ToggleThrowWords,
+            settings.throw_words && settings.walk_on_text,
+        );
         self.set_checked(Command::ToggleVisible, settings.visible);
         self.set_checked(Command::TogglePaused, settings.paused);
         Self::set_hidden(self.grant_ax, status.accessibility);

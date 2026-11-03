@@ -16,3 +16,4 @@ pub mod render;
 pub mod settings;
 pub mod stickman;
 pub mod windows;
+pub mod words;

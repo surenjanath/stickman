@@ -19,6 +19,34 @@ pub const MAX_INSTANCES: usize = 2048;
 const KIND_CAPSULE: f32 = 0.0;
 const KIND_RING: f32 = 1.0;
 const KIND_DISC: f32 = 2.0;
+const KIND_RECT: f32 = 3.0;
+/// Sprites (grabbed words) drawn per frame, at most.
+pub const MAX_SPRITES: usize = 64;
+
+/// A textured quad: a GPU sprite created with [`Renderer::create_sprite`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpriteDraw {
+    pub id: u32,
+    pub center: V2,
+    /// Half extents in points.
+    pub half: V2,
+    pub rotation: f32,
+    pub alpha: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct SpriteInstance {
+    center: [f32; 2],
+    half: [f32; 2],
+    rot_alpha: [f32; 2],
+    screen: [f32; 2],
+}
+
+struct Sprite {
+    _texture: wgpu::Texture,
+    bind: wgpu::BindGroup,
+}
 
 /// One SDF primitive, in points (converted to pixels at upload).
 #[repr(C)]
@@ -36,19 +64,33 @@ pub struct Instance {
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct DrawList {
     items: Vec<Instance>,
+    sprites: Vec<SpriteDraw>,
 }
 
 impl DrawList {
     pub fn len(&self) -> usize {
-        self.items.len()
+        self.items.len() + self.sprites.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
+        self.items.is_empty() && self.sprites.is_empty()
     }
 
     pub fn clear(&mut self) {
         self.items.clear();
+        self.sprites.clear();
+    }
+
+    /// A rounded rectangle centred at `center` with half extents `half`.
+    pub fn rect(&mut self, center: V2, half: V2, radius: f32, color: [f32; 4]) {
+        self.push(center, half, radius, KIND_RECT, color);
+    }
+
+    /// A textured sprite, drawn above all SDF primitives.
+    pub fn sprite(&mut self, s: SpriteDraw) {
+        if self.sprites.len() < MAX_SPRITES && s.alpha > 0.0 {
+            self.sprites.push(s);
+        }
     }
 
     fn push(&mut self, a: V2, b: V2, half: f32, kind: f32, color: [f32; 4]) {
@@ -113,6 +155,12 @@ pub struct Renderer {
     config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
     instances: wgpu::Buffer,
+    sprite_pipeline: wgpu::RenderPipeline,
+    sprite_layout: wgpu::BindGroupLayout,
+    sprite_sampler: wgpu::Sampler,
+    sprite_instances: wgpu::Buffer,
+    sprites: std::collections::HashMap<u32, Sprite>,
+    next_sprite: u32,
     window: Arc<Window>,
 }
 
@@ -225,6 +273,80 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // Sprite pipeline: textured quads with premultiplied alpha.
+        let sprite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("sprite.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("sprite.wgsl").into()),
+        });
+        let sprite_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("sprite-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let sprite_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sprite-layout"),
+            bind_group_layouts: &[Some(&sprite_layout)],
+            immediate_size: 0,
+        });
+        let sprite_attrs = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x2];
+        let sprite_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sprite-pipeline"),
+            layout: Some(&sprite_pl),
+            vertex: wgpu::VertexState {
+                module: &sprite_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<SpriteInstance>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &sprite_attrs,
+                })],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &sprite_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let sprite_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("sprite-sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let sprite_instances = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("sprite-instances"),
+            size: (MAX_SPRITES * std::mem::size_of::<SpriteInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Ok(Renderer {
             surface,
             device,
@@ -232,8 +354,85 @@ impl Renderer {
             config,
             pipeline,
             instances,
+            sprite_pipeline,
+            sprite_layout,
+            sprite_sampler,
+            sprite_instances,
+            sprites: std::collections::HashMap::new(),
+            next_sprite: 1,
             window,
         })
+    }
+
+    /// Upload a premultiplied RGBA8 image (`w`×`h` pixels) as a sprite.
+    pub fn create_sprite(&mut self, rgba: &[u8], w: u32, h: u32) -> Option<u32> {
+        if w == 0 || h == 0 || rgba.len() != (w * h * 4) as usize {
+            return None;
+        }
+        let size = wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        };
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("sprite"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * w),
+                rows_per_image: Some(h),
+            },
+            size,
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sprite-bg"),
+            layout: &self.sprite_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sprite_sampler),
+                },
+            ],
+        });
+        let id = self.next_sprite;
+        self.next_sprite += 1;
+        self.sprites.insert(
+            id,
+            Sprite {
+                _texture: texture,
+                bind,
+            },
+        );
+        Some(id)
+    }
+
+    /// Free a sprite's GPU memory.
+    pub fn free_sprite(&mut self, id: u32) {
+        self.sprites.remove(&id);
+    }
+
+    pub fn sprite_count(&self) -> usize {
+        self.sprites.len()
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -264,6 +463,20 @@ impl Renderer {
         if !data.is_empty() {
             self.queue
                 .write_buffer(&self.instances, 0, bytemuck::cast_slice(&data));
+        }
+        let sprites: Vec<SpriteInstance> = list
+            .sprites
+            .iter()
+            .map(|s| SpriteInstance {
+                center: [s.center.x * scale, s.center.y * scale],
+                half: [s.half.x * scale, s.half.y * scale],
+                rot_alpha: [s.rotation, s.alpha.clamp(0.0, 1.0)],
+                screen,
+            })
+            .collect();
+        if !sprites.is_empty() {
+            self.queue
+                .write_buffer(&self.sprite_instances, 0, bytemuck::cast_slice(&sprites));
         }
 
         let frame = match self.surface.get_current_texture() {
@@ -308,6 +521,16 @@ impl Renderer {
             pass.set_vertex_buffer(0, self.instances.slice(..));
             if !data.is_empty() {
                 pass.draw(0..6, 0..data.len() as u32);
+            }
+            if !sprites.is_empty() {
+                pass.set_pipeline(&self.sprite_pipeline);
+                pass.set_vertex_buffer(0, self.sprite_instances.slice(..));
+                for (i, s) in list.sprites.iter().take(sprites.len()).enumerate() {
+                    if let Some(sp) = self.sprites.get(&s.id) {
+                        pass.set_bind_group(0, &sp.bind, &[]);
+                        pass.draw(0..6, i as u32..i as u32 + 1);
+                    }
+                }
             }
         }
         self.queue.submit([encoder.finish()]);

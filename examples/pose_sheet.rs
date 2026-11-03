@@ -57,6 +57,14 @@ fn main() {
         ("taunt", poses::taunt(0.0)),
         ("taunt", poses::taunt(0.15)),
         ("think", poses::think(0.0)),
+        ("grab (reach)", poses::grab(0.42)),
+        ("carry", {
+            let mut p = walk_pose(0.3);
+            poses::hold_arms(&mut p);
+            p
+        }),
+        ("throw wind-up", poses::throw(0.25, -0.3)),
+        ("throw release", poses::throw(0.45, -0.3)),
         ("knocked out", ko),
         ("rest (source)", stykanimate_overlay::stickman::rest_pose()),
     ];

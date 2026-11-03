@@ -7,7 +7,7 @@ struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) a: vec2<f32>,
     @location(1) b: vec2<f32>,
-    // x: half stroke width / disc radius (px), y: kind (0 capsule, 1 ring, 2 disc)
+    // x: half stroke width / disc radius / corner radius (px), y: kind (0 capsule, 1 ring, 2 disc, 3 rect)
     @location(2) params: vec2<f32>,
     @location(3) color: vec4<f32>,
 };
@@ -28,7 +28,11 @@ fn vs_main(
     let pad = params.x + 2.0; // stroke + 2 px for the AA fringe
     var lo: vec2<f32>;
     var hi: vec2<f32>;
-    if (params.y > 1.5) {
+    if (params.y > 2.5) {
+        // Rounded rect: a = centre, b = half extents.
+        lo = a - b - vec2<f32>(2.0, 2.0);
+        hi = a + b + vec2<f32>(2.0, 2.0);
+    } else if (params.y > 1.5) {
         lo = a - vec2<f32>(pad, pad);
         hi = a + vec2<f32>(pad, pad);
     } else if (params.y > 0.5) {
@@ -55,7 +59,10 @@ fn vs_main(
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let p = in.pos.xy; // pixel centre, framebuffer space (top-left origin)
     var d: f32;
-    if (in.params.y > 1.5) {
+    if (in.params.y > 2.5) {
+        let q = abs(p - in.a) - in.b + vec2<f32>(in.params.x, in.params.x);
+        d = length(max(q, vec2<f32>(0.0, 0.0))) + min(max(q.x, q.y), 0.0) - in.params.x;
+    } else if (in.params.y > 1.5) {
         d = length(p - in.a) - in.params.x;
     } else if (in.params.y > 0.5) {
         let c = (in.a + in.b) * 0.5;

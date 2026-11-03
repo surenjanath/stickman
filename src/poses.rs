@@ -255,6 +255,65 @@ pub fn think(t: f32) -> Pose {
     p
 }
 
+/// Raise both arms to carry something overhead (applied over any base pose).
+pub fn hold_arms(p: &mut Pose) {
+    arm(p, A, -0.3, -1.15);
+    arm(p, B, -0.05, -0.95);
+}
+
+/// Bend down and rip something up out of the line underfoot (k: 0..1, the
+/// pull happens at k ≈ 0.5).
+pub fn grab(k: f32) -> Pose {
+    let mut reach = crouch(1.0);
+    reach[TORSO] = -H + 0.75;
+    reach[HEAD] = -H + 0.7;
+    arm(&mut reach, A, 0.9, 1.2);
+    arm(&mut reach, B, 1.1, 1.35);
+    let mut lift = idle_pose(0.0);
+    hold_arms(&mut lift);
+    sequence(
+        &[
+            (0.0, idle_pose(0.0)),
+            (0.35, reach),
+            (0.5, reach),
+            (0.85, lift),
+            (1.0, lift),
+        ],
+        k,
+    )
+}
+
+/// Underhand lob toward `aim` (local frame): the arm swings back low, then up
+/// and forward. (An overhand throw would sweep the arm through the head in a
+/// side view.) Release at k ≈ 0.4.
+pub fn throw(k: f32, aim: f32) -> Pose {
+    let mut base = stance(0.0);
+    hold_arms(&mut base);
+    let mut windup = stance(0.0);
+    windup[TORSO] = -H + 0.28;
+    windup[HEAD] = -H + 0.22;
+    arm(&mut windup, A, 2.45, 2.7);
+    arm(&mut windup, B, aim.max(-0.15), aim.max(-0.15));
+    let mut release = stance(0.0);
+    plant(&mut release, 0.84 * LEG_LEN, 46.0, 0.0, -34.0, 0.0);
+    release[TORSO] = -H + 0.12;
+    release[HEAD] = -H + 0.1;
+    // The flight path is computed separately; the arm only gestures toward it.
+    arm(&mut release, A, aim.max(-0.3), aim.max(-0.3) - 0.1);
+    arm(&mut release, B, 1.9, 2.1);
+    let follow = stance(0.0);
+    sequence(
+        &[
+            (0.0, base),
+            (0.25, windup),
+            (0.4, release),
+            (0.6, release),
+            (1.0, follow),
+        ],
+        k,
+    )
+}
+
 /// Landing squash (k = 0 at touchdown → 1 recovered).
 pub fn land(k: f32) -> Pose {
     crouch(0.65 * (1.0 - smoothstep(k)))
@@ -267,6 +326,10 @@ pub const STAND_HIP: f32 = HIP_HEIGHT;
 mod tests {
     use super::*;
     use crate::stickman::{depth_below_root, forward_kinematics};
+
+    fn walk_pose_for_test(p: f32) -> Pose {
+        crate::stickman::walk_pose(p)
+    }
 
     fn all_poses() -> Vec<(&'static str, Pose)> {
         let mut v = vec![
@@ -285,7 +348,14 @@ mod tests {
         for q in [0.0, 0.2, 0.4, 0.6, 0.8] {
             v.push(("run", run_pose(q)));
         }
+        let mut held = walk_pose_for_test(0.3);
+        hold_arms(&mut held);
+        v.push(("carry", held));
         for k in [0.0, 0.3, 0.45, 0.7, 1.0] {
+            v.push(("grab", grab(k)));
+            v.push(("throw", throw(k, -0.3)));
+            v.push(("throw up", throw(k, -0.75)));
+            v.push(("throw down", throw(k, 0.6)));
             v.push(("uppercut", punch(k, -0.75)));
             v.push(("punch", punch(k, -0.2)));
             v.push(("kick", kick(k, 0.2)));
