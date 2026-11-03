@@ -29,6 +29,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use stickman::agent::{Agent, Event, Mode, Senses, FIXED_DT};
 use stickman::director::{self, Directive, Observation};
+use stickman::doodle::Doodles;
 use stickman::geom::{cg_to_cocoa, v2, Rect, V2};
 use stickman::input::{self as input, Cursor};
 use stickman::macos::{
@@ -215,6 +216,8 @@ fn accept_directive(current: Mode, proposed: Mode, in_mode: Duration, recently_h
 struct Shown {
     segments: [Segment; BONES],
     had_effects: bool,
+    /// Which "Zzz" frame was shown (0 = none).
+    zzz: usize,
 }
 
 struct Scene {
@@ -237,6 +240,9 @@ struct Scene {
     words: WordPlay,
     speech: Speech,
     last_director_line: Instant,
+    doodles: Doodles,
+    /// "z", "zZ", "zZz" text sprites (made on first use) and their sizes.
+    zzz_sprites: Vec<(u32, V2)>,
     sound: Sound,
     ocr_target: Option<ocr::Request>,
     ocr_candidate: Option<ocr::Request>,
@@ -798,6 +804,50 @@ impl Scene {
                         self.quip(Moment::ThrewCursor);
                     }
                 }
+                Event::Yawned { .. } => {
+                    log::info!("event: fell asleep");
+                    self.quip(Moment::Yawned);
+                }
+                Event::Woke { at } => {
+                    log::info!("event: woke up");
+                    self.sfx(Sfx::Pop, 0.4, at);
+                    self.quip(Moment::Woke);
+                }
+                Event::Petted { at } => {
+                    log::info!("event: petted");
+                    self.particles.hearts(at - v2(0.0, 20.0));
+                    self.sfx(Sfx::Pop, 0.35, at);
+                    self.quip(Moment::Petted);
+                }
+                Event::StartedDancing { .. } => self.quip(Moment::Dancing),
+                Event::DoodleStarted {
+                    shape,
+                    origin,
+                    size,
+                } => {
+                    log::info!("event: doodling a {shape:?}");
+                    self.doodles.start(shape, origin, size);
+                    self.quip(Moment::Doodling);
+                }
+                Event::ShoveWindow { at, window, dx } => {
+                    self.sfx(Sfx::Stomp, 0.9, at);
+                    if self.settings.window_shake && self.accessibility {
+                        if let Some(w) = self.snapshot.windows.iter().find(|w| w.id == window) {
+                            // Keep the window on its screen.
+                            let screen = self.layout.screen_at(v2(at.x, at.y + 1.0)).frame;
+                            let room_left = (w.rect.x - screen.x).max(0.0);
+                            let room_right = (screen.right() - w.rect.right()).max(0.0);
+                            let dx = f64::from(dx).clamp(-room_left, room_right);
+                            if dx.abs() > 10.0 {
+                                let _ = self
+                                    .os_tx
+                                    .send(OsAction::SlideFocusedWindow { pid: w.pid, dx });
+                                log::info!("event: shoved window {window} by {dx:.0} pt");
+                                self.quip(Moment::Shove);
+                            }
+                        }
+                    }
+                }
                 Event::PickedUp { at } => {
                     self.sfx(Sfx::Pop, 0.5, at);
                     self.quip(Moment::PickedUp);
@@ -896,6 +946,14 @@ impl Scene {
             if env_flag("STICKMAN_DEBUG_OPEN_MENU") {
                 self.menubar.open();
             }
+            if let Ok(what) = std::env::var("STICKMAN_DEBUG_DO") {
+                let mut ev = Vec::new();
+                if self.agent.perform(&what, &mut ev) {
+                    self.handle(&ev);
+                } else {
+                    log::warn!("STICKMAN_DEBUG_DO: unknown action {what:?}");
+                }
+            }
             if let Ok(line) = std::env::var("STICKMAN_DEBUG_SAY") {
                 let lines = self.speech.say(&line, Priority::Event);
                 self.speak(lines);
@@ -991,10 +1049,16 @@ impl Scene {
                 ammo,
                 can_grab_cursor: self.settings.cursor_push,
                 held: self.dragging,
+                user_idle: self.last_mouse_move.elapsed().as_secs_f32(),
+                can_shove: self.settings.window_shake && self.accessibility,
             };
             self.agent.update(&senses, &self.world, &mut events);
             self.particles.update(FIXED_DT);
             self.speech.update(FIXED_DT);
+            self.doodles.update(FIXED_DT);
+            if let Some(k) = self.agent.doodle_progress() {
+                self.doodles.set_progress(k);
+            }
             self.fly_cursor(FIXED_DT);
             let (we, fr) = self.words.update(
                 FIXED_DT,
@@ -1054,7 +1118,8 @@ impl Scene {
             || !self.agent.action.is_still()
             || self.words.animating()
             || self.speech.visible()
-            || self.dragging;
+            || self.dragging
+            || self.doodles.animating();
         self.present();
         true
     }
@@ -1107,10 +1172,13 @@ impl Scene {
         let effects = !self.particles.is_empty()
             || self.agent.since_hit() < 4.0
             || self.words.animating()
-            || self.speech.visible();
+            || self.speech.visible()
+            || self.doodles.animating();
+        let zzz = self.zzz_frame();
         if let Some(shown) = &self.shown {
             if !effects
                 && !shown.had_effects
+                && shown.zzz == zzz
                 && max_joint_shift(&shown.segments, &segments) < MIN_VISIBLE_SHIFT_PT
             {
                 return; // would look identical: skip the ~2 ms present
@@ -1120,7 +1188,16 @@ impl Scene {
         // Holes (painted page colour) go under everything; words as sprites on top.
         let hands = self.agent.holding.then(|| self.agent.hands());
         self.words.draw(&mut self.draw, hands);
+        self.doodles.draw(&mut self.draw);
         self.draw.figure(&segments, WALKER_RGB);
+        if let Some((hand, pen)) = self.agent.pen_stroke() {
+            // The marker in its hand.
+            self.draw.capsule(hand, pen, 2.4, [1.0, 1.0, 1.0, 0.85]);
+            self.draw.capsule(hand, pen, 1.3, [0.2, 0.2, 0.22, 1.0]);
+        }
+        if zzz > 0 {
+            self.draw_zzz(zzz);
+        }
         self.particles.draw(&mut self.draw);
         self.health_bar();
         let head_r = 22.0 * self.agent.scale;
@@ -1145,7 +1222,46 @@ impl Scene {
         self.shown = Some(Shown {
             segments,
             had_effects: effects,
+            zzz,
         });
+    }
+
+    /// Which "Zzz" to show while asleep: 1..=3 cycling, 0 when awake.
+    fn zzz_frame(&self) -> usize {
+        if self.agent.action != stickman::agent::Action::Sleep {
+            return 0;
+        }
+        1 + (self.stats_at.elapsed().as_secs_f32() * 1.4) as usize % 3
+    }
+
+    fn draw_zzz(&mut self, frame: usize) {
+        if self.zzz_sprites.is_empty() {
+            let scale = self.renderer.scale_factor();
+            for text in ["z", "zZ", "zZz"] {
+                let Some(img) =
+                    stickman::text::render_lines(&[text.into()], 15.0, [0.35, 0.4, 0.6], scale)
+                else {
+                    return;
+                };
+                if let Some(id) = self
+                    .renderer
+                    .create_sprite(&img.rgba, img.width, img.height)
+                {
+                    self.zzz_sprites
+                        .push((id, v2(img.size_pt.0, img.size_pt.1)));
+                }
+            }
+        }
+        if let Some(&(id, size)) = self.zzz_sprites.get(frame - 1) {
+            let head = self.agent.head();
+            self.draw.sprite(stickman::render::SpriteDraw {
+                id,
+                center: head + v2(18.0 + size.x / 2.0, -26.0 - 4.0 * frame as f32),
+                half: size / 2.0,
+                rotation: -0.15,
+                alpha: 0.9,
+            });
+        }
     }
 
     /// Small health bar over the head for a few seconds after a hit.
@@ -1440,6 +1556,8 @@ impl App {
             ocr_rx,
             words: WordPlay::new(seed ^ 0x5157),
             speech: Speech::new(seed ^ 0x7A11),
+            doodles: Doodles::default(),
+            zzz_sprites: Vec::new(),
             last_director_line: now,
             sound,
             ocr_target: None,
@@ -1702,6 +1820,8 @@ mod tests {
             ammo: None,
             can_grab_cursor: false,
             held: false,
+            user_idle: 0.0,
+            can_shove: false,
         };
         let count = |hold: bool| {
             let mut a = Agent::new(900.0, ground, FIGURE_SCALE, 11);

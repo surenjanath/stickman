@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod director;
+pub mod doodle;
 pub mod geom;
 pub mod input;
 pub mod macos;

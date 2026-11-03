@@ -14,6 +14,7 @@
 
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
+use crate::doodle::{self, Shape};
 use crate::geom::{v2, Rect, V2};
 use crate::physics::{Platform, PlatformKind, World};
 use crate::poses;
@@ -30,6 +31,21 @@ pub const GRAVITY: f32 = 1900.0;
 pub const MAX_JUMP_RISE: f32 = 330.0;
 const RUN_PERIOD: f32 = 0.62;
 const BLEND_SECONDS: f32 = 0.18;
+/// The user away this long (no mouse movement): time for a nap.
+pub const SLEEP_AFTER: f32 = 75.0;
+/// Stroke the figure this long (seconds) to make it happy.
+const PET_TIME: f32 = 1.0;
+
+/// How the figure's body is placed relative to `pos`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Anchor {
+    /// Lowest point on the ground (standing, walking, lying).
+    Feet,
+    /// Hip at standing height above `pos` (airborne).
+    Hip,
+    /// Hip resting on the surface (sitting on an edge).
+    Seat,
+}
 
 /// Macro behaviour, normally chosen by the AI director.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -84,6 +100,10 @@ pub struct Senses {
     pub can_grab_cursor: bool,
     /// The user is holding the figure with the mouse (press and drag).
     pub held: bool,
+    /// Seconds since the user last moved the mouse.
+    pub user_idle: f32,
+    /// May shove the active window around (Accessibility granted, allowed).
+    pub can_shove: bool,
 }
 
 /// A grabbable word on a text line.
@@ -175,6 +195,32 @@ pub enum Event {
         at: V2,
         vel: V2,
     },
+    /// Lying down for a nap.
+    Yawned {
+        at: V2,
+    },
+    Woke {
+        at: V2,
+    },
+    /// The user stroked it with the cursor: hearts.
+    Petted {
+        at: V2,
+    },
+    StartedDancing {
+        at: V2,
+    },
+    /// Started drawing `shape` centred at `origin`, `size` points across (half).
+    DoodleStarted {
+        shape: Shape,
+        origin: V2,
+        size: f32,
+    },
+    /// Kicked the window it stands on sideways by `dx` points.
+    ShoveWindow {
+        at: V2,
+        window: u32,
+        dx: f32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -228,7 +274,29 @@ pub enum Action {
     FlyingKick {
         aim: f32,
     },
+    LieDown,
+    Sleep,
+    Dance,
+    /// Sitting on the edge of the platform, legs dangling.
+    Sit,
+    /// Happy after being petted.
+    Cheer,
+    /// Drawing `shape` in the air at `origin`.
+    Doodle {
+        shape: Shape,
+        origin: V2,
+        size: f32,
+    },
+    /// Kick the window underfoot sideways.
+    Shove {
+        dx: f32,
+    },
 }
+
+/// Seconds the pen takes to draw a doodle.
+const DOODLE_DRAW: f32 = 2.6;
+/// The arm comes up before the pen starts moving.
+const DOODLE_LEAD: f32 = 0.3;
 
 impl Action {
     fn duration(self) -> Option<f32> {
@@ -246,6 +314,11 @@ impl Action {
             Action::HoldCursor => 0.75,
             Action::ThrowCursor { .. } => 0.55,
             Action::FlyingKick { .. } => 0.45,
+            Action::LieDown => 0.9,
+            Action::Dance => 4.6,
+            Action::Cheer => 1.6,
+            Action::Doodle { .. } => DOODLE_LEAD + DOODLE_DRAW + 0.5,
+            Action::Shove { .. } => 0.6,
             Action::Taunt => 1.6,
             Action::Think => 3.0,
             _ => return None,
@@ -256,13 +329,16 @@ impl Action {
     fn interruptible(self) -> bool {
         matches!(
             self,
-            Action::Stand | Action::Walk { .. } | Action::Think | Action::Taunt
+            Action::Stand | Action::Walk { .. } | Action::Think | Action::Taunt | Action::Sit
         )
     }
 
     /// Standing, thinking or knocked out: nothing that needs full-rate ticks.
     pub fn is_still(self) -> bool {
-        matches!(self, Action::Stand | Action::Think | Action::Ko)
+        matches!(
+            self,
+            Action::Stand | Action::Think | Action::Ko | Action::Sleep | Action::Sit
+        )
     }
 
     fn airborne(self) -> bool {
@@ -311,6 +387,11 @@ pub struct Agent {
     air_attack: bool,
     /// Hits on the cursor since the last word grab.
     combo: u32,
+    /// Walking to an edge to sit on it.
+    sit_plan: bool,
+    /// Seconds of being stroked by the cursor.
+    pet: f32,
+    pet_cooldown: f32,
     spin_from: f32,
     blend_from: (Pose, f32),
     blend_left: f32,
@@ -322,7 +403,9 @@ pub struct Agent {
     /// Visual offset that smooths the switch between hip-anchored (airborne) and
     /// foot-anchored (grounded) placement; decays to zero in ~80 ms.
     root_correction: f32,
-    hip_anchored: bool,
+    anchored: Anchor,
+    /// Time constant of `root_correction`'s decay, seconds.
+    settle: f32,
     /// Pose as last drawn; new actions blend from here.
     shown: (Pose, f32),
     /// Current action's target pose, angle-unwrapped to stay continuous.
@@ -355,6 +438,9 @@ impl Agent {
             swing: 0.0,
             air_attack: false,
             combo: 0,
+            sit_plan: false,
+            pet: 0.0,
+            pet_cooldown: 0.0,
             spin_from: 0.0,
             blend_from: (idle_pose(0.0), 0.0),
             blend_left: 0.0,
@@ -364,7 +450,8 @@ impl Agent {
             since_hit: 99.0,
             rng: seed | 1,
             root_correction: 0.0,
-            hip_anchored: false,
+            anchored: Anchor::Feet,
+            settle: 0.08,
             shown: (idle_pose(0.0), 0.0),
             target: (idle_pose(0.0), 0.0),
         }
@@ -377,6 +464,33 @@ impl Agent {
         self.rng ^= self.rng >> 27;
         let r = self.rng.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40;
         lo + (hi - lo) * (r as f32 / (1u64 << 24) as f32)
+    }
+
+    /// Start a named action right away (debugging and demos): `sleep`,
+    /// `dance`, `cheer` or `doodle`. Returns whether the name was known.
+    pub fn perform(&mut self, name: &str, events: &mut Vec<Event>) -> bool {
+        match name.trim() {
+            "sleep" => self.set_action(Action::Sleep),
+            "dance" => self.set_action(Action::Dance),
+            "cheer" => self.set_action(Action::Cheer),
+            "doodle" => {
+                let size = 20.0 * (self.scale / 0.55);
+                let origin = self.shoulder() + v2(self.facing * (self.reach() + size + 4.0), -8.0);
+                let shape = Shape::Heart;
+                self.set_action(Action::Doodle {
+                    shape,
+                    origin,
+                    size,
+                });
+                events.push(Event::DoodleStarted {
+                    shape,
+                    origin,
+                    size,
+                });
+            }
+            _ => return false,
+        }
+        true
     }
 
     /// Seconds since the figure was last hit (for the health bar).
@@ -405,6 +519,9 @@ impl Agent {
         }
         if !matches!(a, Action::Walk { .. }) {
             self.gait_phase = 0.0;
+        }
+        if !matches!(a, Action::Walk { .. } | Action::Sit) {
+            self.sit_plan = false;
         }
         self.action = a;
         self.t = 0.0;
@@ -460,6 +577,16 @@ impl Agent {
             Action::Kick { aim } => poses::kick(k(self.action), aim),
             Action::Dodge => poses::dodge(),
             Action::Dangled => poses::dangle(self.clock),
+            Action::LieDown => poses::lie_down(k(self.action)),
+            Action::Sleep => poses::sleep(self.clock),
+            Action::Dance => poses::dance(t),
+            Action::Sit => poses::sit(self.clock),
+            Action::Cheer => poses::cheer(t),
+            Action::Doodle { .. } => {
+                let pen = self.pen().unwrap_or(self.shoulder());
+                poses::punch(0.5, self.aim_at(pen, -0.75, 0.9))
+            }
+            Action::Shove { .. } => poses::stomp(k(self.action)),
             Action::FlyingKick { aim } => poses::flying_kick(k(self.action), aim),
             Action::Tumble => poses::tumble(),
             Action::Ko => idle_pose(0.0),
@@ -533,19 +660,52 @@ impl Agent {
         }
     }
 
-    fn uses_hip_anchor(&self) -> bool {
-        self.action.airborne() && self.action != Action::Tumble
+    fn anchor(&self) -> Anchor {
+        if self.action == Action::Sit {
+            Anchor::Seat
+        } else if self.action.airborne() && self.action != Action::Tumble {
+            Anchor::Hip
+        } else {
+            Anchor::Feet
+        }
     }
 
-    /// Hip height for the given pose under either anchoring rule.
-    fn root_y(&self, rotated: &Pose, hip_anchor: bool) -> f32 {
-        if hip_anchor {
+    /// Hip height for the given pose under an anchoring rule.
+    fn root_y(&self, rotated: &Pose, anchor: Anchor) -> f32 {
+        match anchor {
             // Airborne: hip at standing height above `pos`, so tucking the legs
             // doesn't make the body drop.
-            self.pos.y - (poses::STAND_HIP + 5.0) * self.scale
-        } else {
-            self.pos.y - depth_below_root(rotated, self.scale)
+            Anchor::Hip => self.pos.y - (poses::STAND_HIP + 5.0) * self.scale,
+            Anchor::Feet => self.pos.y - depth_below_root(rotated, self.scale),
+            Anchor::Seat => self.pos.y - 4.0 * self.scale,
         }
+    }
+
+    /// Where the doodling pen is now, world points.
+    fn pen(&self) -> Option<V2> {
+        match self.action {
+            Action::Doodle {
+                shape,
+                origin,
+                size,
+            } => Some(origin + doodle::pen_at(shape, self.doodle_k()) * size),
+            _ => None,
+        }
+    }
+
+    /// How much of the current doodle is drawn, while doodling.
+    pub fn doodle_progress(&self) -> Option<f32> {
+        matches!(self.action, Action::Doodle { .. }).then(|| self.doodle_k())
+    }
+
+    fn doodle_k(&self) -> f32 {
+        ((self.t - DOODLE_LEAD) / DOODLE_DRAW).clamp(0.0, 1.0)
+    }
+
+    /// The pen tip and the hand holding it, while doodling.
+    pub fn pen_stroke(&self) -> Option<(V2, V2)> {
+        let pen = self.pen()?;
+        Some((self.segments()[FOREARM[0]].end.into(), pen))
     }
 
     fn rotated_pose(&self) -> Pose {
@@ -556,7 +716,7 @@ impl Agent {
     /// The figure's bones in overlay points.
     pub fn segments(&self) -> [Segment; BONES] {
         let rotated = self.rotated_pose();
-        let root_y = self.root_y(&rotated, self.uses_hip_anchor()) + self.root_correction;
+        let root_y = self.root_y(&rotated, self.anchor()) + self.root_correction;
         forward_kinematics(&rotated, [self.pos.x, root_y], self.scale, self.facing)
     }
 
@@ -613,6 +773,15 @@ impl Agent {
             PlatformKind::Window => 400.0,
             PlatformKind::Text => 12.0,
         };
+        // A window edge of the same width that moved sideways carries the
+        // figure along with it.
+        let shift = |p: &Platform| {
+            if old.kind == PlatformKind::Window && (p.width() - old.width()).abs() < 2.0 {
+                p.x0 - old.x0
+            } else {
+                0.0
+            }
+        };
         // The nearest matching surface, never just the first: windows have many
         // text lines, and picking the first made the figure teleport between them.
         let same = world
@@ -622,12 +791,17 @@ impl Agent {
             .filter(|p| {
                 p.kind == old.kind
                     && p.owner == old.owner
-                    && p.contains_x(self.pos.x)
+                    && p.contains_x(self.pos.x + shift(p))
                     && (p.y - old.y).abs() <= tolerance
             })
             .min_by(|a, b| (a.y - old.y).abs().total_cmp(&(b.y - old.y).abs()));
         match same {
             Some(p) => {
+                let dx = shift(&p);
+                self.pos.x += dx;
+                if let Action::Walk { to, .. } = &mut self.action {
+                    *to += dx;
+                }
                 self.pos.y = p.y;
                 self.ground = Some(p);
             }
@@ -655,8 +829,7 @@ impl Agent {
         }
         self.frustration = (self.frustration - 1.5 * dt).max(0.0);
 
-        let before_root =
-            self.root_y(&self.rotated_pose(), self.hip_anchored) + self.root_correction;
+        let before_root = self.root_y(&self.rotated_pose(), self.anchored) + self.root_correction;
         let before_pos = self.pos.y;
 
         if s.held {
@@ -669,16 +842,22 @@ impl Agent {
         }
 
         // Keep the drawn body continuous when the anchoring rule flips.
-        let anchor = self.uses_hip_anchor();
-        if anchor != self.hip_anchored {
+        let anchor = self.anchor();
+        if anchor != self.anchored {
             let moved = self.pos.y - before_pos;
             let new_root = self.root_y(&self.rotated_pose(), anchor);
             self.root_correction = before_root + moved - new_root;
-            self.hip_anchored = anchor;
+            // Sitting down or getting up from a seat settles more slowly.
+            self.settle = if anchor == Anchor::Seat || self.anchored == Anchor::Seat {
+                0.16
+            } else {
+                0.08
+            };
+            self.anchored = anchor;
         }
         self.refresh_target();
         self.shown = self.pose_and_spin();
-        self.root_correction *= (-dt / 0.08).exp();
+        self.root_correction *= (-dt / self.settle).exp();
         if self.root_correction.abs() < 0.01 {
             self.root_correction = 0.0;
         }
@@ -735,7 +914,23 @@ impl Agent {
 
     /// One tick of normal life: reflexes, actions, behaviour, physics.
     fn act(&mut self, s: &Senses, world: &World, events: &mut Vec<Event>) {
+        self.pet_cooldown -= FIXED_DT;
+        // Asleep: wake up when the user is back, or a fight starts.
+        if matches!(self.action, Action::Sleep | Action::LieDown)
+            && (s.user_idle < 0.5 || s.clicked || s.mode == Mode::Combat)
+        {
+            self.set_action(Action::GetUp);
+            events.push(Event::Woke { at: self.head() });
+        }
         self.reflexes(s, events);
+        self.petting(s, events);
+        if self.action == Action::Dance {
+            // Turn around every four beats.
+            let period = 4.0 / 2.6;
+            if (self.t / period).floor() != ((self.t - FIXED_DT) / period).floor() {
+                self.face(-self.facing);
+            }
+        }
         // Leaping at the cursor: kick it on the way.
         if self.action == Action::Air
             && self.air_attack
@@ -764,6 +959,30 @@ impl Agent {
             self.behave(s, world, events);
         }
         self.integrate(s, world, events);
+    }
+
+    /// Slow strokes of the cursor over the figure (outside combat) make it happy.
+    fn petting(&mut self, s: &Senses, events: &mut Vec<Event>) {
+        let speed = s.cursor_vel.length();
+        let stroking = self.hit_test(s.cursor)
+            && (25.0..900.0).contains(&speed)
+            && s.mode != Mode::Combat
+            && self.ground.is_some()
+            && !s.clicked;
+        self.pet = if stroking {
+            self.pet + FIXED_DT
+        } else {
+            (self.pet - 2.0 * FIXED_DT).max(0.0)
+        };
+        if self.pet >= PET_TIME && self.pet_cooldown <= 0.0 && self.action.interruptible() {
+            self.pet = 0.0;
+            self.pet_cooldown = 3.0;
+            self.frustration = (self.frustration - 40.0).max(0.0);
+            self.health = (self.health + 15.0).min(100.0);
+            self.face((s.cursor.x - self.pos.x).signum());
+            self.set_action(Action::Cheer);
+            events.push(Event::Petted { at: self.head() });
+        }
     }
 
     fn reflexes(&mut self, s: &Senses, events: &mut Vec<Event>) {
@@ -836,6 +1055,7 @@ impl Agent {
                 events.push(Event::Jumped { at: self.pos });
             }
             Action::Ko => self.set_action(Action::GetUp),
+            Action::LieDown => self.set_action(Action::Sleep),
             Action::FlyingKick { .. } => self.set_action(Action::Air),
             Action::SnatchCursor { .. } if self.holding_cursor => {
                 self.set_action(Action::HoldCursor)
@@ -946,6 +1166,23 @@ impl Agent {
             }
             _ => {}
         }
+        if let Action::Shove { dx } = self.action {
+            if !self.act_fired && self.t >= 0.3 {
+                self.act_fired = true;
+                if let Some(g) = self.ground.filter(|g| g.kind == PlatformKind::Window) {
+                    events.push(Event::ShoveWindow {
+                        at: self.pos,
+                        window: g.owner,
+                        dx,
+                    });
+                    events.push(Event::Dust {
+                        at: self.pos,
+                        strength: 0.6,
+                    });
+                }
+            }
+            return;
+        }
         let (window, bone, radius, aim) = match self.action {
             Action::Punch { aim } => ((0.16, 0.28), FOREARM[0], 30.0, aim),
             Action::Kick { aim } => ((0.22, 0.34), SHIN[0], 34.0, aim),
@@ -1004,6 +1241,16 @@ impl Agent {
 
     fn behave(&mut self, s: &Senses, world: &World, events: &mut Vec<Event>) {
         let dx = s.cursor.x - self.pos.x;
+        // The user's away: nap (wherever it is).
+        if matches!(s.mode, Mode::Idle | Mode::Observe)
+            && s.user_idle > SLEEP_AFTER
+            && !self.holding
+            && !matches!(self.action, Action::Walk { .. })
+        {
+            self.set_action(Action::LieDown);
+            events.push(Event::Yawned { at: self.head() });
+            return;
+        }
         match s.mode {
             Mode::Combat => {
                 if self.holding {
@@ -1063,12 +1310,18 @@ impl Agent {
                 }
             }
             Mode::Sabotage => self.sabotage(s, world),
-            Mode::Idle => self.wander(s, world),
+            Mode::Idle => self.wander(s, world, events),
         }
         // Arrived?
         if let Action::Walk { to, .. } = self.action {
             if (self.facing > 0.0 && self.pos.x >= to) || (self.facing < 0.0 && self.pos.x <= to) {
-                self.set_action(Action::Stand);
+                if self.sit_plan {
+                    self.sit_plan = false;
+                    self.decide_left = self.random(6.0, 14.0);
+                    self.set_action(Action::Sit);
+                } else {
+                    self.set_action(Action::Stand);
+                }
             }
         }
     }
@@ -1150,15 +1403,26 @@ impl Agent {
             }
         }
         let Some((id, win)) = s.active_window else {
-            return self.wander(s, world);
+            return self.wander(s, world, &mut Vec::new());
         };
         let ground = self.ground.unwrap_or(Platform::ground(0.0, self.pos.y));
         if ground.kind == PlatformKind::Window && ground.owner == id {
             if self.decide_left <= 0.0 {
                 self.decide_left = self.random(0.7, 1.6);
-                if self.random(0.0, 1.0) < 0.3 {
+                let roll = self.random(0.0, 1.0);
+                if roll < 0.25 {
                     let x = self.random(ground.x0 + 20.0, ground.x1 - 20.0);
                     self.walk_to(x, false);
+                } else if roll < 0.5 && s.can_shove {
+                    // Kick the window across the screen (and ride it).
+                    let dir = if self.random(0.0, 1.0) < 0.5 {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    let dx = dir * self.random(90.0, 170.0);
+                    self.face(-dir); // kick backwards to push it the other way
+                    self.set_action(Action::Shove { dx });
                 } else {
                     self.set_action(Action::Stomp);
                 }
@@ -1200,7 +1464,7 @@ impl Agent {
         }
     }
 
-    fn wander(&mut self, s: &Senses, world: &World) {
+    fn wander(&mut self, s: &Senses, world: &World, events: &mut Vec<Event>) {
         if self.decide_left > 0.0 || matches!(self.action, Action::Walk { .. }) {
             return;
         }
@@ -1244,7 +1508,7 @@ impl Agent {
                 return self.walk_to(x.clamp(s.min_x, s.max_x), false);
             }
         }
-        if roll < 0.25 && ground.kind != PlatformKind::Ground {
+        if (0.15..0.25).contains(&roll) && ground.kind != PlatformKind::Ground {
             // Wander off the edge of a window and drop down.
             let edge = if self.random(0.0, 1.0) < 0.5 {
                 ground.x0 - 40.0
@@ -1252,6 +1516,53 @@ impl Agent {
                 ground.x1 + 40.0
             };
             return self.walk_to(edge.clamp(s.min_x, s.max_x), false);
+        }
+        if (0.37..0.49).contains(&roll)
+            && ground.kind != PlatformKind::Ground
+            && ground.width() > 120.0
+        {
+            // Go and sit on the nearer edge, facing out over it.
+            let (left, right) = (ground.x0 + 6.0, ground.x1 - 6.0);
+            let to = if self.pos.x - left < right - self.pos.x {
+                left
+            } else {
+                right
+            };
+            if (to - self.pos.x).abs() > 3.0 {
+                self.walk_to(to, false);
+                self.sit_plan = true;
+                return;
+            }
+        }
+        if (0.49..0.54).contains(&roll) {
+            self.set_action(Action::Dance);
+            events.push(Event::StartedDancing { at: self.head() });
+            return;
+        }
+        if (0.54..0.6).contains(&roll) && s.mode == Mode::Idle {
+            // Doodle in the air in front of it, if there's room on screen.
+            // Just beyond arm's reach, so the pen in its hand can trace it.
+            let size = 20.0 * (self.scale / 0.55);
+            let origin = self.shoulder() + v2(self.facing * (self.reach() + size + 4.0), -8.0);
+            let room = origin.x - size > s.min_x
+                && origin.x + size < s.max_x
+                && origin.y - size > s.top + 40.0;
+            if room {
+                let i =
+                    (self.random(0.0, Shape::ALL.len() as f32) as usize).min(Shape::ALL.len() - 1);
+                let shape = Shape::ALL[i];
+                self.set_action(Action::Doodle {
+                    shape,
+                    origin,
+                    size,
+                });
+                events.push(Event::DoodleStarted {
+                    shape,
+                    origin,
+                    size,
+                });
+                return;
+            }
         }
         if roll < 0.75 && hi > lo + 40.0 {
             let x = self.random(lo, hi);
@@ -1407,6 +1718,8 @@ mod tests {
             ammo: None,
             can_grab_cursor: false,
             held: false,
+            user_idle: 0.0,
+            can_shove: false,
         }
     }
 
@@ -1739,7 +2052,7 @@ mod tests {
         s.cursor_vel = V2::ZERO;
         run(&mut a, &w, &s, 5.0, &mut ev);
         assert!(
-            a.ground.is_some() && a.action.interruptible(),
+            a.ground.is_some() && !a.action.airborne() && a.action != Action::Tumble,
             "{:?}",
             a.action
         );
@@ -1818,6 +2131,184 @@ mod tests {
             ev.iter().any(|e| matches!(e, Event::StruckCursor { .. })),
             "never hit it"
         );
+    }
+
+    #[test]
+    fn naps_while_the_user_is_away_and_wakes_when_they_return() {
+        let w = world(vec![]);
+        let mut a = agent();
+        let mut s = senses(Mode::Idle);
+        s.user_idle = SLEEP_AFTER + 1.0;
+        let mut ev = vec![];
+        run(&mut a, &w, &s, 8.0, &mut ev);
+        assert_eq!(a.action, Action::Sleep);
+        assert!(ev.iter().any(|e| matches!(e, Event::Yawned { .. })));
+        // Lying down: the whole body is close to the ground.
+        let top = a
+            .segments()
+            .iter()
+            .map(|g| g.start[1].min(g.end[1]))
+            .fold(f32::MAX, f32::min);
+        assert!(GROUND_Y - top < 70.0, "not lying down (top {top})");
+        assert!(a.action.is_still(), "sleeping should be cheap");
+        // Mouse moves: up it gets.
+        s.user_idle = 0.0;
+        a.update(&s, &w, &mut ev);
+        assert_eq!(a.action, Action::GetUp);
+        assert!(ev.iter().any(|e| matches!(e, Event::Woke { .. })));
+        run(&mut a, &w, &s, 1.5, &mut ev);
+        assert!(a.action.interruptible() && (feet_y(&a) - GROUND_Y).abs() < 1.0);
+    }
+
+    #[test]
+    fn stroking_it_slowly_makes_it_happy() {
+        let w = world(vec![]);
+        let mut a = agent();
+        a.frustration = 60.0;
+        a.health = 50.0;
+        a.hold_still = true;
+        let mut s = senses(Mode::Idle);
+        let mut ev = vec![];
+        for i in 0..90 {
+            // Back and forth over the belly at ~300 pt/s.
+            let k = (i as f32 * 0.25).sin();
+            s.cursor = a.center() + v2(12.0 * k, 0.0);
+            s.cursor_vel = v2(300.0 * (i as f32 * 0.25).cos(), 0.0);
+            a.update(&s, &w, &mut ev);
+        }
+        assert!(
+            ev.iter().any(|e| matches!(e, Event::Petted { .. })),
+            "no hearts"
+        );
+        assert!(a.frustration < 25.0 && a.health > 60.0);
+        // A fast swipe is not petting.
+        let mut b = agent();
+        b.hold_still = true;
+        s.cursor = b.center();
+        s.cursor_vel = v2(2000.0, 0.0);
+        let mut ev2 = vec![];
+        run(&mut b, &w, &s, 1.5, &mut ev2);
+        assert!(!ev2.iter().any(|e| matches!(e, Event::Petted { .. })));
+    }
+
+    #[test]
+    fn sits_on_window_edges_dances_and_doodles_now_and_then() {
+        let top = Platform {
+            x0: 600.0,
+            x1: 1200.0,
+            y: 800.0,
+            kind: PlatformKind::Window,
+            owner: 9,
+        };
+        let w = world(vec![top]);
+        let (mut sat, mut danced, mut doodled) = (false, false, false);
+        for seed in [1u64, 2, 3, 4, 5, 6] {
+            let mut a = Agent::new(900.0, top, SCALE, seed);
+            let s = senses(Mode::Idle);
+            let mut ev = vec![];
+            for _ in 0..(90.0 / FIXED_DT) as usize {
+                a.update(&s, &w, &mut ev);
+                if a.action == Action::Sit && a.t > 0.5 && a.ground == Some(top) {
+                    sat = true;
+                    // On the edge, facing out, legs hanging below the surface.
+                    let edge_gap = (a.pos.x - 600.0).abs().min((a.pos.x - 1200.0).abs());
+                    assert!(edge_gap < 10.0, "sitting {edge_gap} pt from the edge");
+                    assert!(feet_y(&a) > top.y + 15.0, "legs don't dangle");
+                    let hip = a.segments()[0].start[1];
+                    assert!((hip - top.y).abs() < 6.0, "hip at {hip}, edge at {}", top.y);
+                }
+            }
+            danced |= ev.iter().any(|e| matches!(e, Event::StartedDancing { .. }));
+            doodled |= ev.iter().any(|e| matches!(e, Event::DoodleStarted { .. }));
+        }
+        assert!(sat, "never sat on the edge");
+        assert!(danced, "never danced");
+        assert!(doodled, "never doodled");
+    }
+
+    #[test]
+    fn doodle_pen_traces_the_shape_beside_it() {
+        let w = world(vec![]);
+        let mut a = agent();
+        let origin = a.shoulder() + v2(a.reach() + 30.0, -8.0);
+        a.set_action(Action::Doodle {
+            shape: Shape::Star,
+            origin,
+            size: 26.0,
+        });
+        let s = senses(Mode::Idle);
+        let mut ev = vec![];
+        let mut far = 0.0f32;
+        for _ in 0..((DOODLE_LEAD + DOODLE_DRAW) / FIXED_DT) as usize + 1 {
+            a.update(&s, &w, &mut ev);
+            let (hand, pen) = a.pen_stroke().expect("drawing");
+            if a.t < DOODLE_LEAD {
+                continue; // arm still coming up; nothing inked yet
+            }
+            far = far.max((pen - origin).length());
+            assert!(
+                (hand - pen).length() < 60.0,
+                "pen {} pt from the hand: hand {hand:?} pen {pen:?} shoulder {:?} t {}",
+                (hand - pen).length(),
+                a.shoulder(),
+                a.t
+            );
+        }
+        assert!(far > 20.0, "pen barely moved");
+        assert!((a.doodle_progress().unwrap() - 1.0).abs() < 0.02);
+    }
+
+    #[test]
+    fn shoves_the_window_and_rides_it_sideways() {
+        let top = Platform {
+            x0: 700.0,
+            x1: 1300.0,
+            y: 850.0,
+            kind: PlatformKind::Window,
+            owner: 42,
+        };
+        let mut w = world(vec![top]);
+        let mut a = Agent::new(1000.0, top, SCALE, 4);
+        let mut s = senses(Mode::Sabotage);
+        s.can_shove = true;
+        s.active_window = Some((
+            42,
+            Rect {
+                x: 700.0,
+                y: 850.0,
+                width: 600.0,
+                height: 300.0,
+            },
+        ));
+        let mut ev = vec![];
+        run(&mut a, &w, &s, 15.0, &mut ev);
+        let dx = ev
+            .iter()
+            .find_map(|e| match e {
+                Event::ShoveWindow { window: 42, dx, .. } => Some(*dx),
+                _ => None,
+            })
+            .expect("never shoved the window");
+        assert!((90.0..=170.0).contains(&dx.abs()));
+        // The window moves: the figure moves with it.
+        let x = a.pos.x;
+        w.set_platforms(vec![
+            Platform::ground(1800.0, GROUND_Y),
+            Platform {
+                x0: top.x0 + dx,
+                x1: top.x1 + dx,
+                ..top
+            },
+        ]);
+        a.on_platforms_changed(&w);
+        assert!((a.pos.x - (x + dx)).abs() < 1e-3, "didn't ride along");
+        assert!(a.ground.is_some());
+        // Without permission it only stomps.
+        let mut b = Agent::new(1000.0, top, SCALE, 4);
+        s.can_shove = false;
+        let mut ev2 = vec![];
+        run(&mut b, &world(vec![top]), &s, 15.0, &mut ev2);
+        assert!(!ev2.iter().any(|e| matches!(e, Event::ShoveWindow { .. })));
     }
 
     #[test]

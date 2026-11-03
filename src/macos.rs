@@ -284,6 +284,8 @@ pub fn accessibility_trusted(prompt: bool) -> bool {
 pub enum OsAction {
     /// Jolt the focused window of `pid` sideways by `dx` points and back.
     ShakeFocusedWindow { pid: i64, dx: f64 },
+    /// Slide the focused window of `pid` by `dx` points (eased, ~0.3 s).
+    SlideFocusedWindow { pid: i64, dx: f64 },
 }
 
 /// Owned AX element, released on drop.
@@ -359,6 +361,32 @@ fn shake(pid: i64, dx: f64) -> bool {
     set_window_position(&win, p) && moved
 }
 
+fn slide(pid: i64, dx: f64) -> bool {
+    // SAFETY: creates an owned element for any pid (no IPC yet).
+    let app = AxElement(unsafe { AXUIElementCreateApplication(pid as i32) });
+    // SAFETY: valid element.
+    unsafe { AXUIElementSetMessagingTimeout(app.0, 0.25) };
+    let Some(win) = copy_attr(&app, kAXFocusedWindowAttribute) else {
+        return false;
+    };
+    // SAFETY: `win` is an AXUIElement; retain it for AxElement's release.
+    let win =
+        AxElement(unsafe { core_foundation::base::CFRetain(win.as_CFTypeRef()) } as AXUIElementRef);
+    let Some(p) = window_position(&win) else {
+        return false;
+    };
+    // Ease out: a kick, then the window coasts to a stop.
+    const STEPS: u32 = 12;
+    let mut ok = true;
+    for i in 1..=STEPS {
+        let k = i as f64 / STEPS as f64;
+        let eased = 1.0 - (1.0 - k).powi(3);
+        ok &= set_window_position(&win, CGPoint::new(p.x + dx * eased, p.y));
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    ok
+}
+
 /// Worker thread for [`OsAction`]s (Accessibility IPC can block).
 pub fn spawn_os_actions(rx: Receiver<OsAction>) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
@@ -369,6 +397,11 @@ pub fn spawn_os_actions(rx: Receiver<OsAction>) -> std::thread::JoinHandle<()> {
                     OsAction::ShakeFocusedWindow { pid, dx } => {
                         if !shake(pid, dx) {
                             log::debug!("shake of pid {pid} failed (Accessibility not granted?)");
+                        }
+                    }
+                    OsAction::SlideFocusedWindow { pid, dx } => {
+                        if !slide(pid, dx) {
+                            log::debug!("slide of pid {pid} failed (Accessibility not granted?)");
                         }
                     }
                 }

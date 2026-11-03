@@ -12,6 +12,8 @@ enum Shape {
     Streak,
     /// Expanding outline (shockwave).
     Ring,
+    /// A little heart (petting).
+    Heart,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -35,6 +37,7 @@ const HOT: [f32; 4] = [1.0, 0.86, 0.35, 1.0];
 const FIRE: [f32; 4] = [1.0, 0.45, 0.12, 1.0];
 const SMOKE: [f32; 4] = [0.55, 0.55, 0.58, 0.8];
 const STAR: [f32; 4] = [1.0, 0.85, 0.2, 1.0];
+const LOVE: [f32; 4] = [0.95, 0.25, 0.4, 1.0];
 
 pub struct Particles {
     list: Vec<Particle>,
@@ -203,6 +206,30 @@ impl Particles {
         }
     }
 
+    /// Hearts floating up from a happy head.
+    pub fn hearts(&mut self, at: V2) {
+        for i in 0..6 {
+            let x = self.rand(-26.0, 26.0);
+            let (y, vy, size) = (
+                self.rand(-10.0, 4.0),
+                self.rand(-75.0, -45.0),
+                self.rand(5.0, 7.5),
+            );
+            self.push(Particle {
+                pos: at + v2(x, y),
+                vel: v2(x * 0.6, vy),
+                age: -(i as f32) * 0.12, // staggered: appear one after another
+                life: 1.8,
+                size0: size,
+                size1: 4.0,
+                color: LOVE,
+                shape: Shape::Heart,
+                gravity: -10.0,
+                drag: 0.8,
+            });
+        }
+    }
+
     pub fn update(&mut self, dt: f32) {
         for p in &mut self.list {
             p.age += dt;
@@ -215,6 +242,9 @@ impl Particles {
 
     pub fn draw(&self, out: &mut DrawList) {
         for p in &self.list {
+            if p.age < 0.0 {
+                continue; // not born yet
+            }
             let k = (p.age / p.life).clamp(0.0, 1.0);
             let size = p.size0 + (p.size1 - p.size0) * k;
             let fade = 1.0 - k * k;
@@ -223,6 +253,17 @@ impl Particles {
                 Shape::Disc => out.disc(p.pos, size, color),
                 Shape::Streak => out.capsule(p.pos, p.pos - p.vel * 0.025, size, color),
                 Shape::Ring => out.ring(p.pos, size, 3.0 * (1.0 - k) + 0.5, color),
+                Shape::Heart => {
+                    // Two lobes and a point.
+                    let r = size * 0.55;
+                    let (l, rt) = (p.pos + v2(-r * 0.8, 0.0), p.pos + v2(r * 0.8, 0.0));
+                    let tip = p.pos + v2(0.0, size * 1.25);
+                    out.disc(l, r, color);
+                    out.disc(rt, r, color);
+                    out.capsule(l + v2(-r * 0.25, r * 0.3), tip, r * 0.55, color);
+                    out.capsule(rt + v2(r * 0.25, r * 0.3), tip, r * 0.55, color);
+                    out.disc(p.pos + v2(0.0, r * 0.5), r * 0.9, color);
+                }
             }
         }
     }
@@ -263,6 +304,23 @@ mod tests {
             p.explosion(v2(0.0, 0.0), v2(0.0, -1.0));
         }
         assert_eq!(p.len(), MAX_PARTICLES);
+    }
+
+    #[test]
+    fn hearts_float_up_and_appear_in_turn() {
+        let mut p = Particles::new(5);
+        p.hearts(v2(100.0, 100.0));
+        let mut dl = DrawList::default();
+        p.draw(&mut dl);
+        assert_eq!(dl.len(), 5, "only the first heart is born yet");
+        for _ in 0..60 {
+            p.update(1.0 / 60.0);
+        }
+        assert!(p.list.iter().all(|h| h.pos.y < 100.0), "hearts rise");
+        for _ in 0..120 {
+            p.update(1.0 / 60.0);
+        }
+        assert!(p.is_empty());
     }
 
     #[test]

@@ -27,12 +27,15 @@ Written in Rust for Apple Silicon:
 | **Combat** | Click the figure: it's knocked flying with an explosion, spins, bounces and gets back up, and a small health bar appears. Clicks land mid-air too (juggling). Enough hits knock it out, with stars. Swipe fast at it and it dodges. In combat mode it chases the cursor and punches or kicks it, physically shoving your pointer. |
 | **Word throwing** | In combat the figure jumps onto lines of text in your active window (any app, web pages included), rips a whole word right off the screen and lobs it at your cursor. The word flies as the real pixels, spinning, knocks the pointer and falls to the Dock. Where it was taken from, the page looks blank: the overlay paints the exact on-screen background colour over it. Nothing in the real app changes, and the gap heals when the window scrolls, moves or loses focus, or after 45 s. In sabotage mode it steals words and flings them away. |
 | **Pick it up** | Press on the figure and drag: it dangles from your pointer by the scruff of the neck, swinging as you move ("Hey! Put me down!"). Let go with a flick and it flies off with your mouse's speed, tumbling and bouncing; hard throws hurt. A quick click is still a hit. |
+| **Naps** | Leave the computer for a while and it lies down on its back, knee up, with a "Zzz" over its head. Move the mouse and it wakes with a start ("I wasn't sleeping!"). |
+| **Petting** | Stroke it slowly with the cursor and it cheers, hearts float up, and it calms down and heals. |
+| **Hobbies** | Now and then, while idle, it sits on the edge of a window or text line with its legs dangling, breaks into a little dance, or draws a doodle in the air with a marker (heart, smiley, star, house, sun, spiral) that fades after 30 s. |
 | **Flying kick** | In combat, when your cursor hovers above it, the figure leaps and kicks it in mid-air. |
 | **Grab & throw the cursor** | In combat, a slow cursor within reach is sometimes snatched with both hands, hoisted overhead and lobbed across the screen: your real pointer is pinned to its hands, then flies along the arc. Yank the mouse away or click the figure to escape; a hold never lasts more than 3 s. Only while *Punches Push My Cursor* is on. |
 | **Speech bubbles** | The AI director gives the figure a short line when its mood changes ("That's it. It's on!"), and it quips when hit, knocked out, dodging, grabbing or throwing. |
 | **Sound** | Punches, kicks, whooshes, knockback booms, landing thuds, pops, stomps, a talking babble and a knockout wah-wah, all synthesised in code (no audio files) and panned by where they happen. |
 | **Multiple displays** | One overlay per screen. Each screen has its own floor (the Dock top, or the screen bottom), and windows on every screen are platforms. The figure wanders across a shared screen edge, dropping down when the next screen's floor is lower; an edge that would be a step up is a wall. Plugging in or rearranging displays is picked up within 2 s. |
-| **Sabotage** | It climbs onto your active window and stomps on it, shaking the window via Accessibility. |
+| **Sabotage** | It climbs onto your active window and stomps on it, shaking the window via Accessibility, or kicks it so the window slides across the screen (it rides along, and the window never leaves its screen). |
 | **AI director** | Every 4 s a local Ollama model (`llama3.2:1b` by default, ~200–300 ms) picks `IDLE` / `OBSERVE` / `SABOTAGE` / `COMBAT` from what you're doing: active app, mouse speed, hits, health, frustration, idle time. Modes last at least 12 s, except immediate retaliation after a hit. If Ollama is down, a built-in director takes over. |
 | **Efficiency** | 60 Hz simulation when something moves, 30 Hz otherwise; frames that wouldn't visibly change are skipped. Idle ≈ 2–3% of one core (PRD budget 5%), walking ≈ 13–16%. |
 
@@ -49,7 +52,7 @@ menu bars. Click it for:
 | **Behaviour ▸** | *Auto (AI director)*, or pin *Idle*, *Observe*, *Sabotage* or *Combat*. Pinning pauses the LLM calls. |
 | **Figure Size ▸** | Small / Medium / Large. |
 | Punches Push My Cursor | Whether combat hits move your real pointer. |
-| Stomps Shake My Windows | Whether stomps jolt your windows (needs Accessibility). |
+| Stomps Shake My Windows | Whether stomps jolt your windows and kicks slide them (needs Accessibility). |
 | Walk on Text | Whether to read the active window's text lines (needs Screen Recording). |
 | Rip Words Off the Screen & Throw Them | The word-throwing trick above. |
 | Speech Bubbles | Show what the figure says. |
@@ -103,6 +106,7 @@ launching terminal.
 | `STICKMAN_CLICK_THROUGH=0` | Debug: the overlay catches every click (blocks the screen). |
 | `STICKMAN_DEBUG_OPEN_MENU=1` | Debug: pop the menu bar menu open once at startup. |
 | `STICKMAN_DEBUG_SAY="…"` | Debug: say this line at startup. |
+| `STICKMAN_DEBUG_DO=sleep\|dance\|cheer\|doodle` | Debug: start in that action. |
 | `STICKMAN_DEBUG_GRAB=1` | Debug: in combat, always grab a slow cursor in reach (instead of 30% of the time). |
 | `RUST_LOG=debug` | Verbose logs: director decisions, OCR, perf stats, click-through toggles. |
 
@@ -119,7 +123,7 @@ cargo run --release --example pose_sheet -- docs/poses.png   # re-render the pos
 cargo run --release --example sfx_demo     # hear every sound effect
 ```
 
-**Unit tests (124).**
+**Unit tests (132).**
 - **Collision:** one-way landings, no tunnelling, window-edge occlusion clipping.
 - **Walking and running:** feet never slide; feet always on the ground.
 - **Poses:** IK accuracy and knee direction; hands and arms never cross the head.
@@ -129,6 +133,10 @@ cargo run --release --example sfx_demo     # hear every sound effect
 - **Being handled:** hanging under a dragged pointer, flying off when let go,
   dropping gently when set down; staying on its own text line when the text is
   re-read.
+- **Everyday life:** napping when you're away and waking when you're back,
+  being petted, sitting on edges (hips on the edge, legs hanging), dancing,
+  doodles traced by the pen in its hand, shoving windows and riding them
+  sideways.
 - **Screens:** per-screen floors, walking across edges only when it isn't a step
   up, window edges clipped per screen and below each menu bar.
 - **Speech and sound:** wrapping, priorities, rate limits, on-screen layout, text
@@ -197,6 +205,7 @@ main thread (winit / AppKit)                         background
 | `src/director.rs` | Ollama client, prompt, structured output, fallback director. |
 | `src/macos.rs` | AppKit and Accessibility wrappers (overlay setup, focus, window shake, opening URLs). |
 | `src/words.rs` | Word throwing: ammo choice, "holes", flying words. |
+| `src/doodle.rs` | Doodle shapes as pen strokes, drawing progress, fading. |
 | `src/sprite.wgsl` | Textured sprites (grabbed words, speech text) with rotation and fade. |
 | `src/screens.rs` | Display layout: screens, per-screen floors, where the figure may walk. |
 | `src/speech.rs`, `src/text.rs` | Speech bubbles: lines, quips, timing, layout; AppKit text rasterised into sprites. |

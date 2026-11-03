@@ -369,6 +369,102 @@ pub fn dangle(t: f32) -> Pose {
     p
 }
 
+/// Asleep on its back, head toward +x, one knee up, arms along its sides.
+/// Absolute angles of a figure lying down (the lowest point rests on the
+/// ground). `t`: seconds, for breathing.
+pub fn sleep(t: f32) -> Pose {
+    let breath = 0.03 * (t * TAU / 3.2).sin();
+    let mut p = [0.0; BONES];
+    p[TORSO] = -0.02 - breath;
+    p[HEAD] = -0.08 - breath;
+    // One leg flat, the other with the knee up.
+    p[THIGH[A]] = PI - 0.02;
+    p[SHIN[A]] = PI;
+    p[THIGH[B]] = -(PI - 0.65);
+    p[SHIN[B]] = PI - 0.75;
+    // Arms resting along the body.
+    arm(&mut p, A, PI - 0.12, PI - 0.02);
+    arm(&mut p, B, PI - 0.2, PI + 0.1);
+    p
+}
+
+/// Getting down for a nap (k: 0 standing → 1 asleep), via a crouch.
+pub fn lie_down(k: f32) -> Pose {
+    sequence(
+        &[
+            (0.0, idle_pose(0.0)),
+            (0.45, crouch(1.0)),
+            (1.0, sleep(0.0)),
+        ],
+        k,
+    )
+}
+
+/// A little dance (t: seconds): bouncing knees and alternating "raise the
+/// roof" pumps.
+pub fn dance(t: f32) -> Pose {
+    let beat = t * 2.6; // beats
+    let phase = beat.fract();
+    let bounce = (phase * PI).sin();
+    let side = if (beat as u32) % 2 == 0 { 1.0 } else { -1.0 };
+    let mut p = [0.0; BONES];
+    // Step from foot to foot.
+    let (la, lb) = if side > 0.0 {
+        (14.0 * bounce, 0.0)
+    } else {
+        (0.0, 14.0 * bounce)
+    };
+    plant(&mut p, 0.88 * LEG_LEN - 6.0 * bounce, 18.0, la, -18.0, lb);
+    // Lean away from whichever arm is up.
+    p[TORSO] = -H - 0.1 * side * bounce;
+    p[HEAD] = -H - 0.15 * side * bounce;
+    let pump = 0.35 * bounce;
+    if side > 0.0 {
+        arm(&mut p, A, -0.25 - pump * 0.3, -1.2 - pump);
+        arm(&mut p, B, 1.9, 2.4);
+    } else {
+        arm(&mut p, A, 1.2, 0.7);
+        arm(&mut p, B, PI + 0.25 + pump * 0.3, PI + 1.2 + pump);
+    }
+    p
+}
+
+/// Sitting on the edge of a surface, legs dangling over it (t: seconds). The
+/// hip rests on the surface: use the seat anchor.
+pub fn sit(t: f32) -> Pose {
+    let swing = 0.3 * (t * TAU * 0.6).sin();
+    let mut p = [0.0; BONES];
+    p[TORSO] = -H - 0.12;
+    p[HEAD] = -H + 0.02;
+    p[THIGH[A]] = 0.05;
+    p[SHIN[A]] = H - 0.15 + swing;
+    p[THIGH[B]] = 0.12;
+    p[SHIN[B]] = H - 0.05 - swing;
+    // Hands planted on the surface behind.
+    arm(&mut p, A, 2.0, 1.75);
+    arm(&mut p, B, 2.2, 1.95);
+    p
+}
+
+/// Happy wiggle after being petted (t: seconds).
+pub fn cheer(t: f32) -> Pose {
+    let bounce = (t * TAU * 2.0).sin();
+    let mut p = idle_pose(0.0);
+    plant(
+        &mut p,
+        0.92 * LEG_LEN - 4.0 * bounce.abs(),
+        10.0,
+        0.0,
+        -10.0,
+        0.0,
+    );
+    // Tip the head back (the raised arms are in front of it).
+    p[TORSO] = -H - 0.05 * bounce.abs();
+    p[HEAD] = -H - 0.25 * bounce.abs();
+    hold_arms(&mut p);
+    p
+}
+
 /// Landing squash (k = 0 at touchdown → 1 recovered).
 pub fn land(k: f32) -> Pose {
     crouch(0.65 * (1.0 - smoothstep(k)))
@@ -403,6 +499,12 @@ mod tests {
         for q in [0.0, 0.2, 0.4, 0.6, 0.8] {
             v.push(("run", run_pose(q)));
         }
+        for t in [0.0, 0.1, 0.2, 0.3, 0.4, 0.55, 0.7, 0.9, 1.3, 1.6] {
+            v.push(("sleep", sleep(t)));
+            v.push(("dance", dance(t)));
+            v.push(("sit", sit(t)));
+            v.push(("cheer", cheer(t)));
+        }
         for t in [0.0, 0.05, 0.1, 0.15] {
             v.push(("hoist", hoist(t)));
             v.push(("dangle", dangle(t * 3.0)));
@@ -420,6 +522,7 @@ mod tests {
             v.push(("kick", kick(k, 0.2)));
             v.push(("stomp", stomp(k)));
             v.push(("snatch", snatch(k, 0.0)));
+            v.push(("lie down", lie_down(k)));
             v.push(("flying kick", flying_kick(k, 0.2)));
             v.push(("flying kick up", flying_kick(k, -0.4)));
             v.push(("snatch up", snatch(k, -0.7)));

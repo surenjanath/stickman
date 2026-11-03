@@ -69,6 +69,11 @@ fn main() {
         ("hoist cursor", poses::hoist(0.0)),
         ("flying kick", poses::flying_kick(0.5, 0.1)),
         ("dangling", poses::dangle(0.3)),
+        ("asleep", poses::sleep(0.0)),
+        ("dance", poses::dance(0.2)),
+        ("dance", poses::dance(0.6)),
+        ("sit on edge", poses::sit(0.0)),
+        ("cheer", poses::cheer(0.1)),
         ("knocked out", ko),
         ("rest (source)", stickman::stickman::rest_pose()),
     ];

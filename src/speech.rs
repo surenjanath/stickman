@@ -41,6 +41,12 @@ pub enum Moment {
     Dodged,
     PickedUp,
     Flung,
+    Yawned,
+    Woke,
+    Petted,
+    Dancing,
+    Doodling,
+    Shove,
 }
 
 impl Moment {
@@ -70,6 +76,18 @@ impl Moment {
                 0.8,
             ),
             Moment::Flung => (&["Wheeee!", "Aaaaah!", "You'll pay for that!"], 0.7),
+            Moment::Yawned => (&["*yawn*", "Nap time.", "Wake me if you need me."], 1.0),
+            Moment::Woke => (
+                &["Huh?! I'm up!", "I wasn't sleeping!", "Oh! You're back."],
+                1.0,
+            ),
+            Moment::Petted => (
+                &["Hehe!", "Aww.", "That tickles!", "Okay, you're forgiven."],
+                0.9,
+            ),
+            Moment::Dancing => (&["♪ ♫", "Dance break!", "Watch this!"], 0.6),
+            Moment::Doodling => (&["Art time.", "Hold still…", "A masterpiece!"], 0.4),
+            Moment::Shove => (&["Scoot over!", "Move it!", "Wheee, window ride!"], 0.5),
         }
     }
 }
@@ -186,7 +204,7 @@ impl Speech {
     /// Maybe say something about `m` (random, rate-limited).
     pub fn quip(&mut self, m: Moment) -> Option<Vec<String>> {
         let (lines, chance) = m.lines();
-        let important = m == Moment::KnockedOut;
+        let important = matches!(m, Moment::KnockedOut | Moment::Woke | Moment::Yawned);
         if !important && (self.since_quip < QUIP_COOLDOWN || self.rand() >= chance) {
             return None;
         }
