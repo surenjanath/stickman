@@ -207,6 +207,7 @@ impl FigureColor {
 pub enum Change {
     Aggression(u8),
     Chattiness(u8),
+    Volume(u8),
     Name(String),
 }
 
@@ -238,6 +239,8 @@ pub struct Settings {
     pub speech: bool,
     /// Play sound effects.
     pub sound: bool,
+    /// Sound effects volume, 0..100.
+    pub volume: u8,
     /// How long thrown words stay where they land.
     pub word_stay: WordStay,
     /// Hobbies: nap when the user is away, dance, doodle, sit on edges.
@@ -289,6 +292,7 @@ impl Default for Settings {
             throw_words: true,
             speech: true,
             sound: true,
+            volume: 70,
             word_stay: WordStay::Seconds5,
             naps: true,
             dancing: true,
@@ -551,6 +555,7 @@ impl Settings {
         match c {
             Change::Aggression(v) => self.aggression = v.min(100),
             Change::Chattiness(v) => self.chattiness = v.min(100),
+            Change::Volume(v) => self.volume = v.min(100),
             Change::Name(n) => {
                 let n: String = n.trim().chars().take(24).collect();
                 if !n.is_empty() {

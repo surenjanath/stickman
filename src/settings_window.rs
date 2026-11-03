@@ -15,7 +15,7 @@ use std::ffi::CString;
 use objc::runtime::{Object, NO, YES};
 use objc::{class, msg_send, sel, sel_impl, Encode, Encoding};
 
-use crate::menubar::{action_target, SLIDER_AGGRESSION, SLIDER_CHATTINESS};
+use crate::menubar::{action_target, SLIDER_AGGRESSION, SLIDER_CHATTINESS, SLIDER_VOLUME};
 use crate::settings::{Behaviour, Command, FigureColor, Language, Settings, Size, WordStay};
 
 #[repr(C)]
@@ -380,7 +380,10 @@ impl SettingsWindow {
         }
         let first: *mut Object = msg_send![grid, columnAtIndex: 0isize];
         let _: () = msg_send![first, setXPlacement: 3isize]; // labels trailing
-                                                             // A spacer under the grid soaks up the rest of the tab's height.
+                                                             // The same label column on every tab (and a tab with no labels at all
+                                                             // doesn't collapse it).
+        let _: () = msg_send![first, setWidth: 130.0f64];
+        // A spacer under the grid soaks up the rest of the tab's height.
         let spacer: *mut Object = msg_send![class!(NSView), new];
         let _: () = msg_send![spacer, setContentHuggingPriority: 1.0f32 forOrientation: 1isize];
         let _: *mut Object = msg_send![spacer, autorelease];
@@ -595,6 +598,7 @@ impl SettingsWindow {
         let sit = self.check("Sits on window edges", Command::ToggleSitting);
         let speech = self.check("Speech bubbles", Command::ToggleSpeech);
         let sound = self.check("Sound effects", Command::ToggleSound);
+        let volume = self.slider(SLIDER_VOLUME);
         Self::page(vec![
             Row::Section("Hobbies"),
             Row::Under(naps),
@@ -605,6 +609,11 @@ impl SettingsWindow {
             Row::Section("Talking and sound"),
             Row::Under(speech),
             Row::Under(sound),
+            Row::Field("Volume:", volume),
+            Row::Under(Self::hint(
+                "Every sound is made up on the spot (no audio files): punches, whooshes, \
+                 booms, clanks, a babble when it talks.",
+            )),
             Row::Under(Self::hint(
                 "Drawing platforms (⌘D), notes and rivals are in the menu bar menu.",
             )),
@@ -705,6 +714,7 @@ impl SettingsWindow {
                 let v = match *tag {
                     SLIDER_AGGRESSION => s.aggression,
                     SLIDER_CHATTINESS => s.chattiness,
+                    SLIDER_VOLUME => s.volume,
                     _ => continue,
                 };
                 let _: () = msg_send![*slider, setDoubleValue: f64::from(v)];

@@ -29,6 +29,7 @@ static REGISTER: Once = Once::new();
 /// Slider tags in the settings window.
 pub const SLIDER_AGGRESSION: isize = 1;
 pub const SLIDER_CHATTINESS: isize = 2;
+pub const SLIDER_VOLUME: isize = 3;
 
 /// `-[StickmanMenuTarget popupAction:]`: a pop-up menu choice (the selected
 /// item's tag is the command).
@@ -61,6 +62,7 @@ extern "C" fn slider_action(_this: &Object, _sel: Sel, sender: *mut Object) {
     let change = match tag {
         SLIDER_AGGRESSION => Change::Aggression(v),
         SLIDER_CHATTINESS => Change::Chattiness(v),
+        SLIDER_VOLUME => Change::Volume(v),
         _ => return,
     };
     if let Ok(mut q) = CHANGES.lock() {

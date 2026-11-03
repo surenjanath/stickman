@@ -1414,7 +1414,9 @@ impl Scene {
         if self.settings.sound {
             let b = self.layout.bounds();
             let pan = ((at.x - b.x as f32) / b.width as f32) * 2.0 - 1.0;
-            self.sound.play(sfx, gain, pan * 0.8);
+            // 70 (the default) plays effects at their designed loudness.
+            let volume = f32::from(self.settings.volume) / 70.0;
+            self.sound.play(sfx, (gain * volume).min(1.0), pan * 0.8);
         }
     }
 
