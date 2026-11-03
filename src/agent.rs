@@ -1028,11 +1028,11 @@ impl Agent {
                             at: self.shoulder(),
                         });
                     }
-                } else if s.cursor.y < self.shoulder().y - 140.0
+                } else if s.cursor.y < self.shoulder().y - 40.0
                     && dx.abs() < 260.0
                     && self.attack_cooldown <= 0.0
                 {
-                    // Cursor overhead: leap at it.
+                    // Cursor above punching reach: leap at it (and flying-kick it).
                     let rise = (self.pos.y - s.cursor.y).min(MAX_JUMP_RISE);
                     self.attack_cooldown = 1.2;
                     self.jump_to(v2(s.cursor.x, self.pos.y - rise + 40.0));
@@ -1773,6 +1773,26 @@ mod tests {
             "kick missed"
         );
         assert!(landed_after, "never came back down");
+    }
+
+    #[test]
+    fn never_just_taunts_at_a_cursor_slightly_overhead() {
+        // A cursor ~2 head-heights above the shoulder: out of punching reach,
+        // below the old leap threshold. It used to taunt forever.
+        let w = world(vec![]);
+        let mut a = agent();
+        let mut s = senses(Mode::Combat);
+        s.cursor = v2(940.0, GROUND_Y - 220.0);
+        let mut ev = vec![];
+        run(&mut a, &w, &s, 4.0, &mut ev);
+        assert!(
+            ev.iter().any(|e| matches!(e, Event::Jumped { .. })),
+            "never leapt"
+        );
+        assert!(
+            ev.iter().any(|e| matches!(e, Event::StruckCursor { .. })),
+            "never hit it"
+        );
     }
 
     #[test]

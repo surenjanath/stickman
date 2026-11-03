@@ -691,8 +691,11 @@ fn test_grabs_and_throws_the_cursor() {
     ]);
     let home = cursor_now();
     let b = capture(&o).bbox.expect("figure visible");
-    // Chest height, a little in front of it.
-    let (x, y) = ((b[0] + b[2]) / 2.0 + 90.0, b[1] + (b[3] - b[1]) * 0.4);
+    // Chest height (from the floor line: it may be mid-jump right now), a
+    // little in front of it.
+    let ground: f64 = field(&o.log_line, "ground_y").parse().unwrap();
+    let scale: f64 = field(&o.log_line, "figure_scale").parse().unwrap();
+    let (x, y) = ((b[0] + b[2]) / 2.0 + 90.0, ground - 175.0 * scale);
     post_mouse(CGEventType::MouseMoved, x, y);
     let caught = o.wait_for("event: caught the cursor", Duration::from_secs(12));
     let threw = caught

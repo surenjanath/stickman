@@ -1032,11 +1032,13 @@ impl Scene {
         self.ticks += 1;
         if self.stats_at.elapsed() >= Duration::from_secs(5) {
             log::debug!(
-                "perf: {} ticks, {} presents in {:.1}s; action {:?}, platforms {}, active {:?}, words {}, holes {}",
+                "perf: {} ticks, {} presents in {:.1}s; action {:?} at {:?}, cursor {:?}, platforms {}, active {:?}, words {}, holes {}",
                 self.ticks,
                 self.frames - self.stats_frames,
                 self.stats_at.elapsed().as_secs_f32(),
                 self.agent.action,
+                self.agent.pos,
+                self.cursor.pos,
                 self.world.platforms().len(),
                 self.snapshot.active().map(|w| (w.id, w.owner.as_str())),
                 self.words.words().len(),
