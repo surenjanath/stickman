@@ -401,14 +401,16 @@ impl Action {
     }
 }
 
-/// Optional behaviours the user can switch off.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Optional behaviours the user can switch off, and temperament.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Traits {
     pub naps: bool,
     pub dancing: bool,
     pub doodles: bool,
     pub sitting: bool,
     pub powers: bool,
+    /// 0 (gentle) .. 1 (fierce).
+    pub aggression: f32,
 }
 
 impl Default for Traits {
@@ -419,6 +421,7 @@ impl Default for Traits {
             doodles: true,
             sitting: true,
             powers: true,
+            aggression: 0.5,
         }
     }
 }
@@ -1258,7 +1261,8 @@ impl Agent {
                 aim: self.aim_at(target, -0.75, 0.9),
             }
         };
-        self.attack_cooldown = 0.35;
+        // Fiercer figures attack in quicker succession.
+        self.attack_cooldown = 0.6 - 0.45 * self.traits.aggression;
         self.set_action(a);
     }
 
@@ -1447,7 +1451,8 @@ impl Agent {
         } else {
             return false;
         };
-        let chance = if on == Mind::Words { 0.5 } else { 0.35 };
+        let base = if on == Mind::Words { 0.5 } else { 0.35 };
+        let chance = base * (0.5 + self.traits.aggression);
         if self.random(0.0, 1.0) >= chance {
             self.tk_cooldown = 2.0; // not this time
             return false;

@@ -44,9 +44,10 @@ use stickman::physics::{window_platforms, Platform, World};
 use stickman::render::{DrawList, Renderer};
 use stickman::screens::{self, Layout, Screen};
 use stickman::settings::{Behaviour, Command, Settings};
+use stickman::settings_window::SettingsWindow;
 use stickman::sound::{Sfx, Sound};
 use stickman::speech::{Moment, Priority, Speech};
-use stickman::stickman::{Segment, BONES, WALKER_RGB};
+use stickman::stickman::{Segment, BONES};
 use stickman::windows::{self, Snapshot};
 use stickman::words::{WordEvent, WordPlay};
 use tokio::sync::watch;
@@ -284,6 +285,8 @@ struct Scene {
     settings_path: Option<PathBuf>,
     menubar: MenuBar,
     menubar_logged: bool,
+    /// Built the first time it's opened.
+    settings_window: Option<SettingsWindow>,
     accessibility: bool,
     screen_recording: bool,
     seed: u64,
@@ -470,8 +473,10 @@ impl Scene {
                 self.speak(lines);
                 self.last_director_line = Instant::now();
             } else if !d.say.is_empty()
-                && self.last_director_line.elapsed() > DIRECTOR_CHATTER
-                && (self.seed >> 33) % 4 == 0
+                && self.settings.chattiness > 0
+                && self.last_director_line.elapsed()
+                    > DIRECTOR_CHATTER.mul_f32(2.0 - f32::from(self.settings.chattiness) / 100.0)
+                && ((self.seed >> 33) % 100) < 10 + u64::from(self.settings.chattiness) / 2
             {
                 // Now and then, a remark without a change of mood.
                 let lines = self.speech.say(&d.say, Priority::Director);
@@ -507,6 +512,9 @@ impl Scene {
             seconds_in_state: self.mode_since.elapsed().as_secs_f32().round(),
             hits_last_minute: self.hits.len() as u32,
             user_idle_seconds: self.last_mouse_move.elapsed().as_secs_f32().round(),
+            name: self.settings.name.clone(),
+            aggression: self.settings.aggression,
+            language: self.settings.language,
         });
     }
 
@@ -1071,6 +1079,7 @@ impl Scene {
                 Command::OpenScreenRecordingSettings => {
                     macos::open_url("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture");
                 }
+                Command::OpenSettings => self.open_settings(),
                 _ => {}
             }
             if self.settings.apply(cmd) {
@@ -1087,14 +1096,31 @@ impl Scene {
                     self.mode_since = Instant::now() - MIN_MODE_DWELL;
                 }
                 self.shown = None; // redraw (size/visibility changed)
-                if let Some(path) = &self.settings_path {
-                    if let Err(e) = self.settings.save(path) {
-                        log::warn!("settings: could not save {}: {e:#}", path.display());
-                    }
-                }
+                self.save_settings();
+            }
+        }
+        // Sliders and the name field in the settings window.
+        for change in stickman::menubar::drain_changes() {
+            log::info!("settings: {change:?}");
+            if self.settings.change(change) {
+                self.save_settings();
             }
         }
         true
+    }
+
+    fn save_settings(&self) {
+        if let Some(path) = &self.settings_path {
+            if let Err(e) = self.settings.save(path) {
+                log::warn!("settings: could not save {}: {e:#}", path.display());
+            }
+        }
+    }
+
+    fn open_settings(&mut self) {
+        let w = self.settings_window.get_or_insert_with(SettingsWindow::new);
+        w.show(&self.settings);
+        log::info!("settings window: number={}", w.window_number());
     }
 
     /// `STICKMAN_DEBUG_DO`: perform an action 3 s after launch (once the
@@ -1133,6 +1159,9 @@ impl Scene {
             screen_recording: self.screen_recording,
         };
         self.menubar.sync(&self.settings, &status);
+        if let Some(w) = &mut self.settings_window {
+            w.sync(&self.settings);
+        }
         if !self.menubar_logged && self.stats_at.elapsed() > Duration::from_secs(1) {
             // Report once the menu bar has laid the icon out.
             let (shown, f) = self.menubar.placement();
@@ -1146,6 +1175,9 @@ impl Scene {
             self.menubar_logged = true;
             if env_flag("STICKMAN_DEBUG_OPEN_MENU") {
                 self.menubar.open();
+            }
+            if env_flag("STICKMAN_DEBUG_OPEN_SETTINGS") {
+                self.open_settings();
             }
             if let Ok(line) = std::env::var("STICKMAN_DEBUG_SAY") {
                 let lines = self.speech.say(&line, Priority::Event);
@@ -1196,7 +1228,17 @@ impl Scene {
             doodles: self.settings.doodles,
             sitting: self.settings.sitting,
             powers: self.settings.powers,
+            aggression: f32::from(self.settings.aggression) / 100.0,
         };
+        let a = f32::from(self.settings.aggression) / 100.0;
+        self.agent.snatch_chance = if env_flag("STICKMAN_DEBUG_GRAB") {
+            1.0
+        } else {
+            0.12 + 0.36 * a
+        };
+        self.speech.language = self.settings.language;
+        self.speech.chattiness = f32::from(self.settings.chattiness) / 100.0;
+        self.speech.bleep = self.settings.bleep;
         self.words.rest_time = self.settings.word_stay.seconds();
         self.sync_world();
         self.sync_director();
@@ -1416,7 +1458,7 @@ impl Scene {
         let hands = self.agent.holding.then(|| self.agent.hands());
         self.words.draw(&mut self.draw, hands);
         self.doodles.draw(&mut self.draw);
-        self.draw.figure(&segments, WALKER_RGB);
+        self.draw.figure(&segments, self.settings.color.rgb());
         if let Some(j) = &self.jail {
             j.draw(&mut self.draw); // bars in front of the figure
         }
@@ -1809,6 +1851,7 @@ impl App {
             settings_path,
             menubar,
             menubar_logged: false,
+            settings_window: None,
             accessibility: ax,
             screen_recording: ocr_allowed,
             seed,
@@ -1969,6 +2012,7 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use stickman::physics::PlatformKind;
+    use stickman::stickman::WALKER_RGB;
 
     #[test]
     fn clicks_are_caught_only_when_aiming() {

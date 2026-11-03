@@ -6,6 +6,7 @@
 
 use crate::geom::{v2, V2};
 use crate::render::{DrawList, SpriteDraw};
+use crate::settings::Language;
 
 /// Characters per line before wrapping, and at most this many lines.
 pub const WRAP_CHARS: usize = 24;
@@ -52,7 +53,91 @@ pub enum Moment {
     MindWords,
 }
 
+/// Words the bleep filter hides (whole words, any case).
+const SWEARS: [&str; 18] = [
+    "damn", "dammit", "damned", "hell", "crap", "crappy", "ass", "asshole", "shit", "shitty",
+    "bullshit", "fuck", "fucking", "fucker", "bitch", "bastard", "piss", "wtf",
+];
+
+/// Replace swear words with grawlix (`#$%&!`), keeping their length.
+pub fn bleep(text: &str) -> String {
+    const GRAWLIX: [char; 5] = ['#', '$', '%', '&', '!'];
+    let mut out = String::with_capacity(text.len());
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        if SWEARS.contains(&word.to_lowercase().as_str()) {
+            out.extend((0..word.chars().count()).map(|i| GRAWLIX[i % GRAWLIX.len()]));
+        } else {
+            out.push_str(word);
+        }
+        word.clear();
+    };
+    for c in text.chars() {
+        if c.is_alphabetic() {
+            word.push(c);
+        } else {
+            flush(&mut word, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}
+
 impl Moment {
+    /// Gentler lines for the Polite setting, where the usual ones are cheeky.
+    fn polite(self) -> Option<&'static [&'static str]> {
+        Some(match self {
+            Moment::Hit => &["Ow!", "Oof!", "Ouch!", "Please don't!"],
+            Moment::StruckCursor => &["Boop!", "Tag, you're it!", "Hiyah!"],
+            Moment::Stomp => &["Stomp stomp!", "Knock knock!"],
+            Moment::Flung => &["Wheeee!", "Aaaaah!"],
+            Moment::CursorEscaped => &["Aw, come back!"],
+            _ => return None,
+        })
+    }
+
+    /// Extra lines for the Salty setting.
+    fn salty(self) -> &'static [&'static str] {
+        match self {
+            Moment::Hit => &[
+                "Son of a—!",
+                "Damn it!",
+                "What the hell?!",
+                "Ow, you jerk!",
+                "Oh, you little sh—",
+            ],
+            Moment::KnockedOut => &["Oh, crap…", "Damn… that hurt…"],
+            Moment::GrabbedWord => &["Mine, dammit!", "This word's crap anyway."],
+            Moment::ThrewWord => &["Eat it!", "Catch, ass!"],
+            Moment::StruckCursor => &[
+                "Eat it, arrow!",
+                "How'd that feel, huh?!",
+                "Take that, damn it!",
+            ],
+            Moment::Stomp => &["Stupid damn window!", "Wake the hell up!"],
+            Moment::CaughtCursor => &["Got you, you little crap!", "Gotcha, dammit!"],
+            Moment::ThrewCursor => &["Screw you!", "Get the hell out!"],
+            Moment::CursorEscaped => &["Get back here, you little…", "Damn it!"],
+            Moment::Dodged => &["Ha! Missed, jackass!", "Too slow, dammit!"],
+            Moment::PickedUp => &["Put me down, dammit!", "Hands off, ass!", "What the hell?!"],
+            Moment::Flung => &[
+                "Screw youuuu!",
+                "Aaaah, crap!",
+                "You'll pay for that, damn it!",
+            ],
+            Moment::Yawned => &["Damn, I'm tired.", "Screw it, nap time."],
+            Moment::Woke => &["What the hell?! I'm up!", "Damn it, I was sleeping!"],
+            Moment::Petted => &["Hehe… damn, that's nice.", "Fine, you're forgiven. Ass."],
+            Moment::Dancing => &["Hell yeah!", "Damn, I'm good."],
+            Moment::Doodling => &["Shut up, it's art."],
+            Moment::Shove => &["Move your damn window!", "Outta my way!"],
+            Moment::SuperJump => &["Hell yeah!", "Up, damn it!"],
+            Moment::MindCursor => &["Get over here, you damn arrow!", "With my damn mind!"],
+            Moment::MindWords => &["Eat words, jerk!", "Incoming, dammit!"],
+        }
+    }
+
     /// (lines to pick from, chance of saying anything).
     fn lines(self) -> (&'static [&'static str], f32) {
         match self {
@@ -158,6 +243,11 @@ struct Bubble {
 }
 
 pub struct Speech {
+    pub language: Language,
+    /// 0 (quiet) .. 1 (chatterbox).
+    pub chattiness: f32,
+    /// Hide swear words.
+    pub bleep: bool,
     bubble: Option<Bubble>,
     since_quip: f32,
     rng: u64,
@@ -168,8 +258,11 @@ pub struct Speech {
 impl Speech {
     pub fn new(seed: u64) -> Speech {
         Speech {
+            language: Language::Cheeky,
+            chattiness: 0.5,
+            bleep: true,
             bubble: None,
-            since_quip: QUIP_COOLDOWN,
+            since_quip: f32::MAX / 2.0,
             rng: seed | 1,
             retired: Vec::new(),
         }
@@ -186,7 +279,13 @@ impl Speech {
     /// (then call [`attach`](Self::attach)), or `None` if something more
     /// important is being said.
     pub fn say(&mut self, text: &str, priority: Priority) -> Option<Vec<String>> {
-        let text = text.trim();
+        let bleeped;
+        let text = if self.bleep {
+            bleeped = bleep(text.trim());
+            bleeped.as_str()
+        } else {
+            text.trim()
+        };
         if text.is_empty() {
             return None;
         }
@@ -212,11 +311,23 @@ impl Speech {
 
     /// Maybe say something about `m` (random, rate-limited).
     pub fn quip(&mut self, m: Moment) -> Option<Vec<String>> {
-        let (lines, chance) = m.lines();
+        let (base, chance) = m.lines();
         let important = matches!(m, Moment::KnockedOut | Moment::Woke | Moment::Yawned);
-        if !important && (self.since_quip < QUIP_COOLDOWN || self.rand() >= chance) {
+        // Chattiness scales how often it talks and how long it waits between.
+        let c = self.chattiness.clamp(0.0, 1.0);
+        let chance = (chance * (0.15 + 1.7 * c)).min(1.0);
+        let cooldown = QUIP_COOLDOWN * (2.4 - 2.0 * c);
+        if !important && (c <= 0.0 || self.since_quip < cooldown || self.rand() >= chance) {
             return None;
         }
+        let roll = self.rand();
+        let lines = match self.language {
+            Language::Polite => m.polite().unwrap_or(base),
+            Language::Cheeky => base,
+            // Mostly salty, sometimes the usual.
+            Language::Salty if roll < 0.7 => m.salty(),
+            Language::Salty => base,
+        };
         let line = lines[((self.rand() * lines.len() as f32) as usize).min(lines.len() - 1)];
         let p = if important {
             Priority::Event
@@ -393,11 +504,52 @@ mod tests {
             .filter(|_| s.quip(Moment::CaughtCursor).is_some())
             .count();
         assert_eq!(again, 0, "cooldown");
-        for _ in 0..(6 * 60) {
+        for _ in 0..(8 * 60) {
             s.update(1.0 / 60.0);
         }
         assert!((0..20).any(|_| s.quip(Moment::ThrewCursor).is_some()));
         // A knockout is always announced.
+        assert!(s.quip(Moment::KnockedOut).is_some());
+    }
+
+    #[test]
+    fn bleeps_whole_swear_words_only() {
+        assert_eq!(bleep("What the hell?!"), "What the #$%&?!");
+        assert_eq!(bleep("Hello, shell! Damn it."), "Hello, shell! #$%& it.");
+        assert_eq!(bleep("WTF"), "#$%");
+        let mut s = Speech::new(1);
+        s.say("Damn window", Priority::Quip);
+        assert_eq!(s.text(), Some("#$%& window"));
+        s.bleep = false;
+        s.say("Damn window!", Priority::Event);
+        assert_eq!(s.text(), Some("Damn window!"));
+    }
+
+    #[test]
+    fn language_and_chattiness_shape_the_quips() {
+        let mut salty = 0;
+        for seed in 0..60 {
+            let mut s = Speech::new(seed);
+            s.language = Language::Salty;
+            s.bleep = false;
+            s.chattiness = 1.0;
+            if s.quip(Moment::Hit).is_some() && Moment::Hit.salty().contains(&s.text().unwrap()) {
+                salty += 1;
+            }
+        }
+        assert!(salty > 20, "salty lines {salty}/60");
+        for seed in 0..60 {
+            let mut s = Speech::new(seed);
+            s.language = Language::Polite;
+            s.chattiness = 1.0;
+            if s.quip(Moment::Hit).is_some() {
+                assert!(Moment::Hit.polite().unwrap().contains(&s.text().unwrap()));
+            }
+        }
+        // Silent at zero chattiness, except moments that must be seen.
+        let mut s = Speech::new(3);
+        s.chattiness = 0.0;
+        assert!((0..50).all(|_| s.quip(Moment::CaughtCursor).is_none()));
         assert!(s.quip(Moment::KnockedOut).is_some());
     }
 

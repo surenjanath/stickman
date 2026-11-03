@@ -17,6 +17,7 @@ pub mod poses;
 pub mod render;
 pub mod screens;
 pub mod settings;
+pub mod settings_window;
 pub mod sound;
 pub mod speech;
 pub mod stickman;

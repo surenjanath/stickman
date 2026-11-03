@@ -16,6 +16,7 @@ use serde_json::json;
 use tokio::sync::watch;
 
 use crate::agent::Mode;
+use crate::settings::Language;
 
 /// What the director sees (PRD 3.4 / claude.md payload fields).
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -33,6 +34,13 @@ pub struct Observation {
     pub hits_last_minute: u32,
     /// Seconds since the user last moved the mouse.
     pub user_idle_seconds: f32,
+    /// Personality (from the settings), described in words in the prompt.
+    #[serde(skip)]
+    pub name: String,
+    #[serde(skip)]
+    pub aggression: u8,
+    #[serde(skip)]
+    pub language: Language,
 }
 
 impl Default for Observation {
@@ -48,6 +56,9 @@ impl Default for Observation {
             seconds_in_state: 0.0,
             hits_last_minute: 0,
             user_idle_seconds: 0.0,
+            name: "Stick".into(),
+            aggression: 50,
+            language: Language::Cheeky,
         }
     }
 }
@@ -111,6 +122,32 @@ Situation: ";
 
 /// Plain-English facts: small models reason far better over these than over
 /// raw numbers.
+/// The figure's personality, in words for the model.
+pub fn persona(obs: &Observation) -> String {
+    let temper = match obs.aggression {
+        0..=24 => {
+            "gentle and peaceful: it rarely fights and prefers IDLE or OBSERVE, even when poked"
+        }
+        25..=59 => "playful: it fights back when provoked",
+        60..=84 => "hot-headed: it loves COMBAT and SABOTAGE and picks fights when bored",
+        _ => "extremely aggressive: it picks fights constantly and strongly prefers COMBAT",
+    };
+    let talk = match obs.language {
+        Language::Polite => "Its 'say' lines are sweet and family-friendly.",
+        Language::Cheeky => "Its 'say' lines are cheeky taunts, without swearing.",
+        Language::Salty => {
+            "Its 'say' lines are foul-mouthed: casual swearing (damn, hell, crap and the like) \
+             is fine, but never slurs, nothing hateful, nothing about real people."
+        }
+    };
+    let name = if obs.name.trim().is_empty() {
+        "Stick"
+    } else {
+        obs.name.trim()
+    };
+    format!("The figure is called {name}. Its temperament is {temper}. {talk}\n")
+}
+
 pub fn situation(obs: &Observation) -> String {
     let mut facts = Vec::new();
     let app = if obs.active_app_name.is_empty() {
@@ -161,7 +198,7 @@ pub fn build_request(cfg: &Config, obs: &Observation) -> serde_json::Value {
     );
     json!({
         "model": cfg.model,
-        "prompt": format!("{PROMPT}{obs_json}"),
+        "prompt": format!("{PROMPT}{}{obs_json}", persona(obs)),
         "stream": false,
         "think": false,
         "keep_alive": "15m",
@@ -226,13 +263,23 @@ pub fn fallback(obs: &Observation, roll: f32) -> Directive {
             "you hit me, now it's war",
             "That's it. It's on!",
         )
+    } else if obs.aggression >= 75
+        && obs.current_state != "COMBAT"
+        && obs.seconds_in_state > 15.0
+        && roll < (f32::from(obs.aggression) - 50.0) / 60.0
+    {
+        (
+            Mode::Combat,
+            "itching for a fight",
+            "Come on, cursor. Fight me!",
+        )
     } else if obs.mouse_speed_avg > 900.0 {
         (
             Mode::Observe,
             "what are you doing with that mouse?",
             "Whoa, easy there.",
         )
-    } else if obs.user_idle_seconds > 20.0 && roll < 0.5 {
+    } else if obs.user_idle_seconds > 20.0 && roll < 0.5 && obs.aggression > 20 {
         (
             Mode::Sabotage,
             "nobody's looking, time for mischief",
@@ -240,7 +287,9 @@ pub fn fallback(obs: &Observation, roll: f32) -> Directive {
         )
     } else if obs.seconds_in_state > 25.0 {
         match obs.current_state {
-            "IDLE" if roll < 0.4 => (Mode::Sabotage, "bored, let's stomp a window", "So bored."),
+            "IDLE" if roll < 0.4 && obs.aggression > 20 => {
+                (Mode::Sabotage, "bored, let's stomp a window", "So bored.")
+            }
             "IDLE" => (
                 Mode::Observe,
                 "let's see what you're up to",
@@ -439,6 +488,42 @@ mod tests {
         assert!(parse_response("not json").is_err());
         assert!(parse_response(r#"{"response":"I think combat"}"#).is_err());
         assert!(parse_response(r#"{"response":"{\"state\":\"DANCE\"}"}"#).is_err());
+    }
+
+    #[test]
+    fn personality_reaches_the_prompt_and_the_fallback() {
+        let fierce = Observation {
+            name: "Brawler".into(),
+            aggression: 95,
+            language: Language::Salty,
+            seconds_in_state: 20.0,
+            ..Default::default()
+        };
+        let p = build_request(&cfg(), &fierce)["prompt"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            p.contains("Brawler") && p.contains("extremely aggressive"),
+            "{p}"
+        );
+        assert!(p.contains("never slurs"), "salty still has limits");
+        assert!(
+            !p.contains("\"name\""),
+            "personality isn't dumped as raw data"
+        );
+        assert_eq!(fallback(&fierce, 0.1).mode, Mode::Combat);
+        let gentle = Observation {
+            aggression: 5,
+            user_idle_seconds: 60.0,
+            ..Default::default()
+        };
+        assert_ne!(fallback(&gentle, 0.1).mode, Mode::Sabotage);
+        let p = build_request(&cfg(), &gentle)["prompt"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(p.contains("gentle"));
     }
 
     #[test]

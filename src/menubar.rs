@@ -17,12 +17,101 @@ use objc::{class, msg_send, sel, sel_impl, Encode, Encoding};
 
 use crate::agent::Mode;
 use crate::poses;
-use crate::settings::{Behaviour, Command, Settings, Size, WordStay};
+use crate::settings::{Behaviour, Change, Command, Settings, Size, WordStay};
 use crate::stickman::{forward_kinematics, idle_pose, BoneKind, Pose};
 
 /// Menu picks waiting for the main loop.
 static QUEUE: Mutex<Vec<isize>> = Mutex::new(Vec::new());
+/// Slider and text-field changes from the settings window.
+static CHANGES: Mutex<Vec<Change>> = Mutex::new(Vec::new());
 static REGISTER: Once = Once::new();
+
+/// Slider tags in the settings window.
+pub const SLIDER_AGGRESSION: isize = 1;
+pub const SLIDER_CHATTINESS: isize = 2;
+
+/// `-[StickmanMenuTarget popupAction:]`: a pop-up menu choice (the selected
+/// item's tag is the command).
+extern "C" fn popup_action(_this: &Object, _sel: Sel, sender: *mut Object) {
+    if sender.is_null() {
+        return;
+    }
+    // SAFETY: AppKit passes the NSPopUpButton; selectedItem may be nil.
+    let tag: isize = unsafe {
+        let item: *mut Object = msg_send![sender, selectedItem];
+        if item.is_null() {
+            return;
+        }
+        msg_send![item, tag]
+    };
+    if let Ok(mut q) = QUEUE.lock() {
+        q.push(tag);
+    }
+}
+
+/// `-[StickmanMenuTarget sliderAction:]`: a slider moved.
+extern "C" fn slider_action(_this: &Object, _sel: Sel, sender: *mut Object) {
+    if sender.is_null() {
+        return;
+    }
+    // SAFETY: AppKit passes the NSSlider.
+    let (tag, value): (isize, f64) =
+        unsafe { (msg_send![sender, tag], msg_send![sender, doubleValue]) };
+    let v = value.round().clamp(0.0, 100.0) as u8;
+    let change = match tag {
+        SLIDER_AGGRESSION => Change::Aggression(v),
+        SLIDER_CHATTINESS => Change::Chattiness(v),
+        _ => return,
+    };
+    if let Ok(mut q) = CHANGES.lock() {
+        q.push(change);
+    }
+}
+
+/// `-[StickmanMenuTarget textAction:]`: the name field was edited.
+extern "C" fn text_action(_this: &Object, _sel: Sel, sender: *mut Object) {
+    if sender.is_null() {
+        return;
+    }
+    // SAFETY: AppKit passes the NSTextField; UTF8String is valid while the
+    // string lives (we copy it out immediately).
+    let text = unsafe {
+        let s: *mut Object = msg_send![sender, stringValue];
+        if s.is_null() {
+            return;
+        }
+        let p: *const std::ffi::c_char = msg_send![s, UTF8String];
+        if p.is_null() {
+            return;
+        }
+        std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
+    };
+    if let Ok(mut q) = CHANGES.lock() {
+        q.push(Change::Name(text));
+    }
+}
+
+/// Slider and text changes waiting for the main loop.
+pub fn drain_changes() -> Vec<Change> {
+    CHANGES
+        .lock()
+        .map(|mut q| q.drain(..).collect())
+        .unwrap_or_default()
+}
+
+/// The shared Objective-C action target (created once, never freed).
+pub fn action_target() -> *mut Object {
+    static TARGET: std::sync::atomic::AtomicPtr<Object> =
+        std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+    let t = TARGET.load(std::sync::atomic::Ordering::Relaxed);
+    if !t.is_null() {
+        return t;
+    }
+    // SAFETY: main thread; +1 retained object we intentionally keep forever.
+    let t: *mut Object = unsafe { msg_send![target_class(), new] };
+    TARGET.store(t, std::sync::atomic::Ordering::Relaxed);
+    t
+}
 
 /// `-[StickmanMenuTarget menuAction:]`: queue the clicked item's tag.
 extern "C" fn menu_action(_this: &Object, _sel: Sel, sender: *mut Object) {
@@ -40,11 +129,23 @@ fn target_class() -> &'static Class {
     REGISTER.call_once(|| {
         let mut decl = ClassDecl::new("StickmanMenuTarget", class!(NSObject))
             .expect("register StickmanMenuTarget");
-        // SAFETY: the signature matches an action method `- (void)menuAction:(id)sender`.
+        // SAFETY: each signature matches an action method `- (void)x:(id)sender`.
         unsafe {
             decl.add_method(
                 sel!(menuAction:),
                 menu_action as extern "C" fn(&Object, Sel, *mut Object),
+            );
+            decl.add_method(
+                sel!(popupAction:),
+                popup_action as extern "C" fn(&Object, Sel, *mut Object),
+            );
+            decl.add_method(
+                sel!(sliderAction:),
+                slider_action as extern "C" fn(&Object, Sel, *mut Object),
+            );
+            decl.add_method(
+                sel!(textAction:),
+                text_action as extern "C" fn(&Object, Sel, *mut Object),
             );
         }
         decl.register();
@@ -221,7 +322,8 @@ impl MenuBar {
         // SAFETY: main thread; objects we keep are retained (+1) and released in
         // Drop; the menu retains its items and the status item retains its menu.
         unsafe {
-            let target: *mut Object = msg_send![target_class(), new];
+            let target = action_target();
+            let _: *mut Object = msg_send![target, retain]; // released in Drop
             let bar: *mut Object = msg_send![class!(NSStatusBar), systemStatusBar];
             let item: *mut Object = msg_send![bar, statusItemWithLength: -1.0f64]; // variable length
             let item: *mut Object = msg_send![item, retain]; // the status bar doesn't keep it alive
@@ -314,6 +416,8 @@ impl MenuBar {
         self.mood = self.add(menu, "Mood: —", None, "");
         self.health = self.add(menu, "Health: 100%", None, "");
         self.director = self.add(menu, "AI: —", None, "");
+        Self::separator(menu);
+        self.add(menu, "Settings…", Some(Command::OpenSettings), ",");
         Self::separator(menu);
 
         let behaviour = self.submenu(menu, "Behaviour");
@@ -465,36 +569,12 @@ impl MenuBar {
             &format!("Health: {:.0}%", status.health.clamp(0.0, 100.0)),
         );
         Self::set_title(self.director, &format!("AI: {}", status.director));
-        for b in Behaviour::ALL {
-            self.set_checked(Command::SetBehaviour(b), settings.behaviour == b);
+        let tags: Vec<isize> = self.items.keys().copied().collect();
+        for tag in tags {
+            if let Some(cmd) = Command::from_tag(tag) {
+                self.set_checked(cmd, settings.checked(cmd));
+            }
         }
-        for s in Size::ALL {
-            self.set_checked(Command::SetSize(s), settings.size == s);
-        }
-        self.set_checked(Command::ToggleCursorPush, settings.cursor_push);
-        self.set_checked(Command::ToggleWindowShake, settings.window_shake);
-        self.set_checked(Command::ToggleWalkOnText, settings.walk_on_text);
-        self.set_checked(
-            Command::ToggleThrowWords,
-            settings.throw_words && settings.walk_on_text,
-        );
-        self.set_checked(Command::ToggleSpeech, settings.speech);
-        for w in WordStay::ALL {
-            self.set_checked(Command::SetWordStay(w), settings.word_stay == w);
-        }
-        self.set_checked(Command::ToggleNaps, settings.naps);
-        self.set_checked(Command::ToggleDancing, settings.dancing);
-        self.set_checked(Command::ToggleDoodles, settings.doodles);
-        self.set_checked(Command::ToggleSitting, settings.sitting);
-        self.set_checked(
-            Command::ToggleWindowShoves,
-            settings.window_shoves && settings.window_shake,
-        );
-        self.set_checked(Command::TogglePowers, settings.powers);
-        self.set_checked(Command::ToggleJailIntro, settings.jail_intro);
-        self.set_checked(Command::ToggleSound, settings.sound);
-        self.set_checked(Command::ToggleVisible, settings.visible);
-        self.set_checked(Command::TogglePaused, settings.paused);
         Self::set_hidden(self.grant_ax, status.accessibility);
         Self::set_hidden(self.grant_screen, status.screen_recording);
         self.shown = Some((settings.clone(), status.clone()));
@@ -586,6 +666,37 @@ pub fn drain_queue() -> Vec<Command> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_window_controls_reach_the_queues() {
+        // SAFETY: plain AppKit controls, used and released within the test.
+        unsafe {
+            let t = action_target();
+            let slider: *mut Object = msg_send![class!(NSSlider), new];
+            let _: () = msg_send![slider, setTag: SLIDER_AGGRESSION];
+            let _: () = msg_send![slider, setMaxValue: 100.0f64];
+            let _: () = msg_send![slider, setDoubleValue: 83.4f64];
+            let _: () = msg_send![t, sliderAction: slider];
+            let field: *mut Object = msg_send![class!(NSTextField), new];
+            let _: () = msg_send![field, setStringValue: ns_string("Brawler")];
+            let _: () = msg_send![t, textAction: field];
+            let popup: *mut Object = msg_send![class!(NSPopUpButton), new];
+            let _: () = msg_send![popup, addItemWithTitle: ns_string("Salty")];
+            let item: *mut Object = msg_send![popup, lastItem];
+            let cmd = Command::SetLanguage(crate::settings::Language::Salty);
+            let _: () = msg_send![item, setTag: cmd.tag()];
+            let _: () = msg_send![popup, selectItem: item];
+            let _: () = msg_send![t, popupAction: popup];
+            for o in [slider, field, popup] {
+                let _: () = msg_send![o, release];
+            }
+            assert_eq!(
+                drain_changes(),
+                [Change::Aggression(83), Change::Name("Brawler".into())]
+            );
+            assert!(drain_queue().contains(&cmd));
+        }
+    }
 
     #[test]
     fn objc_action_reaches_the_queue() {

@@ -792,6 +792,23 @@ fn test_drag_and_fling_the_figure() {
     );
 }
 
+/// The Settings window opens from the menu and shows on screen.
+fn test_settings_window_opens() {
+    let o = Overlay::spawn(&[("STICKMAN_DEBUG_OPEN_SETTINGS", "1")]);
+    let line = o
+        .wait_for("settings window: number=", Duration::from_secs(5))
+        .expect("settings window never opened");
+    let number: u32 = field(&line, "number").parse().unwrap();
+    pump_run_loop(Duration::from_millis(300));
+    let w = window_info(number).expect("settings window not in the window list");
+    println!(
+        "      settings window {number}: {:.0}x{:.0}",
+        w.bounds.size.width, w.bounds.size.height
+    );
+    assert!(w.on_screen, "not on screen");
+    assert!(w.bounds.size.width > 400.0 && w.bounds.size.height > 300.0);
+}
+
 /// PRD 3.4: the director runs on its own and its decisions reach the figure.
 fn test_ai_director_decides() {
     let ollama_up = std::net::TcpStream::connect_timeout(
@@ -983,6 +1000,7 @@ fn main() {
         &test_grabs_and_throws_the_cursor,
     );
     run("drag_and_fling_the_figure", &test_drag_and_fling_the_figure);
+    run("settings_window_opens", &test_settings_window_opens);
     run("ai_director_decides", &test_ai_director_decides);
     run(
         "rips_words_and_throws_them",

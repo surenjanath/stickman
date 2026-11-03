@@ -129,9 +129,100 @@ impl WordStay {
     }
 }
 
+/// How the figure talks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum Language {
+    /// Family-friendly.
+    Polite,
+    /// Playful taunts, no swearing.
+    #[default]
+    Cheeky,
+    /// Swears like a sailor (bleeped unless you turn that off).
+    Salty,
+}
+
+impl Language {
+    pub const ALL: [Language; 3] = [Language::Polite, Language::Cheeky, Language::Salty];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Language::Polite => "Polite",
+            Language::Cheeky => "Cheeky",
+            Language::Salty => "Salty (swears)",
+        }
+    }
+}
+
+/// The figure's colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum FigureColor {
+    #[default]
+    Classic,
+    Red,
+    Blue,
+    Green,
+    Purple,
+    Orange,
+    Pink,
+}
+
+impl FigureColor {
+    pub const ALL: [FigureColor; 7] = [
+        FigureColor::Classic,
+        FigureColor::Red,
+        FigureColor::Blue,
+        FigureColor::Green,
+        FigureColor::Purple,
+        FigureColor::Orange,
+        FigureColor::Pink,
+    ];
+
+    pub fn rgb(self) -> [u8; 3] {
+        match self {
+            FigureColor::Classic => crate::stickman::WALKER_RGB,
+            FigureColor::Red => [200, 40, 40],
+            FigureColor::Blue => [30, 90, 210],
+            FigureColor::Green => [30, 150, 60],
+            FigureColor::Purple => [120, 50, 190],
+            FigureColor::Orange => [230, 120, 20],
+            FigureColor::Pink => [225, 80, 160],
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FigureColor::Classic => "Classic (black)",
+            FigureColor::Red => "Red",
+            FigureColor::Blue => "Blue",
+            FigureColor::Green => "Green",
+            FigureColor::Purple => "Purple",
+            FigureColor::Orange => "Orange",
+            FigureColor::Pink => "Pink",
+        }
+    }
+}
+
+/// A settings change that carries a value (sliders, text fields).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Change {
+    Aggression(u8),
+    Chattiness(u8),
+    Name(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// What the figure is called (the AI director uses it).
+    pub name: String,
+    /// 0 (gentle) .. 100 (picks fights constantly).
+    pub aggression: u8,
+    /// 0 (quiet) .. 100 (never shuts up).
+    pub chattiness: u8,
+    pub language: Language,
+    /// Replace swear words with #$%&!.
+    pub bleep: bool,
+    pub color: FigureColor,
     pub behaviour: Behaviour,
     pub size: Size,
     /// Punches shove the real pointer.
@@ -167,6 +258,12 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            name: "Stick".into(),
+            aggression: 50,
+            chattiness: 50,
+            language: Language::Cheeky,
+            bleep: true,
+            color: FigureColor::Classic,
             behaviour: Behaviour::Auto,
             size: Size::Medium,
             cursor_push: true,
@@ -208,6 +305,10 @@ pub enum Command {
     ToggleWindowShoves,
     TogglePowers,
     ToggleJailIntro,
+    SetLanguage(Language),
+    ToggleBleep,
+    SetColor(FigureColor),
+    OpenSettings,
     ToggleVisible,
     TogglePaused,
     Respawn,
@@ -241,6 +342,14 @@ impl Command {
             Command::ToggleWindowShoves => 314,
             Command::TogglePowers => 315,
             Command::ToggleJailIntro => 316,
+            Command::ToggleBleep => 317,
+            Command::OpenSettings => 401,
+            Command::SetLanguage(l) => {
+                700 + Language::ALL.iter().position(|x| *x == l).unwrap_or(0) as isize
+            }
+            Command::SetColor(c) => {
+                800 + FigureColor::ALL.iter().position(|x| *x == c).unwrap_or(0) as isize
+            }
             Command::SetWordStay(w) => {
                 600 + WordStay::ALL.iter().position(|x| *x == w).unwrap_or(0) as isize
             }
@@ -270,6 +379,10 @@ impl Command {
             314 => Command::ToggleWindowShoves,
             315 => Command::TogglePowers,
             316 => Command::ToggleJailIntro,
+            317 => Command::ToggleBleep,
+            401 => Command::OpenSettings,
+            700..=702 => Command::SetLanguage(Language::ALL[(tag - 700) as usize]),
+            800..=806 => Command::SetColor(FigureColor::ALL[(tag - 800) as usize]),
             600..=604 => Command::SetWordStay(WordStay::ALL[(tag - 600) as usize]),
             400 => Command::Respawn,
             500 => Command::OpenAccessibilitySettings,
@@ -302,9 +415,57 @@ impl Settings {
             Command::ToggleWindowShoves => self.window_shoves = !self.window_shoves,
             Command::TogglePowers => self.powers = !self.powers,
             Command::ToggleJailIntro => self.jail_intro = !self.jail_intro,
+            Command::SetLanguage(l) => self.language = l,
+            Command::ToggleBleep => self.bleep = !self.bleep,
+            Command::SetColor(c) => self.color = c,
             Command::ToggleVisible => self.visible = !self.visible,
             Command::TogglePaused => self.paused = !self.paused,
             _ => {}
+        }
+        *self != before
+    }
+
+    /// Whether a toggle is on, or a choice is the selected one (for check
+    /// marks in the menu and the settings window).
+    pub fn checked(&self, cmd: Command) -> bool {
+        match cmd {
+            Command::SetBehaviour(b) => self.behaviour == b,
+            Command::SetSize(s) => self.size == s,
+            Command::SetWordStay(w) => self.word_stay == w,
+            Command::SetLanguage(l) => self.language == l,
+            Command::SetColor(c) => self.color == c,
+            Command::ToggleCursorPush => self.cursor_push,
+            Command::ToggleWindowShake => self.window_shake,
+            Command::ToggleWalkOnText => self.walk_on_text,
+            Command::ToggleThrowWords => self.throw_words && self.walk_on_text,
+            Command::ToggleSpeech => self.speech,
+            Command::ToggleSound => self.sound,
+            Command::ToggleNaps => self.naps,
+            Command::ToggleDancing => self.dancing,
+            Command::ToggleDoodles => self.doodles,
+            Command::ToggleSitting => self.sitting,
+            Command::ToggleWindowShoves => self.window_shoves && self.window_shake,
+            Command::TogglePowers => self.powers,
+            Command::ToggleJailIntro => self.jail_intro,
+            Command::ToggleBleep => self.bleep,
+            Command::ToggleVisible => self.visible,
+            Command::TogglePaused => self.paused,
+            _ => false,
+        }
+    }
+
+    /// Apply a slider or text change. Returns whether anything changed.
+    pub fn change(&mut self, c: Change) -> bool {
+        let before = self.clone();
+        match c {
+            Change::Aggression(v) => self.aggression = v.min(100),
+            Change::Chattiness(v) => self.chattiness = v.min(100),
+            Change::Name(n) => {
+                let n: String = n.trim().chars().take(24).collect();
+                if !n.is_empty() {
+                    self.name = n;
+                }
+            }
         }
         *self != before
     }
@@ -376,6 +537,8 @@ mod tests {
             Command::ToggleWindowShoves,
             Command::TogglePowers,
             Command::ToggleJailIntro,
+            Command::ToggleBleep,
+            Command::OpenSettings,
             Command::ToggleVisible,
             Command::TogglePaused,
             Command::Respawn,
@@ -386,6 +549,8 @@ mod tests {
         all.extend(Behaviour::ALL.map(Command::SetBehaviour));
         all.extend(Size::ALL.map(Command::SetSize));
         all.extend(WordStay::ALL.map(Command::SetWordStay));
+        all.extend(Language::ALL.map(Command::SetLanguage));
+        all.extend(FigureColor::ALL.map(Command::SetColor));
         let mut tags: Vec<isize> = all.iter().map(|c| c.tag()).collect();
         for c in &all {
             assert_eq!(Command::from_tag(c.tag()), Some(*c));
@@ -408,6 +573,21 @@ mod tests {
         assert!(!s.apply(Command::Quit));
         assert!(s.apply(Command::SetSize(Size::Large)));
         assert_eq!(s.size.scale(), 0.75);
+    }
+
+    #[test]
+    fn value_changes_are_clamped_and_names_trimmed() {
+        let mut s = Settings::default();
+        assert!(s.change(Change::Aggression(250)));
+        assert_eq!(s.aggression, 100);
+        assert!(
+            !s.change(Change::Name("   ".into())),
+            "blank names are ignored"
+        );
+        assert!(s.change(Change::Name(
+            "  Captain Scribbles the Magnificent III  ".into()
+        )));
+        assert_eq!(s.name, "Captain Scribbles the Ma");
     }
 
     #[test]
