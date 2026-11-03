@@ -472,6 +472,12 @@ impl MenuBar {
             Some(Command::TogglePeltIcons),
             "",
         );
+        self.add(
+            menu,
+            "Fight With Scrollbar Swords",
+            Some(Command::ToggleWeapons),
+            "",
+        );
         let stay = self.submenu(menu, "Thrown Words Stay");
         for w in WordStay::ALL {
             self.add(stay, w.label(), Some(Command::SetWordStay(w)), "");

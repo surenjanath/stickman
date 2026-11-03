@@ -503,6 +503,36 @@ pub fn rattle(t: f32) -> Pose {
     p
 }
 
+/// A sword slash toward `aim`: blade raised up front, then swept down and
+/// through (k: 0..1, the cut at k ≈ 0.45). The sword lies along the lead
+/// forearm.
+pub fn slash(k: f32, aim: f32) -> Pose {
+    let aim = aim.clamp(-0.6, 0.9);
+    let base = stance(0.0);
+    let mut raise = base;
+    raise[TORSO] = -H + 0.02;
+    arm(&mut raise, A, -0.22, -1.1);
+    let mut cut = base;
+    plant(&mut cut, 0.82 * LEG_LEN, 50.0, 0.0, -34.0, 0.0);
+    // Lean back for upward cuts so the arm clears the head.
+    let up = aim.min(0.0);
+    cut[TORSO] = -H + 0.32 + 0.9 * up;
+    cut[HEAD] = -H + 0.26 + 0.9 * up;
+    arm(&mut cut, A, aim + 0.25, aim + 0.45);
+    let mut through = cut;
+    arm(&mut through, A, aim + 0.7, aim + 1.0);
+    sequence(
+        &[
+            (0.0, base),
+            (0.3, raise),
+            (0.45, cut),
+            (0.6, through),
+            (1.0, base),
+        ],
+        k,
+    )
+}
+
 /// Landing squash (k = 0 at touchdown → 1 recovered).
 pub fn land(k: f32) -> Pose {
     crouch(0.65 * (1.0 - smoothstep(k)))
@@ -562,6 +592,9 @@ mod tests {
             v.push(("snatch", snatch(k, 0.0)));
             v.push(("lie down", lie_down(k)));
             v.push(("charge", charge(k)));
+            v.push(("slash", slash(k, 0.0)));
+            v.push(("slash up", slash(k, -0.6)));
+            v.push(("slash down", slash(k, 0.9)));
             v.push(("rattle", rattle(k * 0.3)));
             v.push(("telekinesis", telekinesis(k, -0.75 + 1.6 * k)));
             v.push(("flying kick", flying_kick(k, 0.2)));

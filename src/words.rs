@@ -519,6 +519,11 @@ impl WordPlay {
         true
     }
 
+    /// Throw any sprite (a dropped or thrown weapon) like a word.
+    pub fn launch_sprite(&mut self, sprite: u32, half: V2, from: V2, vel: V2) {
+        self.launch(Carried { sprite, half }, from, vel);
+    }
+
     fn launch(&mut self, c: Carried, from: V2, vel: V2) {
         let spin = (8.0 + 6.0 * self.rand()) * if vel.x >= 0.0 { 1.0 } else { -1.0 };
         self.projectiles.push(Projectile {

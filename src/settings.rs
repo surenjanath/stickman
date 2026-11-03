@@ -259,6 +259,8 @@ pub struct Settings {
     pub throw_windows: bool,
     /// Rip app icons up off the Dock and throw them (Accessibility).
     pub pelt_icons: bool,
+    /// Rip a scrollbar off the active window and fight with it.
+    pub weapons: bool,
     pub visible: bool,
     pub paused: bool,
 }
@@ -292,6 +294,7 @@ impl Default for Settings {
             rival_visits: true,
             throw_windows: true,
             pelt_icons: true,
+            weapons: true,
             visible: true,
             paused: false,
         }
@@ -331,6 +334,7 @@ pub enum Command {
     ToggleRivalVisits,
     ToggleThrowWindows,
     TogglePeltIcons,
+    ToggleWeapons,
     ToggleVisible,
     TogglePaused,
     Respawn,
@@ -374,6 +378,7 @@ impl Command {
             Command::ToggleRivalVisits => 319,
             Command::ToggleThrowWindows => 320,
             Command::TogglePeltIcons => 321,
+            Command::ToggleWeapons => 322,
             Command::SetLanguage(l) => {
                 700 + Language::ALL.iter().position(|x| *x == l).unwrap_or(0) as isize
             }
@@ -419,6 +424,7 @@ impl Command {
             319 => Command::ToggleRivalVisits,
             320 => Command::ToggleThrowWindows,
             321 => Command::TogglePeltIcons,
+            322 => Command::ToggleWeapons,
             700..=702 => Command::SetLanguage(Language::ALL[(tag - 700) as usize]),
             800..=806 => Command::SetColor(FigureColor::ALL[(tag - 800) as usize]),
             600..=604 => Command::SetWordStay(WordStay::ALL[(tag - 600) as usize]),
@@ -457,6 +463,7 @@ impl Settings {
             Command::ToggleRivalVisits => self.rival_visits = !self.rival_visits,
             Command::ToggleThrowWindows => self.throw_windows = !self.throw_windows,
             Command::TogglePeltIcons => self.pelt_icons = !self.pelt_icons,
+            Command::ToggleWeapons => self.weapons = !self.weapons,
             Command::SetLanguage(l) => self.language = l,
             Command::ToggleBleep => self.bleep = !self.bleep,
             Command::SetColor(c) => self.color = c,
@@ -493,6 +500,7 @@ impl Settings {
             Command::ToggleRivalVisits => self.rival_visits,
             Command::ToggleThrowWindows => self.throw_windows,
             Command::TogglePeltIcons => self.pelt_icons,
+            Command::ToggleWeapons => self.weapons,
             Command::ToggleBleep => self.bleep,
             Command::ToggleVisible => self.visible,
             Command::TogglePaused => self.paused,
@@ -593,6 +601,7 @@ mod tests {
             Command::ToggleRivalVisits,
             Command::ToggleThrowWindows,
             Command::TogglePeltIcons,
+            Command::ToggleWeapons,
             Command::ToggleVisible,
             Command::TogglePaused,
             Command::Respawn,

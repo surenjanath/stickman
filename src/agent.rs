@@ -15,7 +15,7 @@
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use crate::doodle::{self, Shape};
-use crate::geom::{v2, Rect, V2};
+use crate::geom::{clamp_between, v2, Rect, V2};
 use crate::physics::{Platform, PlatformKind, World};
 use crate::poses;
 use crate::stickman::{
@@ -112,6 +112,8 @@ pub struct Senses {
     pub music: bool,
     /// May lift and throw the active window with telekinesis.
     pub can_throw_window: bool,
+    /// May rip a weapon (a scrollbar) off the active window.
+    pub weapon_available: bool,
 }
 
 /// What telekinesis is working on.
@@ -258,6 +260,24 @@ pub enum Event {
         at: V2,
         dir: V2,
     },
+    /// Reached for a weapon: the app finds and captures one.
+    WantWeapon {
+        at: V2,
+    },
+    /// A sword cut hit the cursor.
+    Slashed {
+        at: V2,
+        dir: V2,
+    },
+    /// Let go of the weapon (got hit): it falls from `at`.
+    WeaponDropped {
+        at: V2,
+    },
+    /// Hurled the worn-out weapon from `from` with `vel`.
+    WeaponThrown {
+        from: V2,
+        vel: V2,
+    },
     /// Bounced off a trampoline.
     Boing {
         at: V2,
@@ -359,7 +379,20 @@ pub enum Action {
     },
     /// Shaking the bars of a cell.
     Rattle,
+    /// Yank a weapon off the window.
+    RipWeapon,
+    /// Swing the weapon toward `aim`.
+    Slash {
+        aim: f32,
+    },
+    /// Throw the weapon at `target`.
+    ThrowWeapon {
+        target: V2,
+    },
 }
+
+/// Hits a weapon lasts before the figure throws it.
+const WEAPON_HITS: u32 = 8;
 
 /// Seconds the pen takes to draw a doodle.
 const DOODLE_DRAW: f32 = 2.6;
@@ -388,6 +421,9 @@ impl Action {
             Action::Doodle { .. } => DOODLE_LEAD + DOODLE_DRAW + 0.5,
             Action::Shove { .. } => 0.6,
             Action::Charge { .. } => 0.55,
+            Action::RipWeapon => 0.6,
+            Action::Slash { .. } => 0.45,
+            Action::ThrowWeapon { .. } => 0.55,
             Action::Telekinesis { on: Mind::Cursor } => 1.5,
             Action::Telekinesis { on: Mind::Words } => 2.2,
             Action::Telekinesis { on: Mind::Window } => 2.0,
@@ -472,6 +508,10 @@ pub struct Agent {
     pub scripted: bool,
     /// In a duel: no healing until it's over.
     pub dueling: bool,
+    /// Holding a weapon this long (points), set by the app once it's in hand.
+    pub weapon: Option<f32>,
+    weapon_hits: u32,
+    rip_cooldown: f32,
     /// Chance of grabbing a slow cursor in reach instead of hitting it.
     pub snatch_chance: f32,
     /// Carrying a word overhead.
@@ -549,6 +589,9 @@ impl Agent {
             hold_still: false,
             scripted: false,
             dueling: false,
+            weapon: None,
+            weapon_hits: 0,
+            rip_cooldown: 3.0,
             snatch_chance: 0.3,
             holding: false,
             holding_cursor: false,
@@ -665,7 +708,10 @@ impl Agent {
     fn set_action(&mut self, a: Action) {
         if matches!(
             a,
-            Action::Punch { .. } | Action::Kick { .. } | Action::FlyingKick { .. }
+            Action::Punch { .. }
+                | Action::Kick { .. }
+                | Action::FlyingKick { .. }
+                | Action::Slash { .. }
         ) {
             self.hit_landed = false;
         }
@@ -712,7 +758,7 @@ impl Agent {
     }
 
     fn reach(&self) -> f32 {
-        (53.0 + 48.0) * self.scale
+        (53.0 + 48.0) * self.scale + self.weapon.unwrap_or(0.0) * 0.8
     }
 
     // --- Pose -------------------------------------------------------------------
@@ -746,6 +792,11 @@ impl Agent {
             Action::Shove { .. } => poses::stomp(k(self.action)),
             Action::Charge { .. } => poses::charge(t),
             Action::Rattle => poses::rattle(t),
+            Action::RipWeapon => poses::grab(k(self.action)),
+            Action::Slash { aim } => poses::slash(k(self.action), aim),
+            Action::ThrowWeapon { target } => {
+                poses::throw(k(self.action), self.aim_at(target, -1.2, 1.2))
+            }
             Action::Telekinesis { .. } => {
                 poses::telekinesis(t, self.aim_at(self.tk_aim, -0.75, 0.9))
             }
@@ -880,6 +931,15 @@ impl Agent {
             Action::Telekinesis { on } => Some((self.segments()[FOREARM[0]].end.into(), on)),
             _ => None,
         }
+    }
+
+    /// The weapon's grip (the lead hand) and tip, while armed.
+    pub fn blade(&self) -> Option<(V2, V2)> {
+        let len = self.weapon?;
+        let f = self.segments()[FOREARM[0]];
+        let (a, b) = (V2::from(f.start), V2::from(f.end));
+        let dir = (b - a).normalize_or(v2(self.facing, 0.0));
+        Some((b, b + dir * len))
     }
 
     /// The pen tip and the hand holding it, while doodling.
@@ -1097,6 +1157,7 @@ impl Agent {
     fn act(&mut self, s: &Senses, world: &World, events: &mut Vec<Event>) {
         self.pet_cooldown -= FIXED_DT;
         self.tk_cooldown -= FIXED_DT;
+        self.rip_cooldown -= FIXED_DT;
         self.super_cooldown -= FIXED_DT;
         self.tk_aim = s.cursor;
         // Asleep: wake up when the user is back, or a fight starts.
@@ -1179,6 +1240,9 @@ impl Agent {
     /// Sent flying along `away` (plus `extra` velocity), losing `damage` health.
     fn knock(&mut self, away: V2, extra: V2, damage: f32, events: &mut Vec<Event>) {
         self.holding_cursor = false;
+        if self.weapon.take().is_some() {
+            events.push(Event::WeaponDropped { at: self.hands() });
+        }
         if self.holding {
             self.holding = false;
             events.push(Event::Dropped { at: self.hands() });
@@ -1343,6 +1407,17 @@ impl Agent {
 
     fn attack(&mut self, target: V2) {
         self.face((target.x - self.pos.x).signum());
+        if self.weapon.is_some() {
+            // Armed: cut, or throw it once it's worn out.
+            self.attack_cooldown = 0.55 - 0.3 * self.traits.aggression;
+            if self.weapon_hits >= WEAPON_HITS {
+                self.set_action(Action::ThrowWeapon { target });
+            } else {
+                let aim = self.aim_at(target, -0.6, 0.9);
+                self.set_action(Action::Slash { aim });
+            }
+            return;
+        }
         let hip_y = self.pos.y - poses::STAND_HIP * self.scale;
         let low = target.y > hip_y - 10.0;
         let a = if low || self.random(0.0, 1.0) < 0.3 {
@@ -1456,6 +1531,40 @@ impl Agent {
                         target: s.cursor + s.cursor_vel * 0.15,
                     });
                     self.frustration = (self.frustration - 25.0).max(0.0);
+                }
+                return;
+            }
+            _ => {}
+        }
+        match self.action {
+            Action::RipWeapon if !self.act_fired && self.t >= 0.3 => {
+                self.act_fired = true;
+                events.push(Event::WantWeapon { at: self.hands() });
+                return;
+            }
+            Action::Slash { aim } if !self.hit_landed && (0.12..=0.32).contains(&self.t) => {
+                if let Some((grip, tip)) = self.blade() {
+                    // Anywhere along the blade counts.
+                    let (ab, ap) = (tip - grip, s.cursor - grip);
+                    let k = (ap.dot(ab) / ab.length_squared().max(1e-3)).clamp(0.0, 1.0);
+                    if (s.cursor - (grip + ab * k)).length() < 26.0 {
+                        self.hit_landed = true;
+                        self.weapon_hits += 1;
+                        let dir = v2(aim.cos() * self.facing, aim.sin()).normalize_or_zero();
+                        events.push(Event::Slashed { at: s.cursor, dir });
+                        self.frustration = (self.frustration - 15.0).max(0.0);
+                    }
+                }
+                return;
+            }
+            Action::ThrowWeapon { target } if !self.act_fired && self.t >= 0.22 => {
+                self.act_fired = true;
+                if self.weapon.take().is_some() {
+                    let from = self.hands();
+                    events.push(Event::WeaponThrown {
+                        from,
+                        vel: lob_velocity(from, target),
+                    });
                 }
                 return;
             }
@@ -1600,6 +1709,19 @@ impl Agent {
                 if self.mind_powers(s) {
                     return;
                 }
+                // Now and then, arm up: rip a scrollbar off the window.
+                if s.weapon_available
+                    && self.weapon.is_none()
+                    && !self.holding
+                    && self.rip_cooldown <= 0.0
+                {
+                    self.rip_cooldown = 4.0;
+                    if self.random(0.0, 1.0) < 0.45 {
+                        self.weapon_hits = 0;
+                        self.set_action(Action::RipWeapon);
+                        return;
+                    }
+                }
                 if self.holding {
                     // Pelt the cursor, leading it a little.
                     if self.attack_cooldown <= 0.0 && (s.cursor - self.pos).length() < 1500.0 {
@@ -1741,7 +1863,7 @@ impl Agent {
                 world.platform_above(self.pos, MAX_JUMP_RISE, a.at.x - 200.0, a.at.x + 200.0)
             {
                 let p = world.platforms()[i];
-                self.jump_to(v2(a.at.x.clamp(p.x0 + 20.0, p.x1 - 20.0), p.y));
+                self.jump_to(v2(clamp_between(a.at.x, p.x0 + 20.0, p.x1 - 20.0), p.y));
                 return true;
             }
             return false;
@@ -1846,13 +1968,14 @@ impl Agent {
                     }
                     && top < self.pos.y - 20.0 =>
             {
-                let launch = self.pos.x.clamp(p.x0 + 40.0, p.x1 - 40.0);
-                let launch = launch.clamp(ground.x0 + 10.0, ground.x1 - 10.0);
+                let launch = clamp_between(self.pos.x, p.x0 + 40.0, p.x1 - 40.0);
+                let launch = clamp_between(launch, ground.x0 + 10.0, ground.x1 - 10.0);
                 if (launch - self.pos.x).abs() > 25.0 {
                     self.walk_to(launch, false);
                 } else {
-                    let land_x = self.pos.x.clamp(p.x0 + 30.0, p.x1 - 30.0) + self.facing * 10.0;
-                    let target = v2(land_x.clamp(p.x0 + 20.0, p.x1 - 20.0), p.y);
+                    let land_x =
+                        clamp_between(self.pos.x, p.x0 + 30.0, p.x1 - 30.0) + self.facing * 10.0;
+                    let target = v2(clamp_between(land_x, p.x0 + 20.0, p.x1 - 20.0), p.y);
                     if self.pos.y - top > MAX_JUMP_RISE {
                         self.super_jump_to(target);
                     } else {
@@ -1862,7 +1985,7 @@ impl Agent {
             }
             _ => {
                 // Out of reach: stand under it and shake a fist.
-                let under = (win.x as f32 + win.width as f32 / 2.0).clamp(s.min_x, s.max_x);
+                let under = clamp_between(win.x as f32 + win.width as f32 / 2.0, s.min_x, s.max_x);
                 if (under - self.pos.x).abs() > 60.0 {
                     self.walk_to(under, false);
                 } else if !matches!(self.action, Action::Taunt) {
@@ -1898,7 +2021,7 @@ impl Agent {
                 self.pos.x + 220.0,
             ) {
                 let p = world.platforms()[i];
-                let x = self.pos.x.clamp(p.x0 + 30.0, p.x1 - 30.0);
+                let x = clamp_between(self.pos.x, p.x0 + 30.0, p.x1 - 30.0);
                 if (x - self.pos.x).abs() < 200.0 {
                     return self.jump_to(v2(x, p.y));
                 }
@@ -1911,7 +2034,7 @@ impl Agent {
                     self.pos.x + 300.0,
                 ) {
                     let p = world.platforms()[i];
-                    let x = self.pos.x.clamp(p.x0 + 30.0, p.x1 - 30.0);
+                    let x = clamp_between(self.pos.x, p.x0 + 30.0, p.x1 - 30.0);
                     return self.super_jump_to(v2(x, p.y));
                 }
             }
@@ -1925,7 +2048,7 @@ impl Agent {
                 } else {
                     ground.x0 - self.random(80.0, left.min(600.0))
                 };
-                return self.walk_to(x.clamp(s.min_x, s.max_x), false);
+                return self.walk_to(clamp_between(x, s.min_x, s.max_x), false);
             }
         }
         if (0.15..0.25).contains(&roll) && ground.kind != PlatformKind::Ground {
@@ -1935,7 +2058,7 @@ impl Agent {
             } else {
                 ground.x1 + 40.0
             };
-            return self.walk_to(edge.clamp(s.min_x, s.max_x), false);
+            return self.walk_to(clamp_between(edge, s.min_x, s.max_x), false);
         }
         if (0.37..0.49).contains(&roll)
             && self.traits.sitting
@@ -2007,7 +2130,7 @@ impl Agent {
                 self.gait_phase = (self.gait_phase + dt / period * ramp).rem_euclid(1.0);
                 self.pos.x += self.facing * self.walk_speed(run) * ramp * dt;
                 if self.pos.x <= s.min_x || self.pos.x >= s.max_x {
-                    self.pos.x = self.pos.x.clamp(s.min_x, s.max_x);
+                    self.pos.x = clamp_between(self.pos.x, s.min_x, s.max_x);
                     self.set_action(Action::Stand);
                 }
             }
@@ -2048,7 +2171,7 @@ impl Agent {
             self.vel.y = self.vel.y.abs() * 0.3;
         }
         if next.x < s.min_x || next.x > s.max_x {
-            next.x = next.x.clamp(s.min_x, s.max_x);
+            next.x = clamp_between(next.x, s.min_x, s.max_x);
             self.vel.x = -self.vel.x * 0.5;
             if self.action == Action::Tumble {
                 self.spin_rate = -self.spin_rate * 0.7;
@@ -2174,6 +2297,7 @@ mod tests {
             tk_words_near: 0,
             music: false,
             can_throw_window: false,
+            weapon_available: false,
         }
     }
 
@@ -2984,6 +3108,89 @@ mod tests {
         assert!(!ev2
             .iter()
             .any(|e| matches!(e, Event::MindLiftWindow { .. })));
+    }
+
+    #[test]
+    fn arms_up_with_a_weapon_slashes_then_throws_it() {
+        let w = world(vec![]);
+        let mut a = agent();
+        let mut s = senses(Mode::Combat);
+        s.weapon_available = true;
+        s.cursor = v2(990.0, GROUND_Y - 110.0);
+        let mut ev = vec![];
+        for _ in 0..(60.0 / FIXED_DT) as usize {
+            a.update(&s, &w, &mut ev);
+            if ev.iter().any(|e| matches!(e, Event::WantWeapon { .. })) {
+                break;
+            }
+        }
+        assert!(
+            ev.iter().any(|e| matches!(e, Event::WantWeapon { .. })),
+            "never reached for one"
+        );
+        // The app hands it a 90 pt scrollbar.
+        a.weapon = Some(90.0);
+        s.weapon_available = false;
+        ev.clear();
+        run(&mut a, &w, &s, 30.0, &mut ev);
+        let cuts = ev
+            .iter()
+            .filter(|e| matches!(e, Event::Slashed { .. }))
+            .count();
+        assert!(cuts >= WEAPON_HITS as usize, "only {cuts} cuts");
+        assert!(
+            ev.iter().any(|e| matches!(e, Event::WeaponThrown { .. })),
+            "never threw it"
+        );
+        assert!(a.weapon.is_none());
+    }
+
+    #[test]
+    fn a_hit_knocks_the_weapon_out_of_its_hand() {
+        let w = world(vec![]);
+        let mut a = agent();
+        a.weapon = Some(80.0);
+        let mut s = senses(Mode::Idle);
+        s.cursor = a.center();
+        s.clicked = true;
+        let mut ev = vec![];
+        a.update(&s, &w, &mut ev);
+        assert!(a.weapon.is_none());
+        assert!(ev.iter().any(|e| matches!(e, Event::WeaponDropped { .. })));
+    }
+
+    /// Regression: a window edge narrower than the margins (72 pt, mostly
+    /// covered by other windows) made `f32::clamp` panic during sabotage.
+    #[test]
+    fn narrow_platforms_never_crash_it() {
+        for width in [30.0, 45.0, 59.0, 72.0] {
+            let sliver = Platform {
+                x0: 450.0,
+                x1: 450.0 + width,
+                y: 900.0,
+                kind: PlatformKind::Window,
+                owner: 42,
+            };
+            let w = world(vec![sliver]);
+            for mode in [Mode::Sabotage, Mode::Idle, Mode::Combat] {
+                for seed in [1u64, 2, 3] {
+                    let mut a = Agent::new(400.0, Platform::ground(1800.0, GROUND_Y), SCALE, seed);
+                    let mut s = senses(mode);
+                    s.active_window = Some((
+                        42,
+                        Rect {
+                            x: 450.0,
+                            y: 900.0,
+                            width: f64::from(width),
+                            height: 150.0,
+                        },
+                    ));
+                    s.cursor = v2(480.0, 700.0);
+                    let mut ev = vec![];
+                    run(&mut a, &w, &s, 20.0, &mut ev);
+                }
+            }
+        }
     }
 
     #[test]

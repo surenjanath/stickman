@@ -123,6 +123,24 @@ const DRAW_TIMEOUT: Duration = Duration::from_secs(60);
 /// After the jail break, fight the cursor this long (Auto behaviour only).
 const INTRO_COMBAT: Duration = Duration::from_secs(15);
 
+/// Capture id for the weapon (words and icons count up from 1).
+const WEAPON_ID: u64 = u64::MAX - 1;
+/// A sword is drawn this long, at most / at least (points).
+const SWORD_MAX: f32 = 110.0;
+const SWORD_MIN: f32 = 60.0;
+
+/// The weapon in the figure's hand: a captured scrollbar.
+#[derive(Debug, Clone, Copy)]
+struct Sword {
+    sprite: u32,
+    /// Half size as drawn (scaled to sword length).
+    half: V2,
+    /// Its long side is the image's height (vertical scrollbars).
+    tall: bool,
+    /// Flying from the window into the hand: (from, seconds).
+    summon: Option<(V2, f32)>,
+}
+
 /// Telekinesis lifts words within this distance of the figure, at most this many.
 const TK_RADIUS: f32 = 650.0;
 const TK_MAX_WORDS: usize = 6;
@@ -325,6 +343,11 @@ struct Scene {
     dock_pid: Option<i64>,
     dock_polled: Instant,
     flight: Option<WindowFlight>,
+    sword: Option<Sword>,
+    /// Where the scrollbar being fetched is (waiting for its pixels).
+    sword_pending: Option<Rect>,
+    /// Don't look for a weapon again before this (no scrollbar there).
+    sword_retry: Instant,
     force_catch_clicks: bool,
     // Input bookkeeping.
     pending_click: bool,
@@ -415,6 +438,7 @@ impl Scene {
                         self.text = lines;
                     }
                 }
+                ocr::Output::Grabbed(g) if g.id == WEAPON_ID => self.sword_captured(g),
                 ocr::Output::Grabbed(g) => self.word_captured(g),
             }
         }
@@ -864,6 +888,18 @@ impl Scene {
         if self.words.tk_active() && mind.is_none_or(|(_, on)| on != Mind::Words) {
             self.words.tk_drop();
         }
+        if let Some(Sword {
+            summon: Some((_, t)),
+            ..
+        }) = &mut self.sword
+        {
+            *t += FIXED_DT;
+        }
+        if let Some(s) = &mut self.sword {
+            if s.summon.is_some_and(|(_, t)| t > 0.4) {
+                s.summon = None;
+            }
+        }
         if let Some(f) = &self.flight {
             if f.stage == Stage::Lift {
                 // Glow along the window's edges while it's held.
@@ -895,6 +931,10 @@ impl Scene {
     /// take in the answers.
     fn poll_dock(&mut self) {
         while let Ok(a) = self.ax_rx.try_recv() {
+            if let macos::AxAnswer::Scrollbar(found) = a {
+                self.scrollbar_found(found);
+                continue;
+            }
             if let macos::AxAnswer::DockIcons(icons) = a {
                 let mut near = Vec::new();
                 for i in icons {
@@ -923,6 +963,111 @@ impl Scene {
                 let _ = self.ax_tx.send(macos::AxQuery::DockIcons { dock_pid: pid });
             }
         }
+    }
+
+    /// The scrollbar search answered.
+    fn scrollbar_found(&mut self, found: Option<Rect>) {
+        let Some(rect) = found.filter(|_| self.agent.weapon.is_none()) else {
+            log::info!("weapon: no scrollbar to rip off");
+            self.sword_retry = Instant::now() + Duration::from_secs(60);
+            return;
+        };
+        let c = v2(
+            (rect.x + rect.width / 2.0) as f32,
+            (rect.y + rect.height / 2.0) as f32,
+        );
+        let below = self
+            .overlays
+            .get(self.layout.index_at(c))
+            .or(self.overlays.first())
+            .map_or(0, |o| o.state().window_number as u32);
+        if let Some(tx) = &self.ocr_tx {
+            let _ = tx.send(ocr::Job::Grab(ocr::GrabRequest {
+                id: WEAPON_ID,
+                window: 0,
+                below,
+                global: rect,
+                cut: ocr::Cut::Plain,
+            }));
+            self.sword_pending = Some(rect);
+        }
+    }
+
+    /// The scrollbar's pixels arrived: it's a sword now.
+    fn sword_captured(&mut self, g: ocr::GrabResult) {
+        let Some(rect) = self.sword_pending.take() else {
+            return;
+        };
+        let Some(c) = g.cutout else {
+            self.sword_retry = Instant::now() + Duration::from_secs(30);
+            return;
+        };
+        let Some(sprite) = self.renderer.create_sprite(&c.rgba, c.width, c.height) else {
+            return;
+        };
+        let (w, h) = (rect.width as f32, rect.height as f32);
+        let long = w.max(h);
+        let len = long.clamp(SWORD_MIN, SWORD_MAX);
+        let k = len / long;
+        let from = v2(rect.x as f32 + w / 2.0, rect.y as f32 + h / 2.0);
+        self.sword = Some(Sword {
+            sprite,
+            half: v2(w * k / 2.0, h * k / 2.0),
+            tall: h >= w,
+            summon: Some((from, 0.0)),
+        });
+        self.agent.weapon = Some(len);
+        log::info!("event: ripped a scrollbar off the window ({len:.0} pt sword)");
+        self.sfx(Sfx::Clank, 0.7, from);
+        self.quip(Moment::GotWeapon);
+        self.shown = None;
+    }
+
+    /// The sword left the hand (dropped or thrown): it flies like a word.
+    fn release_sword(&mut self, from: V2, vel: V2) {
+        if let Some(s) = self.sword.take() {
+            self.words.launch_sprite(s.sprite, s.half, from, vel);
+        }
+        self.agent.weapon = None;
+        self.sword_retry = Instant::now() + Duration::from_secs(20);
+    }
+
+    /// Draw the sword along the lead forearm (or flying in from the window).
+    fn draw_sword(&mut self) {
+        let Some(s) = self.sword else { return };
+        let Some((grip, tip)) = self.agent.blade() else {
+            return;
+        };
+        let dir = (tip - grip).normalize_or(v2(1.0, 0.0));
+        let mut center = (grip + tip) / 2.0;
+        if let Some((from, t)) = s.summon {
+            center = from.lerp(center, stickman::stickman::smoothstep(t / 0.4));
+        }
+        // A cartoon blade under the captured pixels (macOS hides idle
+        // scrollbars, so the capture can be nearly empty).
+        if s.summon.is_none() {
+            let normal = v2(-dir.y, dir.x);
+            self.draw.capsule(grip, tip, 4.2, [0.15, 0.15, 0.18, 1.0]);
+            self.draw
+                .capsule(grip, tip - dir * 2.0, 2.8, [0.85, 0.88, 0.92, 1.0]);
+            let guard = grip + dir * 6.0;
+            self.draw.capsule(
+                guard - normal * 9.0,
+                guard + normal * 9.0,
+                2.6,
+                [0.55, 0.4, 0.15, 1.0],
+            );
+        }
+        // Turn the image's long side onto the blade direction.
+        let long = if s.tall { v2(0.0, 1.0) } else { v2(1.0, 0.0) };
+        let rotation = dir.y.atan2(dir.x) - long.y.atan2(long.x);
+        self.draw.sprite(stickman::render::SpriteDraw {
+            id: s.sprite,
+            center,
+            half: s.half,
+            rotation,
+            alpha: 1.0,
+        });
     }
 
     /// Advance a thrown window and move the real one along.
@@ -1214,6 +1359,30 @@ impl Scene {
                     self.particles.sparks(at, dir, 20);
                     self.sfx(Sfx::Punch, 0.8, at);
                     self.quip(Moment::Struck);
+                }
+                Event::WantWeapon { .. } => {
+                    if let Some(w) = self.snapshot.active() {
+                        let _ = self.ax_tx.send(macos::AxQuery::Scrollbar { pid: w.pid });
+                        self.sword_retry = Instant::now() + Duration::from_secs(5);
+                    }
+                }
+                Event::Slashed { at, dir } => {
+                    self.particles.sparks(at, dir, 26);
+                    self.sfx(Sfx::Clank, 0.8, at);
+                    self.sfx(Sfx::Punch, 0.6, at);
+                    if self.settings.cursor_push {
+                        let area = self.layout.screen_at(self.cursor.pos).frame;
+                        self.cursor.push(dir * CURSOR_PUSH * 1.8, area);
+                        self.last_cursor = self.cursor.pos;
+                    }
+                    log::info!("event: sword hit the cursor");
+                    self.earn(Feat::HitCursor);
+                    self.quip(Moment::Slash);
+                }
+                Event::WeaponDropped { at } => self.release_sword(at, v2(0.0, -200.0)),
+                Event::WeaponThrown { from, vel } => {
+                    self.release_sword(from, vel);
+                    self.sfx(Sfx::Whoosh, 0.7, from);
                 }
                 Event::Boing { at } => {
                     self.particles.dust(at, 0.3);
@@ -1825,6 +1994,13 @@ impl Scene {
                 user_idle: self.last_mouse_move.elapsed().as_secs_f32(),
                 tk_words_near: tk_words,
                 music,
+                weapon_available: self.settings.weapons
+                    && self.accessibility
+                    && self.ocr_tx.is_some()
+                    && self.sword.is_none()
+                    && self.sword_pending.is_none()
+                    && Instant::now() >= self.sword_retry
+                    && self.snapshot.active().is_some(),
                 can_throw_window: self.settings.throw_windows
                     && self.accessibility
                     && self.flight.is_none()
@@ -1950,7 +2126,8 @@ impl Scene {
             || self.jail.is_some()
             || self.sketch.stroke.is_some()
             || self.rival.is_some()
-            || self.flight.is_some();
+            || self.flight.is_some()
+            || self.sword.is_some();
         self.present();
         true
     }
@@ -2011,7 +2188,8 @@ impl Scene {
             || self.jail.is_some()
             || self.sketch.stroke.is_some()
             || self.rival.is_some()
-            || self.flight.is_some();
+            || self.flight.is_some()
+            || self.sword.is_some();
         let zzz = self.zzz_frame();
         if let Some(shown) = &self.shown {
             if !effects
@@ -2054,6 +2232,7 @@ impl Scene {
         if let Some(j) = &self.jail {
             j.draw(&mut self.draw); // bars in front of the figure
         }
+        self.draw_sword();
         if let Some((hand, pen)) = self.agent.pen_stroke() {
             // The marker in its hand.
             self.draw.capsule(hand, pen, 2.4, [1.0, 1.0, 1.0, 0.85]);
@@ -2511,6 +2690,9 @@ impl App {
             dock_pid: if ax { macos::dock_pid() } else { None },
             dock_polled: now - Duration::from_secs(10),
             flight: None,
+            sword: None,
+            sword_pending: None,
+            sword_retry: now,
             force_catch_clicks: !self.click_through,
             pending_click: false,
             press: None,
@@ -2776,6 +2958,7 @@ mod tests {
             tk_words_near: 0,
             music: false,
             can_throw_window: false,
+            weapon_available: false,
         };
         let count = |hold: bool| {
             let mut a = Agent::new(900.0, ground, FIGURE_SCALE, 11);

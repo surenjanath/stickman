@@ -307,6 +307,10 @@ impl SettingsWindow {
             "Rip icons off the Dock & throw them",
             Command::TogglePeltIcons,
         );
+        let weapons = self.check(
+            "Rip scrollbars off windows as swords",
+            Command::ToggleWeapons,
+        );
         let stay = self.popup(
             WordStay::ALL
                 .iter()
@@ -334,6 +338,7 @@ impl SettingsWindow {
             ("Text:", walk),
             ("", words),
             ("Dock:", icons),
+            ("Weapons:", weapons),
             ("Thrown words stay:", stay),
             ("Powers:", powers),
             ("", throw_win),

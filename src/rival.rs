@@ -88,6 +88,7 @@ impl Rival {
             tk_words_near: 0,
             music: false,
             can_throw_window: false,
+            weapon_available: false,
             ..*base
         }
     }
@@ -217,6 +218,7 @@ mod tests {
             tk_words_near: 0,
             music: false,
             can_throw_window: false,
+            weapon_available: false,
         }
     }
 

@@ -8,6 +8,17 @@ pub const fn v2(x: f32, y: f32) -> V2 {
     V2::new(x, y)
 }
 
+/// `x` kept between `a` and `b`. Unlike `f32::clamp` it never panics: if the
+/// range is inverted (a platform narrower than the margins asked for), it
+/// gives the middle of it.
+pub fn clamp_between(x: f32, a: f32, b: f32) -> f32 {
+    if a <= b {
+        x.clamp(a, b)
+    } else {
+        (a + b) / 2.0
+    }
+}
+
 /// A rectangle in points: `x`, `y` is the origin, in whichever coordinate space the
 /// caller documents.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -82,6 +93,14 @@ mod tests {
             height: 720.0,
         };
         assert_eq!(cg_to_cocoa(cg_to_cocoa(d, 982.0), 982.0), d);
+    }
+
+    #[test]
+    fn clamp_between_never_panics() {
+        assert_eq!(clamp_between(5.0, 0.0, 10.0), 5.0);
+        assert_eq!(clamp_between(-3.0, 0.0, 10.0), 0.0);
+        // Inverted (e.g. a 72 pt platform with 40 pt margins): the middle.
+        assert_eq!(clamp_between(100.0, 490.0, 482.0), 486.0);
     }
 
     #[test]

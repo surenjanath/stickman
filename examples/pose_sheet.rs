@@ -76,6 +76,8 @@ fn main() {
         ("cheer", poses::cheer(0.1)),
         ("super-jump charge", poses::charge(0.0)),
         ("telekinesis", poses::telekinesis(0.0, -0.2)),
+        ("sword raised", poses::slash(0.3, 0.0)),
+        ("sword cut", poses::slash(0.45, 0.0)),
         ("knocked out", ko),
         ("rest (source)", stickman::stickman::rest_pose()),
     ];
