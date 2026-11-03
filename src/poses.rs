@@ -491,6 +491,18 @@ pub fn telekinesis(t: f32, aim: f32) -> Pose {
     p
 }
 
+/// Gripping bars in front and shaking them (t: seconds).
+pub fn rattle(t: f32) -> Pose {
+    let shake = (t * 38.0).sin();
+    let mut p = stance(0.0);
+    plant(&mut p, 0.86 * LEG_LEN, 22.0, 0.0, -26.0, 0.0);
+    p[TORSO] = -H + 0.12 + 0.05 * shake;
+    p[HEAD] = -H + 0.05 + 0.1 * shake;
+    arm(&mut p, A, 0.05 + 0.08 * shake, -0.05 + 0.08 * shake);
+    arm(&mut p, B, 0.15 - 0.08 * shake, 0.0 - 0.08 * shake);
+    p
+}
+
 /// Landing squash (k = 0 at touchdown → 1 recovered).
 pub fn land(k: f32) -> Pose {
     crouch(0.65 * (1.0 - smoothstep(k)))
@@ -550,6 +562,7 @@ mod tests {
             v.push(("snatch", snatch(k, 0.0)));
             v.push(("lie down", lie_down(k)));
             v.push(("charge", charge(k)));
+            v.push(("rattle", rattle(k * 0.3)));
             v.push(("telekinesis", telekinesis(k, -0.75 + 1.6 * k)));
             v.push(("flying kick", flying_kick(k, 0.2)));
             v.push(("flying kick up", flying_kick(k, -0.4)));

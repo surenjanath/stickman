@@ -333,6 +333,8 @@ pub enum Action {
     Telekinesis {
         on: Mind,
     },
+    /// Shaking the bars of a cell.
+    Rattle,
 }
 
 /// Seconds the pen takes to draw a doodle.
@@ -432,6 +434,8 @@ pub struct Agent {
     pub action: Action,
     /// Diagnostics: stand still (no behaviour), e.g. to measure idle CPU.
     pub hold_still: bool,
+    /// Following a script (the jail-break intro): no behaviour of its own.
+    pub scripted: bool,
     /// Chance of grabbing a slow cursor in reach instead of hitting it.
     pub snatch_chance: f32,
     /// Carrying a word overhead.
@@ -501,6 +505,7 @@ impl Agent {
             frustration: 0.0,
             action: Action::Stand,
             hold_still: false,
+            scripted: false,
             snatch_chance: 0.3,
             holding: false,
             holding_cursor: false,
@@ -545,6 +550,21 @@ impl Agent {
         self.rng ^= self.rng >> 27;
         let r = self.rng.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 40;
         lo + (hi - lo) * (r as f32 / (1u64 << 24) as f32)
+    }
+
+    /// Scripted moves for the jail-break intro.
+    pub fn script_rattle(&mut self, dir: f32) {
+        self.face(dir);
+        self.set_action(Action::Rattle);
+    }
+
+    pub fn script_kick(&mut self, dir: f32) {
+        self.face(dir);
+        self.set_action(Action::Kick { aim: 0.15 });
+    }
+
+    pub fn script_think(&mut self) {
+        self.set_action(Action::Think);
     }
 
     /// Start a named action right away (debugging and demos): `sleep`,
@@ -672,6 +692,7 @@ impl Agent {
             }
             Action::Shove { .. } => poses::stomp(k(self.action)),
             Action::Charge { .. } => poses::charge(t),
+            Action::Rattle => poses::rattle(t),
             Action::Telekinesis { .. } => {
                 poses::telekinesis(t, self.aim_at(self.tk_aim, -0.75, 0.9))
             }
@@ -1066,7 +1087,11 @@ impl Agent {
         }
         self.finish_actions(events);
         self.attack_contacts(s, events);
-        if self.ground.is_some() && self.action.interruptible() && !self.hold_still {
+        if self.ground.is_some()
+            && self.action.interruptible()
+            && !self.hold_still
+            && !self.scripted
+        {
             self.behave(s, world, events);
         }
         self.integrate(s, world, events);

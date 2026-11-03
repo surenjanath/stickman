@@ -36,10 +36,12 @@ pub enum Sfx {
     Babble,
     /// Knocked out.
     Ko,
+    /// Steel bars rattling.
+    Clank,
 }
 
 impl Sfx {
-    pub const ALL: [Sfx; 9] = [
+    pub const ALL: [Sfx; 10] = [
         Sfx::Punch,
         Sfx::Kick,
         Sfx::Whoosh,
@@ -49,6 +51,7 @@ impl Sfx {
         Sfx::Stomp,
         Sfx::Babble,
         Sfx::Ko,
+        Sfx::Clank,
     ];
 }
 
@@ -132,6 +135,7 @@ pub fn synth(sfx: Sfx, rate: u32, variant: u32) -> Vec<f32> {
         Sfx::Stomp => 0.2,
         Sfx::Babble => 0.36,
         Sfx::Ko => 0.75,
+        Sfx::Clank => 0.3,
     };
     let n = (len * r) as usize;
     let mut out = Vec::with_capacity(n);
@@ -192,6 +196,15 @@ pub fn synth(sfx: Sfx, rate: u32, variant: u32) -> Vec<f32> {
                 let square = (s * 3.0).clamp(-1.0, 1.0);
                 lp.set(1800.0, r);
                 lp.run(square) * (local / syl * std::f32::consts::PI).sin().max(0.0) * 0.55
+            }
+            Sfx::Clank => {
+                // Inharmonic partials ring like struck steel.
+                let ring: f32 = [(523.0, 1.0), (1397.0, 0.6), (2210.0, 0.4), (3170.0, 0.25)]
+                    .iter()
+                    .map(|(f, a)| a * (t * TAU * f * pitch).sin() * (-t / (0.05 + 0.02 * a)).exp())
+                    .sum();
+                let hit = lp.run(noise.next()) * env(t, 0.0005, 0.006) * 2.0;
+                ring * 0.6 + hit
             }
             Sfx::Ko => {
                 // Descending "wah-wah" with vibrato.

@@ -17,6 +17,7 @@
 //!   the effects that touch the user's cursor, windows or screen contents.
 //! - `STICKMAN_NO_PROMPTS=1`: don't show macOS permission dialogs.
 //! - `STICKMAN_NO_SOUND=1`: no sound effects.
+//! - `STICKMAN_NO_INTRO=1`: skip the jail-break intro.
 //! - `STICKMAN_OLLAMA_URL`, `STICKMAN_OLLAMA_MODEL`, `STICKMAN_DIRECTOR_INTERVAL_S`: director.
 
 use std::collections::VecDeque;
@@ -32,6 +33,7 @@ use stickman::director::{self, Directive, Observation};
 use stickman::doodle::Doodles;
 use stickman::geom::{cg_to_cocoa, v2, Rect, V2};
 use stickman::input::{self as input, Cursor};
+use stickman::jail::{Cue, Jail};
 use stickman::macos::{
     self, OsAction, OverlayWindow, OVERLAY_COLLECTION_BEHAVIOR, OVERLAY_WINDOW_LEVEL,
 };
@@ -105,6 +107,9 @@ fn max_joint_shift(a: &[Segment], b: &[Segment]) -> f32 {
 /// instead of hitting it.
 const DRAG_START_PT: f32 = 6.0;
 const DRAG_START_HOLD: Duration = Duration::from_millis(250);
+
+/// After the jail break, fight the cursor this long (Auto behaviour only).
+const INTRO_COMBAT: Duration = Duration::from_secs(15);
 
 /// Telekinesis lifts words within this distance of the figure, at most this many.
 const TK_RADIUS: f32 = 650.0;
@@ -253,6 +258,10 @@ struct Scene {
     speech: Speech,
     last_director_line: Instant,
     doodles: Doodles,
+    /// The jail-break intro, while it plays.
+    jail: Option<Jail>,
+    /// After breaking out: fight the cursor until then.
+    intro_combat_until: Option<Instant>,
     /// "z", "zZ", "zZz" text sprites (made on first use) and their sizes.
     zzz_sprites: Vec<(u32, V2)>,
     sound: Sound,
@@ -424,6 +433,17 @@ impl Scene {
             forced.is_none() && self.settings.visible && !self.settings.paused,
             Ordering::Relaxed,
         );
+        // Just broke out of jail: it's personal, go after the cursor first.
+        if let Some(until) = self.intro_combat_until {
+            if forced.is_some() || Instant::now() >= until {
+                self.intro_combat_until = None;
+                self.mode_since = Instant::now() - MIN_MODE_DWELL;
+            } else if self.mode != Mode::Combat {
+                self.mode = Mode::Combat;
+                self.mode_since = Instant::now();
+            }
+        }
+        let intro = self.intro_combat_until.is_some();
         while let Ok(d) = self.directive_rx.try_recv() {
             self.director_online = Some(d.source == director::Source::Llm);
             self.last_reason = d.reason.clone();
@@ -432,6 +452,7 @@ impl Scene {
                 .back()
                 .is_some_and(|t| t.elapsed() < Duration::from_secs(10));
             if forced.is_none()
+                && !intro
                 && d.mode != self.mode
                 && accept_directive(self.mode, d.mode, self.mode_since.elapsed(), recently_hit)
             {
@@ -558,6 +579,8 @@ impl Scene {
         self.agent.snatch_chance = snatch;
         self.captive = Captive::Free;
         self.particles.dust(v2(x, ground.y), 0.8);
+        self.jail = None;
+        self.start_jail();
     }
 
     /// New screen layout, if displays were plugged in, unplugged or moved.
@@ -596,6 +619,55 @@ impl Scene {
             self.respawn();
         } else {
             self.agent.on_platforms_changed(&self.world);
+        }
+    }
+
+    /// Lock the figure up for the jail-break intro.
+    fn start_jail(&mut self) {
+        if !self.settings.jail_intro || self.agent.hold_still || env_flag("STICKMAN_NO_INTRO") {
+            return;
+        }
+        let door = if self.seed % 2 == 0 { 1.0 } else { -1.0 };
+        self.jail = Some(Jail::new(self.agent.pos, self.agent.scale, door));
+        self.agent.scripted = true;
+        self.agent.script_think();
+        log::info!("intro: locked in a cell");
+    }
+
+    fn handle_jail(&mut self, cues: &[Cue]) {
+        for cue in cues {
+            match *cue {
+                Cue::Say(line) => {
+                    let lines = self.speech.say(line, Priority::Event);
+                    self.speak(lines);
+                }
+                Cue::Rattle => {
+                    let dir = self.agent.facing;
+                    self.agent.script_rattle(dir);
+                }
+                Cue::Clank => self.sfx(Sfx::Clank, 0.45, self.agent.pos),
+                Cue::Kick { dir } => {
+                    self.agent.script_kick(dir);
+                    self.sfx(Sfx::Whoosh, 0.5, self.agent.pos);
+                }
+                Cue::Break { at } => {
+                    log::info!("event: broke out of jail");
+                    let dir = v2(self.agent.facing, -0.3);
+                    self.particles.explosion(at, dir);
+                    self.particles.sparks(at, dir, 30);
+                    self.sfx(Sfx::Boom, 0.9, at);
+                    self.sfx(Sfx::Clank, 0.8, at);
+                }
+                Cue::Free => {
+                    self.agent.scripted = false;
+                    if self.settings.behaviour == Behaviour::Auto {
+                        self.intro_combat_until = Some(Instant::now() + INTRO_COMBAT);
+                    }
+                }
+            }
+        }
+        if self.jail.as_ref().is_some_and(|j| j.done()) {
+            self.jail = None;
         }
     }
 
@@ -1150,6 +1222,7 @@ impl Scene {
         let wants_ammo = self.settings.throw_words
             && self.settings.walk_on_text
             && matches!(self.mode, Mode::Combat | Mode::Sabotage);
+        let mut jail_cues = Vec::new();
         let tk_words = if self.settings.powers && self.settings.throw_words && self.ocr_tx.is_some()
         {
             let active = self.snapshot.active().map(|w| w.id);
@@ -1196,6 +1269,9 @@ impl Scene {
             self.agent.update(&senses, &self.world, &mut events);
             self.particles.update(FIXED_DT);
             self.speech.update(FIXED_DT);
+            if let Some(j) = &mut self.jail {
+                jail_cues.extend(j.update(FIXED_DT));
+            }
             self.doodles.update(FIXED_DT);
             if let Some(k) = self.agent.doodle_progress() {
                 self.doodles.set_progress(k);
@@ -1212,7 +1288,14 @@ impl Scene {
             freed.extend(fr);
             self.accumulator -= FIXED_DT;
         }
+        // A click on the jailed figure blows the cell open.
+        if events.iter().any(|e| matches!(e, Event::Knockback { .. })) {
+            if let Some(j) = self.jail.as_mut().filter(|j| !j.broken()) {
+                j.break_now(&mut jail_cues);
+            }
+        }
         self.handle(&events);
+        self.handle_jail(&jail_cues);
         self.handle_word_events(&word_events, &freed);
         self.move_captive();
         self.power_effects();
@@ -1261,7 +1344,8 @@ impl Scene {
             || self.words.animating()
             || self.speech.visible()
             || self.dragging
-            || self.doodles.animating();
+            || self.doodles.animating()
+            || self.jail.is_some();
         self.present();
         true
     }
@@ -1315,7 +1399,8 @@ impl Scene {
             || self.agent.since_hit() < 4.0
             || self.words.animating()
             || self.speech.visible()
-            || self.doodles.animating();
+            || self.doodles.animating()
+            || self.jail.is_some();
         let zzz = self.zzz_frame();
         if let Some(shown) = &self.shown {
             if !effects
@@ -1332,6 +1417,9 @@ impl Scene {
         self.words.draw(&mut self.draw, hands);
         self.doodles.draw(&mut self.draw);
         self.draw.figure(&segments, WALKER_RGB);
+        if let Some(j) = &self.jail {
+            j.draw(&mut self.draw); // bars in front of the figure
+        }
         if let Some((hand, pen)) = self.agent.pen_stroke() {
             // The marker in its hand.
             self.draw.capsule(hand, pen, 2.4, [1.0, 1.0, 1.0, 0.85]);
@@ -1699,6 +1787,8 @@ impl App {
             words: WordPlay::new(seed ^ 0x5157),
             speech: Speech::new(seed ^ 0x7A11),
             doodles: Doodles::default(),
+            jail: None,
+            intro_combat_until: None,
             zzz_sprites: Vec::new(),
             last_director_line: now,
             sound,
@@ -1747,6 +1837,9 @@ impl App {
             stats_frames: 0,
             stats_at: now,
         });
+        if let Some(scene) = self.scene.as_mut() {
+            scene.start_jail();
+        }
         Ok(())
     }
 }
