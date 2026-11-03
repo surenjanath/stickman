@@ -30,7 +30,7 @@ use anyhow::{Context, Result};
 use stickman::agent::{Agent, Event, Mode, Senses, FIXED_DT};
 use stickman::director::{self, Directive, Observation};
 use stickman::geom::{cg_to_cocoa, v2, Rect, V2};
-use stickman::input::Cursor;
+use stickman::input::{self as input, Cursor};
 use stickman::macos::{
     self, OsAction, OverlayWindow, OVERLAY_COLLECTION_BEHAVIOR, OVERLAY_WINDOW_LEVEL,
 };
@@ -99,6 +99,11 @@ fn max_joint_shift(a: &[Segment], b: &[Segment]) -> f32 {
         .map(|(p, q)| ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2)).sqrt())
         .fold(0.0, f32::max)
 }
+
+/// A press that moves this far (points) or lasts this long picks the figure up
+/// instead of hitting it.
+const DRAG_START_PT: f32 = 6.0;
+const DRAG_START_HOLD: Duration = Duration::from_millis(250);
 
 /// How often to check whether screens were plugged in or rearranged.
 const SCREEN_CHECK: Duration = Duration::from_secs(2);
@@ -260,6 +265,10 @@ struct Scene {
     force_catch_clicks: bool,
     // Input bookkeeping.
     pending_click: bool,
+    /// Mouse button went down on the figure (a click, or the start of a drag).
+    press: Option<(V2, Instant)>,
+    /// The user is dragging the figure around.
+    dragging: bool,
     captive: Captive,
     /// App to give focus back to after a click on the figure activated us.
     focus_restore: Option<(i64, Instant)>,
@@ -499,10 +508,11 @@ impl Scene {
             owner: 0,
         };
         let x = (p.frame.x + p.frame.width / 2.0) as f32;
-        let hold = self.agent.hold_still;
+        let (hold, snatch) = (self.agent.hold_still, self.agent.snatch_chance);
         self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
         self.agent = Agent::new(x, ground, self.settings.size.scale(), self.seed);
         self.agent.hold_still = hold;
+        self.agent.snatch_chance = snatch;
         self.captive = Captive::Free;
         self.particles.dust(v2(x, ground.y), 0.8);
     }
@@ -788,6 +798,20 @@ impl Scene {
                         self.quip(Moment::ThrewCursor);
                     }
                 }
+                Event::PickedUp { at } => {
+                    self.sfx(Sfx::Pop, 0.5, at);
+                    self.quip(Moment::PickedUp);
+                }
+                Event::Flung { at, vel } => {
+                    let speed = vel.length();
+                    log::info!("event: flung the figure at {speed:.0} pt/s");
+                    if speed > 300.0 {
+                        self.sfx(Sfx::Whoosh, (speed / 2500.0).clamp(0.3, 0.9), at);
+                    }
+                    if speed > 600.0 {
+                        self.quip(Moment::Flung);
+                    }
+                }
                 Event::KnockedOut { .. } => {
                     self.particles.stars(self.agent.head());
                     log::info!("event: knocked out");
@@ -913,6 +937,7 @@ impl Scene {
             self.last_mouse_move = Instant::now();
             self.last_cursor = self.cursor.pos;
         }
+        self.track_press();
         self.sync_world();
         self.sync_director();
         // Clicking the figure activates our app; give focus back to the user's app
@@ -965,6 +990,7 @@ impl Scene {
                 top: range.top,
                 ammo,
                 can_grab_cursor: self.settings.cursor_push,
+                held: self.dragging,
             };
             self.agent.update(&senses, &self.world, &mut events);
             self.particles.update(FIXED_DT);
@@ -992,7 +1018,9 @@ impl Scene {
         // PRD 3.1: intercept clicks only while the user is aiming at the figure.
         let over = self.agent.hit_test(self.cursor.pos);
         let catch = self.intent.update(over, cursor_moved, Instant::now());
-        let through = !(catch || self.force_catch_clicks);
+        // Keep catching mouse events for the whole press, so the drag and the
+        // release reach us.
+        let through = !(catch || self.force_catch_clicks || self.press.is_some());
         if through != self.overlays.first().is_some_and(|o| o.click_through()) {
             log::debug!(
                 "click-through {through} (cursor {:?}, over {over})",
@@ -1023,9 +1051,43 @@ impl Scene {
             || self.agent.since_hit() < 4.0
             || !self.agent.action.is_still()
             || self.words.animating()
-            || self.speech.visible();
+            || self.speech.visible()
+            || self.dragging;
         self.present();
         true
+    }
+
+    /// Decide whether a press on the figure is a click or a pick-up, and end
+    /// the press when the button comes up (polled too, in case the release
+    /// event never reaches us).
+    fn track_press(&mut self) {
+        let Some((at, since)) = self.press else {
+            return;
+        };
+        let released = !input::left_button_down();
+        if !self.dragging && !released {
+            let moved = (self.cursor.pos - at).length() > DRAG_START_PT;
+            if moved || since.elapsed() > DRAG_START_HOLD {
+                self.dragging = true;
+                self.captive = Captive::Free;
+                self.agent.holding_cursor = false;
+                log::info!("event: picked up the figure");
+            }
+        }
+        if released {
+            self.end_press();
+        }
+    }
+
+    fn end_press(&mut self) {
+        if self.press.take().is_none() {
+            return;
+        }
+        if self.dragging {
+            self.dragging = false; // the figure flies off on the next tick
+        } else {
+            self.pending_click = true;
+        }
     }
 
     fn free_speech_sprites(&mut self) {
@@ -1280,6 +1342,9 @@ impl App {
             seed,
         );
         agent.hold_still = env_flag("STICKMAN_HOLD_IDLE");
+        if env_flag("STICKMAN_DEBUG_GRAB") {
+            agent.snatch_chance = 1.0;
+        }
 
         // Permissions: Accessibility (window shakes) and Screen Recording (OCR).
         let prompts = !env_flag("STICKMAN_NO_PROMPTS");
@@ -1398,6 +1463,8 @@ impl App {
             os_tx: macos::os_actions(),
             force_catch_clicks: !self.click_through,
             pending_click: false,
+            press: None,
+            dragging: false,
             captive: Captive::Free,
             focus_restore: None,
             intent: ClickIntent::default(),
@@ -1439,13 +1506,19 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested | WindowEvent::Destroyed => event_loop.exit(),
             WindowEvent::Resized(size) => scene.renderer.resize(id, size.width, size.height),
             WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Left,
+                ..
+            } => scene.end_press(),
+            WindowEvent::MouseInput {
                 state: ElementState::Pressed,
                 button: MouseButton::Left,
                 ..
             } => {
-                // Only reaches us while the cursor is over the figure.
-                log::debug!("click on figure at {:?}", scene.cursor.pos);
-                scene.pending_click = true;
+                // Only reaches us while the cursor is over the figure. A quick
+                // release is a hit; holding or dragging picks the figure up.
+                log::debug!("press on figure at {:?}", scene.cursor.pos);
+                scene.press = Some((scene.cursor.pos, Instant::now()));
                 if let Some(w) = scene.snapshot.active() {
                     scene.focus_restore = Some((w.pid, Instant::now()));
                 }
@@ -1626,6 +1699,7 @@ mod tests {
             top: 0.0,
             ammo: None,
             can_grab_cursor: false,
+            held: false,
         };
         let count = |hold: bool| {
             let mut a = Agent::new(900.0, ground, FIGURE_SCALE, 11);

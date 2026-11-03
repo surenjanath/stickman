@@ -67,6 +67,8 @@ fn main() {
         ("throw release", poses::throw(0.45, -0.3)),
         ("snatch cursor", poses::snatch(0.45, -0.2)),
         ("hoist cursor", poses::hoist(0.0)),
+        ("flying kick", poses::flying_kick(0.5, 0.1)),
+        ("dangling", poses::dangle(0.3)),
         ("knocked out", ko),
         ("rest (source)", stickman::stickman::rest_pose()),
     ];

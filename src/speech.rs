@@ -39,6 +39,8 @@ pub enum Moment {
     ThrewCursor,
     CursorEscaped,
     Dodged,
+    PickedUp,
+    Flung,
 }
 
 impl Moment {
@@ -58,6 +60,16 @@ impl Moment {
             Moment::ThrewCursor => (&["Bye!", "Fetch!", "Wheee!"], 0.8),
             Moment::CursorEscaped => (&["Hey, come back!", "Slippery!"], 0.8),
             Moment::Dodged => (&["Missed me!", "Too slow!", "Nope!"], 0.3),
+            Moment::PickedUp => (
+                &[
+                    "Hey! Put me down!",
+                    "Whoa!",
+                    "Unhand me!",
+                    "Not the collar!",
+                ],
+                0.8,
+            ),
+            Moment::Flung => (&["Wheeee!", "Aaaaah!", "You'll pay for that!"], 0.7),
         }
     }
 }

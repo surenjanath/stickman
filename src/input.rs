@@ -19,6 +19,17 @@ pub fn global_cursor() -> Option<V2> {
     Some(v2(p.x as f32, p.y as f32))
 }
 
+extern "C" {
+    fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
+}
+
+/// Whether the left mouse button is physically down right now.
+pub fn left_button_down() -> bool {
+    // SAFETY: a pure query; 0 = kCGEventSourceStateCombinedSessionState,
+    // 0 = kCGMouseButtonLeft.
+    unsafe { CGEventSourceButtonState(0, 0) }
+}
+
 /// Exponentially smoothed velocity from position samples.
 #[derive(Debug, Clone, Copy)]
 pub struct VelocityEstimator {

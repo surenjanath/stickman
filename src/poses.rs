@@ -344,6 +344,31 @@ pub fn hoist(t: f32) -> Pose {
     p
 }
 
+/// Flying kick in mid-air: the kick, with the other leg tucked up.
+pub fn flying_kick(k: f32, aim: f32) -> Pose {
+    let mut p = kick(k, aim);
+    p[THIGH[B]] = H - 0.65;
+    p[SHIN[B]] = H + 0.75;
+    p
+}
+
+/// Dangling from the user's pointer: legs swinging, arms flailing.
+pub fn dangle(t: f32) -> Pose {
+    let mut p = [0.0; BONES];
+    p[TORSO] = -H + 0.05 * (t * 5.0).sin();
+    p[HEAD] = p[TORSO] - 0.1;
+    // Arms flap in front and behind, never overhead (the head is up there).
+    let flap = (t * TAU * 2.2).sin();
+    arm(&mut p, A, 0.1 + 0.35 * flap, -0.5 + 0.35 * flap);
+    arm(&mut p, B, PI - 0.1 + 0.35 * flap, PI + 0.5 + 0.35 * flap);
+    let sway = 0.25 * (t * TAU * 1.3).sin();
+    p[THIGH[A]] = H + 0.15 + sway;
+    p[SHIN[A]] = H + 0.05 + sway * 1.3;
+    p[THIGH[B]] = H - 0.1 - sway;
+    p[SHIN[B]] = H - 0.2 - sway * 1.3;
+    p
+}
+
 /// Landing squash (k = 0 at touchdown → 1 recovered).
 pub fn land(k: f32) -> Pose {
     crouch(0.65 * (1.0 - smoothstep(k)))
@@ -380,6 +405,7 @@ mod tests {
         }
         for t in [0.0, 0.05, 0.1, 0.15] {
             v.push(("hoist", hoist(t)));
+            v.push(("dangle", dangle(t * 3.0)));
         }
         let mut held = walk_pose_for_test(0.3);
         hold_arms(&mut held);
@@ -394,6 +420,8 @@ mod tests {
             v.push(("kick", kick(k, 0.2)));
             v.push(("stomp", stomp(k)));
             v.push(("snatch", snatch(k, 0.0)));
+            v.push(("flying kick", flying_kick(k, 0.2)));
+            v.push(("flying kick up", flying_kick(k, -0.4)));
             v.push(("snatch up", snatch(k, -0.7)));
             v.push(("snatch down", snatch(k, 0.9)));
         }

@@ -26,6 +26,8 @@ Written in Rust for Apple Silicon:
 | **Climbing** | Window title bars are one-way platforms (occluded parts removed), as are lines of text found by OCR in the active window. The figure jumps up onto them, walks along them, rides them when you drag the window, and falls when it walks off the edge or you close the window. |
 | **Combat** | Click the figure: it's knocked flying with an explosion, spins, bounces and gets back up, and a small health bar appears. Clicks land mid-air too (juggling). Enough hits knock it out, with stars. Swipe fast at it and it dodges. In combat mode it chases the cursor and punches or kicks it, physically shoving your pointer. |
 | **Word throwing** | In combat the figure jumps onto lines of text in your active window (any app, web pages included), rips a whole word right off the screen and lobs it at your cursor. The word flies as the real pixels, spinning, knocks the pointer and falls to the Dock. Where it was taken from, the page looks blank: the overlay paints the exact on-screen background colour over it. Nothing in the real app changes, and the gap heals when the window scrolls, moves or loses focus, or after 45 s. In sabotage mode it steals words and flings them away. |
+| **Pick it up** | Press on the figure and drag: it dangles from your pointer by the scruff of the neck, swinging as you move ("Hey! Put me down!"). Let go with a flick and it flies off with your mouse's speed, tumbling and bouncing; hard throws hurt. A quick click is still a hit. |
+| **Flying kick** | In combat, when your cursor hovers above it, the figure leaps and kicks it in mid-air. |
 | **Grab & throw the cursor** | In combat, a slow cursor within reach is sometimes snatched with both hands, hoisted overhead and lobbed across the screen: your real pointer is pinned to its hands, then flies along the arc. Yank the mouse away or click the figure to escape; a hold never lasts more than 3 s. Only while *Punches Push My Cursor* is on. |
 | **Speech bubbles** | The AI director gives the figure a short line when its mood changes ("That's it. It's on!"), and it quips when hit, knocked out, dodging, grabbing or throwing. |
 | **Sound** | Punches, kicks, whooshes, knockback booms, landing thuds, pops, stomps, a talking babble and a knockout wah-wah, all synthesised in code (no audio files) and panned by where they happen. |
@@ -101,6 +103,7 @@ launching terminal.
 | `STICKMAN_CLICK_THROUGH=0` | Debug: the overlay catches every click (blocks the screen). |
 | `STICKMAN_DEBUG_OPEN_MENU=1` | Debug: pop the menu bar menu open once at startup. |
 | `STICKMAN_DEBUG_SAY="…"` | Debug: say this line at startup. |
+| `STICKMAN_DEBUG_GRAB=1` | Debug: in combat, always grab a slow cursor in reach (instead of 30% of the time). |
 | `RUST_LOG=debug` | Verbose logs: director decisions, OCR, perf stats, click-through toggles. |
 
 ## Testing
@@ -109,18 +112,23 @@ launching terminal.
 cargo test --release                       # everything (PRD CPU budget enforced)
 cargo test --release --test overlay -- ocr # one GUI test by name
 STICKMAN_INTERACTIVE_TESTS=1 cargo test --release --test overlay -- click  # hands off the mouse
+STICKMAN_INTERACTIVE_TESTS=1 cargo test --release --test overlay -- grabs  # cursor grab & throw
+STICKMAN_INTERACTIVE_TESTS=1 cargo test --release --test overlay -- drag   # pick up & fling
 cargo clippy --all-targets -- -D warnings
 cargo run --release --example pose_sheet -- docs/poses.png   # re-render the pose sheet
 cargo run --release --example sfx_demo     # hear every sound effect
 ```
 
-**Unit tests (118).**
+**Unit tests (122).**
 - **Collision:** one-way landings, no tunnelling, window-edge occlusion clipping.
 - **Walking and running:** feet never slide; feet always on the ground.
 - **Poses:** IK accuracy and knee direction; hands and arms never cross the head.
 - **Combat:** knockback, juggling into a KO, getting back up, chasing and hitting
   the cursor, dodging fast swipes, snatching and throwing the cursor, letting go
-  when the user yanks free or clicks.
+  when the user yanks free or clicks, flying kicks.
+- **Being handled:** hanging under a dragged pointer, flying off when let go,
+  dropping gently when set down; staying on its own text line when the text is
+  re-read.
 - **Screens:** per-screen floors, walking across edges only when it isn't a step
   up, window edges clipped per screen and below each menu bar.
 - **Speech and sound:** wrapping, priorities, rate limits, on-screen layout, text
@@ -146,9 +154,10 @@ through the window server and AppKit:
 - **Word throwing:** in combat, a word is ripped off the active window and
   thrown at the cursor.
 - **Menu bar:** the icon is visible and placed in the menu bar.
-- **Click (opt-in):** clicking the figure knocks it back, bursts particles and
-  returns focus to your app. It drives the real pointer, so it only runs with
-  `STICKMAN_INTERACTIVE_TESTS=1`.
+- **Click, grab, drag (opt-in):** clicking the figure knocks it back, bursts
+  particles and returns focus to your app; in combat it grabs a parked pointer
+  and throws it; pressing and dragging picks it up and a flick flings it. These
+  drive the real pointer, so they only run with `STICKMAN_INTERACTIVE_TESTS=1`.
 
 The GUI tests run overlays with cursor pushes, window shakes and permission
 prompts and sound disabled, and with a throwaway settings file. Set `STICKMAN_SKIP_GUI_TESTS=1` to skip them (e.g. on CI).

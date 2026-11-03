@@ -667,6 +667,127 @@ fn test_click_on_figure_knocks_it_back() {
     );
 }
 
+fn interactive() -> bool {
+    if std::env::var_os("STICKMAN_INTERACTIVE_TESTS").is_none() {
+        println!("      (skipped: moves the real pointer; run with STICKMAN_INTERACTIVE_TESTS=1 and hands off the mouse)");
+        return false;
+    }
+    true
+}
+
+/// Combat: park the pointer in front of the figure. It must snatch it, carry
+/// it, throw it (the real pointer flies) and the pointer must land.
+fn test_grabs_and_throws_the_cursor() {
+    use core_graphics::event::CGEventType;
+    if !interactive() {
+        return;
+    }
+    let o = Overlay::spawn(&[
+        ("STICKMAN_MODE", "COMBAT"),
+        ("STICKMAN_NO_CURSOR_PUSH", "0"),
+        ("STICKMAN_NO_OCR", "1"),
+        ("STICKMAN_DEBUG_GRAB", "1"),
+        ("RUST_LOG", "info,stickman=debug"),
+    ]);
+    let home = cursor_now();
+    let b = capture(&o).bbox.expect("figure visible");
+    // Chest height, a little in front of it.
+    let (x, y) = ((b[0] + b[2]) / 2.0 + 90.0, b[1] + (b[3] - b[1]) * 0.4);
+    post_mouse(CGEventType::MouseMoved, x, y);
+    let caught = o.wait_for("event: caught the cursor", Duration::from_secs(12));
+    let threw = caught
+        .as_ref()
+        .and_then(|_| o.wait_for("event: threw the cursor", Duration::from_secs(4)));
+    let landed = threw
+        .as_ref()
+        .and_then(|_| o.wait_for("event: the thrown cursor landed", Duration::from_secs(3)));
+    let end = cursor_now();
+    post_mouse(CGEventType::MouseMoved, home.x, home.y);
+    if landed.is_none() {
+        for l in o.logs.lock().unwrap().iter().rev().take(25).rev() {
+            println!("      log: {l}");
+        }
+    }
+    let caught = caught.expect("never caught the parked cursor");
+    println!("      {}", caught.split("] ").nth(1).unwrap_or(&caught));
+    threw.expect("caught the cursor but never threw it");
+    landed.expect("threw the cursor but it never landed");
+    let moved = ((end.x - x).powi(2) + (end.y - y).powi(2)).sqrt();
+    println!("      pointer thrown {moved:.0} pt");
+    assert!(moved > 150.0, "the real pointer only moved {moved:.0} pt");
+}
+
+/// Press on the figure and drag: it hangs from the pointer; let go with a flick
+/// and it flies off.
+fn test_drag_and_fling_the_figure() {
+    use core_graphics::event::CGEventType;
+    if !interactive() {
+        return;
+    }
+    let o = Overlay::spawn(&[
+        ("STICKMAN_HOLD_IDLE", "1"),
+        ("RUST_LOG", "info,stickman=debug"),
+    ]);
+    let home = cursor_now();
+    let resting = capture(&o).bbox.expect("figure visible");
+    let (cx, cy) = (
+        (resting[0] + resting[2]) / 2.0,
+        (resting[1] + resting[3]) / 2.0,
+    );
+    for i in 0..=12 {
+        let k = i as f64 / 12.0;
+        post_mouse(CGEventType::MouseMoved, cx - 160.0 * (1.0 - k), cy);
+        pump_run_loop(Duration::from_millis(16));
+    }
+    pump_run_loop(Duration::from_millis(250));
+    post_mouse(CGEventType::MouseMoved, cx + 1.0, cy);
+    pump_run_loop(Duration::from_millis(200));
+    post_mouse(CGEventType::LeftMouseDown, cx + 1.0, cy);
+    // Lift it 250 pt.
+    for i in 1..=25 {
+        post_mouse(
+            CGEventType::LeftMouseDragged,
+            cx + 1.0,
+            cy - 10.0 * i as f64,
+        );
+        pump_run_loop(Duration::from_millis(16));
+    }
+    pump_run_loop(Duration::from_millis(300));
+    let lifted = capture(&o).bbox;
+    // Flick right and let go.
+    let top = cy - 250.0;
+    for i in 1..=6 {
+        post_mouse(CGEventType::LeftMouseDragged, cx + 40.0 * i as f64, top);
+        pump_run_loop(Duration::from_millis(16));
+    }
+    post_mouse(CGEventType::LeftMouseUp, cx + 240.0, top);
+    let picked = o.wait_for("event: picked up the figure", Duration::from_secs(1));
+    let flung = o.wait_for("event: flung the figure", Duration::from_secs(2));
+    post_mouse(CGEventType::MouseMoved, home.x, home.y);
+    if flung.is_none() {
+        for l in o.logs.lock().unwrap().iter().rev().take(25).rev() {
+            println!("      log: {l}");
+        }
+    }
+    picked.expect("pressing and dragging did not pick the figure up");
+    let flung = flung.expect("letting go did not fling the figure");
+    println!("      {}", flung.split("] ").nth(1).unwrap_or(&flung));
+    let lifted = lifted.expect("figure visible while held");
+    println!(
+        "      figure top: resting {:.0} -> held {:.0} pt",
+        resting[1], lifted[1]
+    );
+    assert!(
+        lifted[1] < resting[1] - 150.0,
+        "the figure didn't follow the pointer up"
+    );
+    assert!(
+        o.wait_for("event: knockback", Duration::from_millis(10))
+            .is_none(),
+        "a drag must not count as a hit"
+    );
+}
+
 /// PRD 3.4: the director runs on its own and its decisions reach the figure.
 fn test_ai_director_decides() {
     let ollama_up = std::net::TcpStream::connect_timeout(
@@ -853,6 +974,11 @@ fn main() {
         "click_on_figure_knocks_it_back",
         &test_click_on_figure_knocks_it_back,
     );
+    run(
+        "grabs_and_throws_the_cursor",
+        &test_grabs_and_throws_the_cursor,
+    );
+    run("drag_and_fling_the_figure", &test_drag_and_fling_the_figure);
     run("ai_director_decides", &test_ai_director_decides);
     run(
         "rips_words_and_throws_them",

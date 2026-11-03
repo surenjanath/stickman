@@ -82,6 +82,8 @@ pub struct Senses {
     pub ammo: Option<Ammo>,
     /// May grab and throw the user's cursor (the app moves the real pointer).
     pub can_grab_cursor: bool,
+    /// The user is holding the figure with the mouse (press and drag).
+    pub held: bool,
 }
 
 /// A grabbable word on a text line.
@@ -164,6 +166,15 @@ pub enum Event {
         from: V2,
         vel: V2,
     },
+    /// The user picked the figure up with the mouse.
+    PickedUp {
+        at: V2,
+    },
+    /// The user let go of the figure, flinging it with `vel`.
+    Flung {
+        at: V2,
+        vel: V2,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -211,6 +222,12 @@ pub enum Action {
     ThrowCursor {
         target: V2,
     },
+    /// Hanging from the user's pointer.
+    Dangled,
+    /// Kick in mid-air (after leaping at a cursor overhead).
+    FlyingKick {
+        aim: f32,
+    },
 }
 
 impl Action {
@@ -228,6 +245,7 @@ impl Action {
             Action::SnatchCursor { .. } => 0.4,
             Action::HoldCursor => 0.75,
             Action::ThrowCursor { .. } => 0.55,
+            Action::FlyingKick { .. } => 0.45,
             Action::Taunt => 1.6,
             Action::Think => 3.0,
             _ => return None,
@@ -250,7 +268,12 @@ impl Action {
     fn airborne(self) -> bool {
         matches!(
             self,
-            Action::Air | Action::Fall | Action::Dodge | Action::Tumble
+            Action::Air
+                | Action::Fall
+                | Action::Dodge
+                | Action::Tumble
+                | Action::Dangled
+                | Action::FlyingKick { .. }
         )
     }
 }
@@ -265,6 +288,8 @@ pub struct Agent {
     pub action: Action,
     /// Diagnostics: stand still (no behaviour), e.g. to measure idle CPU.
     pub hold_still: bool,
+    /// Chance of grabbing a slow cursor in reach instead of hitting it.
+    pub snatch_chance: f32,
     /// Carrying a word overhead.
     pub holding: bool,
     /// Holding the user's cursor. The app clears this when the user yanks free.
@@ -278,6 +303,12 @@ pub struct Agent {
     gait_phase: f32,
     spin: f32,
     spin_rate: f32,
+    /// Where the pointer holds the figure (pos minus cursor) while dangling.
+    grip: V2,
+    /// Pendulum lean while dangling.
+    swing: f32,
+    /// This jump was a leap at the cursor: kick it on the way up.
+    air_attack: bool,
     spin_from: f32,
     blend_from: (Pose, f32),
     blend_left: f32,
@@ -308,6 +339,7 @@ impl Agent {
             frustration: 0.0,
             action: Action::Stand,
             hold_still: false,
+            snatch_chance: 0.3,
             holding: false,
             holding_cursor: false,
             act_fired: false,
@@ -317,6 +349,9 @@ impl Agent {
             gait_phase: 0.0,
             spin: 0.0,
             spin_rate: 0.0,
+            grip: V2::ZERO,
+            swing: 0.0,
+            air_attack: false,
             spin_from: 0.0,
             blend_from: (idle_pose(0.0), 0.0),
             blend_left: 0.0,
@@ -355,7 +390,10 @@ impl Agent {
     }
 
     fn set_action(&mut self, a: Action) {
-        if matches!(a, Action::Punch { .. } | Action::Kick { .. }) {
+        if matches!(
+            a,
+            Action::Punch { .. } | Action::Kick { .. } | Action::FlyingKick { .. }
+        ) {
             self.hit_landed = false;
         }
         self.act_fired = false;
@@ -418,6 +456,8 @@ impl Agent {
             Action::Punch { aim } => poses::punch(k(self.action), aim),
             Action::Kick { aim } => poses::kick(k(self.action), aim),
             Action::Dodge => poses::dodge(),
+            Action::Dangled => poses::dangle(self.clock),
+            Action::FlyingKick { aim } => poses::flying_kick(k(self.action), aim),
             Action::Tumble => poses::tumble(),
             Action::Ko => idle_pose(0.0),
             Action::GetUp => poses::crouch(1.0 - smoothstep((t - 0.3) / 0.4)),
@@ -445,6 +485,7 @@ impl Agent {
         let spin = match self.action {
             Action::Tumble => self.spin,
             Action::Ko => self.spin,
+            Action::Dangled => self.swing,
             Action::GetUp => self.spin_from * (1.0 - smoothstep(t / 0.45)),
             _ => 0.0,
         };
@@ -615,7 +656,95 @@ impl Agent {
             self.root_y(&self.rotated_pose(), self.hip_anchored) + self.root_correction;
         let before_pos = self.pos.y;
 
+        if s.held {
+            self.dangle(s, events);
+        } else {
+            if self.action == Action::Dangled {
+                self.fling(s, events);
+            }
+            self.act(s, world, events);
+        }
+
+        // Keep the drawn body continuous when the anchoring rule flips.
+        let anchor = self.uses_hip_anchor();
+        if anchor != self.hip_anchored {
+            let moved = self.pos.y - before_pos;
+            let new_root = self.root_y(&self.rotated_pose(), anchor);
+            self.root_correction = before_root + moved - new_root;
+            self.hip_anchored = anchor;
+        }
+        self.refresh_target();
+        self.shown = self.pose_and_spin();
+        self.root_correction *= (-dt / 0.08).exp();
+        if self.root_correction.abs() < 0.01 {
+            self.root_correction = 0.0;
+        }
+    }
+
+    /// Hanging from the user's pointer: follow it, swinging with its motion.
+    fn dangle(&mut self, s: &Senses, events: &mut Vec<Event>) {
+        let dt = FIXED_DT;
+        if self.action != Action::Dangled {
+            if self.holding {
+                self.holding = false;
+                events.push(Event::Dropped { at: self.hands() });
+            }
+            self.holding_cursor = false;
+            self.air_attack = false;
+            self.grip = self.pos - s.cursor;
+            self.swing = 0.0;
+            self.ground = None;
+            self.set_action(Action::Dangled);
+            events.push(Event::PickedUp { at: s.cursor });
+        }
+        // Slide so it hangs by the scruff of the neck, just under the pointer.
+        let hang = v2(0.0, (poses::STAND_HIP + 5.0 + 78.0) * self.scale);
+        self.grip += (hang - self.grip) * (1.0 - (-dt / 0.25).exp());
+        self.pos = s.cursor + self.grip;
+        self.vel = s.cursor_vel;
+        // Body lags behind the pointer like a pendulum.
+        let lean = (-s.cursor_vel.x * 0.0006).clamp(-0.7, 0.7);
+        self.swing += (lean - self.swing) * (1.0 - (-dt / 0.12).exp());
+        self.frustration = (self.frustration + 3.0 * dt).min(100.0);
+    }
+
+    /// Let go after being dragged: fly off with the pointer's velocity.
+    fn fling(&mut self, s: &Senses, events: &mut Vec<Event>) {
+        let vel = s.cursor_vel.clamp_length_max(2600.0);
+        self.vel = vel;
+        self.ground = None;
+        let speed = vel.length();
+        if speed < 200.0 {
+            self.set_action(Action::Fall);
+        } else {
+            self.spin = self.swing;
+            self.spin_rate = (vel.x * 0.01).clamp(-16.0, 16.0) * self.facing;
+            self.set_action(Action::Tumble);
+            if speed > 1400.0 {
+                // Hurled hard: that hurts.
+                self.health -= 15.0;
+                self.since_hit = 0.0;
+                self.frustration = (self.frustration + 20.0).min(100.0);
+            }
+        }
+        events.push(Event::Flung { at: self.pos, vel });
+    }
+
+    /// One tick of normal life: reflexes, actions, behaviour, physics.
+    fn act(&mut self, s: &Senses, world: &World, events: &mut Vec<Event>) {
         self.reflexes(s, events);
+        // Leaping at the cursor: kick it on the way.
+        if self.action == Action::Air
+            && self.air_attack
+            && s.mode == Mode::Combat
+            && (s.cursor - self.center()).length() < self.reach() * 1.7
+        {
+            self.air_attack = false;
+            let aim = self.aim_at(s.cursor, -0.6, 0.8);
+            self.face((s.cursor.x - self.pos.x).signum());
+            self.set_action(Action::FlyingKick { aim });
+            events.push(Event::Swing { at: self.center() });
+        }
         // The user yanked the cursor free (or a click made us let go).
         let lost_grip = match self.action {
             Action::SnatchCursor { .. } => self.act_fired && !self.holding_cursor,
@@ -632,21 +761,6 @@ impl Agent {
             self.behave(s, world, events);
         }
         self.integrate(s, world, events);
-
-        // Keep the drawn body continuous when the anchoring rule flips.
-        let anchor = self.uses_hip_anchor();
-        if anchor != self.hip_anchored {
-            let moved = self.pos.y - before_pos;
-            let new_root = self.root_y(&self.rotated_pose(), anchor);
-            self.root_correction = before_root + moved - new_root;
-            self.hip_anchored = anchor;
-        }
-        self.refresh_target();
-        self.shown = self.pose_and_spin();
-        self.root_correction *= (-dt / 0.08).exp();
-        if self.root_correction.abs() < 0.01 {
-            self.root_correction = 0.0;
-        }
     }
 
     fn reflexes(&mut self, s: &Senses, events: &mut Vec<Event>) {
@@ -719,6 +833,7 @@ impl Agent {
                 events.push(Event::Jumped { at: self.pos });
             }
             Action::Ko => self.set_action(Action::GetUp),
+            Action::FlyingKick { .. } => self.set_action(Action::Air),
             Action::SnatchCursor { .. } if self.holding_cursor => {
                 self.set_action(Action::HoldCursor)
             }
@@ -752,7 +867,7 @@ impl Agent {
         s.can_grab_cursor
             && s.cursor_vel.length() < 350.0
             && (head_y..=hip_y).contains(&s.cursor.y)
-            && self.random(0.0, 1.0) < 0.3
+            && self.random(0.0, 1.0) < self.snatch_chance
     }
 
     fn snatch(&mut self, target: V2) {
@@ -830,6 +945,7 @@ impl Agent {
         let (window, bone, radius, aim) = match self.action {
             Action::Punch { aim } => ((0.16, 0.28), FOREARM[0], 30.0, aim),
             Action::Kick { aim } => ((0.22, 0.34), SHIN[0], 34.0, aim),
+            Action::FlyingKick { aim } => ((0.12, 0.32), SHIN[0], 38.0, aim),
             Action::Stomp => {
                 if self.t >= 0.3 && self.t - FIXED_DT < 0.3 {
                     let window = self.ground.map_or(0, |g| g.owner);
@@ -920,6 +1036,7 @@ impl Agent {
                     let rise = (self.pos.y - s.cursor.y).min(MAX_JUMP_RISE);
                     self.attack_cooldown = 1.2;
                     self.jump_to(v2(s.cursor.x, self.pos.y - rise + 40.0));
+                    self.air_attack = true;
                 } else if dx.abs() > self.reach() * 0.8 {
                     let stop = s.cursor.x - dx.signum() * self.reach() * 0.7;
                     self.walk_to(stop, dx.abs() > 160.0);
@@ -1207,6 +1324,7 @@ impl Agent {
             self.pos = next;
             self.vel = V2::ZERO;
             self.ground = Some(p);
+            self.air_attack = false;
             if impact > 700.0 {
                 events.push(Event::Dust {
                     at: next,
@@ -1282,6 +1400,7 @@ mod tests {
             top: 0.0,
             ammo: None,
             can_grab_cursor: false,
+            held: false,
         }
     }
 
@@ -1439,11 +1558,6 @@ mod tests {
             if a.holding_cursor {
                 break;
             }
-            // Stay where the hands are reaching (a real pointer would be caught
-            // anywhere near the hands).
-            if matches!(a.action, Action::SnatchCursor { .. }) {
-                s.cursor = a.hands();
-            }
         }
         (a, w, s, ev)
     }
@@ -1576,6 +1690,89 @@ mod tests {
         let mut ev = vec![];
         run(&mut a, &w, &senses(Mode::Idle), 1.0, &mut ev);
         assert_eq!(a.pos.y, 710.0, "landed on the line below");
+    }
+
+    #[test]
+    fn dragged_figure_hangs_from_the_pointer_and_flies_when_let_go() {
+        let w = world(vec![]);
+        let mut a = agent();
+        let mut s = senses(Mode::Idle);
+        let mut ev = vec![];
+        run(&mut a, &w, &s, 0.3, &mut ev);
+        // Press on its belly and drag it up and to the left.
+        s.cursor = a.center();
+        s.held = true;
+        a.update(&s, &w, &mut ev);
+        assert_eq!(a.action, Action::Dangled);
+        assert!(ev.iter().any(|e| matches!(e, Event::PickedUp { .. })));
+        for i in 0..60 {
+            s.cursor += v2(-6.0, -4.0);
+            s.cursor_vel = v2(-360.0, -240.0);
+            a.update(&s, &w, &mut ev);
+            if i > 40 {
+                // Hanging just under the pointer by now.
+                let below = a.head().y - s.cursor.y;
+                // Held by the scruff of the neck: the head sits just around the pointer.
+                assert!(
+                    (-35.0..40.0).contains(&below),
+                    "head {below} pt below pointer"
+                );
+                assert!((a.head().x - s.cursor.x).abs() < 40.0);
+            }
+        }
+        assert!(a.ground.is_none());
+        // Swing it hard to the right and let go.
+        s.cursor_vel = v2(2000.0, -300.0);
+        a.update(&s, &w, &mut ev);
+        s.held = false;
+        a.update(&s, &w, &mut ev);
+        assert_eq!(a.action, Action::Tumble);
+        assert!(a.vel.x > 1500.0, "{:?}", a.vel);
+        assert!(a.health < 100.0, "a hard throw hurts");
+        assert!(ev.iter().any(|e| matches!(e, Event::Flung { .. })));
+        s.cursor_vel = V2::ZERO;
+        run(&mut a, &w, &s, 5.0, &mut ev);
+        assert!(
+            a.ground.is_some() && a.action.interruptible(),
+            "{:?}",
+            a.action
+        );
+    }
+
+    #[test]
+    fn gently_set_down_just_drops() {
+        let w = world(vec![]);
+        let mut a = agent();
+        let mut s = senses(Mode::Idle);
+        let mut ev = vec![];
+        s.cursor = a.center();
+        s.held = true;
+        run(&mut a, &w, &s, 0.5, &mut ev);
+        s.held = false;
+        a.update(&s, &w, &mut ev);
+        assert_eq!(a.action, Action::Fall);
+        assert_eq!(a.health, 100.0);
+    }
+
+    #[test]
+    fn leaps_and_flying_kicks_a_cursor_overhead() {
+        let w = world(vec![]);
+        let mut a = agent();
+        let mut s = senses(Mode::Combat);
+        s.cursor = v2(930.0, GROUND_Y - 300.0);
+        let mut ev = vec![];
+        let (mut kicked, mut landed_after) = (false, false);
+        for _ in 0..(6.0 / FIXED_DT) as usize {
+            a.update(&s, &w, &mut ev);
+            kicked |= matches!(a.action, Action::FlyingKick { .. });
+            landed_after |= kicked && a.ground.is_some();
+        }
+        assert!(kicked, "never flying-kicked");
+        assert!(
+            ev.iter().any(|e| matches!(e, Event::StruckCursor { .. })),
+            "kick missed"
+        );
+        assert!(landed_after, "never came back down");
     }
 
     #[test]
