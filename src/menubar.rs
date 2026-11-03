@@ -475,6 +475,12 @@ impl MenuBar {
         );
         self.add(
             hobbies,
+            "Dance When Music Plays",
+            Some(Command::ToggleDanceToMusic),
+            "",
+        );
+        self.add(
+            hobbies,
             "Kick My Windows Around",
             Some(Command::ToggleWindowShoves),
             "",

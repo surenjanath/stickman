@@ -173,7 +173,15 @@ impl Moment {
                 &["Hehe!", "Aww.", "That tickles!", "Okay, you're forgiven."],
                 0.9,
             ),
-            Moment::Dancing => (&["♪ ♫", "Dance break!", "Watch this!"], 0.6),
+            Moment::Dancing => (
+                &[
+                    "♪ ♫",
+                    "Dance break!",
+                    "Watch this!",
+                    "Ooh, I love this song!",
+                ],
+                0.6,
+            ),
             Moment::Doodling => (&["Art time.", "Hold still…", "A masterpiece!"], 0.4),
             Moment::Shove => (&["Scoot over!", "Move it!", "Wheee, window ride!"], 0.5),
             Moment::SuperJump => (&["Up, up and away!", "Super jump!", "Hup!"], 0.6),

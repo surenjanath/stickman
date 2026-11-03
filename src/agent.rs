@@ -108,6 +108,8 @@ pub struct Senses {
     pub can_shove: bool,
     /// Words telekinesis could lift right now (near the figure).
     pub tk_words_near: usize,
+    /// Music is playing: dance to it.
+    pub music: bool,
 }
 
 /// What telekinesis is working on.
@@ -464,6 +466,8 @@ pub struct Agent {
     combo: u32,
     /// Walking to an edge to sit on it.
     sit_plan: bool,
+    /// Dancing to music (to announce it only once).
+    grooving: bool,
     /// This flight is a super jump (glowing trail).
     super_air: bool,
     /// Seconds until telekinesis can be used again.
@@ -524,6 +528,7 @@ impl Agent {
             air_attack: false,
             combo: 0,
             sit_plan: false,
+            grooving: false,
             super_air: false,
             tk_cooldown: 1.5,
             tk_aim: V2::ZERO,
@@ -1539,7 +1544,7 @@ impl Agent {
                     self.set_action(Action::Taunt);
                 }
             }
-            Mode::Observe => {
+            Mode::Observe if !(s.music && self.traits.dancing) => {
                 if dx.abs() > 450.0 {
                     self.walk_to(s.cursor.x - dx.signum() * 320.0, false);
                 } else if !matches!(self.action, Action::Think | Action::Walk { .. }) {
@@ -1550,7 +1555,22 @@ impl Agent {
                 }
             }
             Mode::Sabotage => self.sabotage(s, world),
+            Mode::Idle | Mode::Observe if s.music && self.traits.dancing && !self.holding => {
+                // Music's on: dance (again and again, while it plays).
+                if !matches!(self.action, Action::Walk { .. }) {
+                    self.set_action(Action::Dance);
+                    if !self.grooving {
+                        events.push(Event::StartedDancing { at: self.head() });
+                    }
+                    self.grooving = true;
+                }
+            }
             Mode::Idle => self.wander(s, world, events),
+            // Watching while carrying a word, music on: just keep watching.
+            Mode::Observe => {}
+        }
+        if !s.music {
+            self.grooving = false;
         }
         // Arrived?
         if let Action::Walk { to, .. } = self.action {
@@ -1992,6 +2012,7 @@ mod tests {
             user_idle: 0.0,
             can_shove: false,
             tk_words_near: 0,
+            music: false,
         }
     }
 
@@ -2662,6 +2683,34 @@ mod tests {
         let mut ev2 = vec![];
         run(&mut b, &w, &s, 30.0, &mut ev2);
         assert!(!ev2.iter().any(|e| matches!(e, Event::MindLiftWords { .. })));
+    }
+
+    #[test]
+    fn dances_while_music_plays() {
+        let w = world(vec![]);
+        let mut a = agent();
+        let mut s = senses(Mode::Idle);
+        s.music = true;
+        let mut ev = vec![];
+        let mut dancing = 0;
+        for _ in 0..(20.0 / FIXED_DT) as usize {
+            a.update(&s, &w, &mut ev);
+            dancing += usize::from(a.action == Action::Dance);
+        }
+        assert!(
+            dancing as f32 * FIXED_DT > 15.0,
+            "danced only {:.1} s",
+            dancing as f32 * FIXED_DT
+        );
+        let started = ev
+            .iter()
+            .filter(|e| matches!(e, Event::StartedDancing { .. }))
+            .count();
+        assert_eq!(started, 1, "announced once");
+        // Music stops: back to normal life.
+        s.music = false;
+        run(&mut a, &w, &s, 8.0, &mut ev);
+        assert_ne!(a.action, Action::Dance);
     }
 
     #[test]

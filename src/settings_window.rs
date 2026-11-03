@@ -327,6 +327,7 @@ impl SettingsWindow {
         let dance = self.check("Dancing", Command::ToggleDancing);
         let doodles = self.check("Doodles in the air", Command::ToggleDoodles);
         let sit = self.check("Sitting on window edges", Command::ToggleSitting);
+        let music = self.check("Dance when music plays", Command::ToggleDanceToMusic);
         let speech = self.check("Speech bubbles", Command::ToggleSpeech);
         let sound = self.check("Sound effects", Command::ToggleSound);
         Self::grid(vec![
@@ -334,6 +335,7 @@ impl SettingsWindow {
             ("", dance),
             ("", doodles),
             ("", sit),
+            ("", music),
             ("Talking:", speech),
             ("Sound:", sound),
         ])

@@ -266,6 +266,8 @@ struct Scene {
     /// "z", "zZ", "zZz" text sprites (made on first use) and their sizes.
     zzz_sprites: Vec<(u32, V2)>,
     sound: Sound,
+    /// Some app is playing audio (polled in the background).
+    music: Arc<AtomicBool>,
     ocr_target: Option<ocr::Request>,
     ocr_candidate: Option<ocr::Request>,
     ocr_candidate_since: Instant,
@@ -1265,6 +1267,12 @@ impl Scene {
             && self.settings.walk_on_text
             && matches!(self.mode, Mode::Combat | Mode::Sabotage);
         let mut jail_cues = Vec::new();
+        // Music: some app is playing, and it isn't just our own effects.
+        let ours = self
+            .sound
+            .last_played
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(4));
+        let music = self.settings.dance_to_music && self.music.load(Ordering::Relaxed) && !ours;
         let tk_words = if self.settings.powers && self.settings.throw_words && self.ocr_tx.is_some()
         {
             let active = self.snapshot.active().map(|w| w.id);
@@ -1304,6 +1312,7 @@ impl Scene {
                 held: self.dragging,
                 user_idle: self.last_mouse_move.elapsed().as_secs_f32(),
                 tk_words_near: tk_words,
+                music,
                 can_shove: self.settings.window_shoves
                     && self.settings.window_shake
                     && self.accessibility,
@@ -1834,6 +1843,7 @@ impl App {
             zzz_sprites: Vec::new(),
             last_director_line: now,
             sound,
+            music: stickman::music::spawn_watcher(),
             ocr_target: None,
             ocr_candidate: None,
             ocr_candidate_since: now,
@@ -2104,6 +2114,7 @@ mod tests {
             user_idle: 0.0,
             can_shove: false,
             tk_words_near: 0,
+            music: false,
         };
         let count = |hold: bool| {
             let mut a = Agent::new(900.0, ground, FIGURE_SCALE, 11);

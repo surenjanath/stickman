@@ -289,6 +289,8 @@ pub struct Sound {
     tx: Option<Sender<Request>>,
     variant: u32,
     last: HashMap<Sfx, Instant>,
+    /// When we last played anything (our effects also run the audio device).
+    pub last_played: Option<Instant>,
 }
 
 impl Sound {
@@ -298,6 +300,7 @@ impl Sound {
             tx: None,
             variant: 0,
             last: HashMap::new(),
+            last_played: None,
         }
     }
 
@@ -320,6 +323,7 @@ impl Sound {
             tx: Some(tx),
             variant: 0,
             last: HashMap::new(),
+            last_played: None,
         }
     }
 
@@ -340,6 +344,7 @@ impl Sound {
             return;
         }
         self.last.insert(sfx, now);
+        self.last_played = Some(now);
         self.variant = self.variant.wrapping_add(1);
         if tx.send(Request { sfx, gain, pan }).is_err() {
             self.tx = None;
