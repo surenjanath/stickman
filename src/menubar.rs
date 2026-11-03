@@ -352,6 +352,8 @@ impl MenuBar {
             Some(Command::ToggleThrowWords),
             "",
         );
+        self.add(menu, "Speech Bubbles", Some(Command::ToggleSpeech), "");
+        self.add(menu, "Sound Effects", Some(Command::ToggleSound), "");
         Self::separator(menu);
         self.add(menu, "Show Figure", Some(Command::ToggleVisible), "h");
         self.add(menu, "Pause", Some(Command::TogglePaused), "p");
@@ -448,6 +450,8 @@ impl MenuBar {
             Command::ToggleThrowWords,
             settings.throw_words && settings.walk_on_text,
         );
+        self.set_checked(Command::ToggleSpeech, settings.speech);
+        self.set_checked(Command::ToggleSound, settings.sound);
         self.set_checked(Command::ToggleVisible, settings.visible);
         self.set_checked(Command::TogglePaused, settings.paused);
         Self::set_hidden(self.grant_ax, status.accessibility);

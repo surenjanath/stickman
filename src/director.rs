@@ -62,6 +62,8 @@ pub enum Source {
 pub struct Directive {
     pub mode: Mode,
     pub reason: String,
+    /// A short line the figure says out loud (may be empty).
+    pub say: String,
     pub source: Source,
 }
 
@@ -103,7 +105,8 @@ Guidelines: if the figure was hit recently or frustration is high, prefer COMBAT
 If the user is moving the mouse a lot, OBSERVE or COMBAT. If the user has been idle \
 or working quietly for a while, SABOTAGE is fun but don't overdo it. Low health means \
 calm down (IDLE). Vary the behaviour; avoid repeating one state forever.\n\
-Reply with JSON: {\"state\": one of the states, \"reason\": a short in-character reason}.\n\
+Reply with JSON: {\"state\": one of the states, \"reason\": a short in-character reason, \
+\"say\": what the figure says out loud in a speech bubble, at most 6 words, cheeky and in character}.\n\
 Situation: ";
 
 /// Plain-English facts: small models reason far better over these than over
@@ -166,11 +169,12 @@ pub fn build_request(cfg: &Config, obs: &Observation) -> serde_json::Value {
             "type": "object",
             "properties": {
                 "state": {"type": "string", "enum": ["IDLE", "OBSERVE", "SABOTAGE", "COMBAT"]},
-                "reason": {"type": "string"}
+                "reason": {"type": "string"},
+                "say": {"type": "string"}
             },
-            "required": ["state", "reason"]
+            "required": ["state", "reason", "say"]
         },
-        "options": {"temperature": 0.8, "num_predict": 80}
+        "options": {"temperature": 0.8, "num_predict": 100}
     })
 }
 
@@ -184,6 +188,8 @@ struct Decision {
     state: String,
     #[serde(default)]
     reason: String,
+    #[serde(default)]
+    say: String,
 }
 
 /// Parse an Ollama `/api/generate` body into a directive. Tolerates code fences and
@@ -201,39 +207,59 @@ pub fn parse_response(body: &str) -> Result<Directive> {
         serde_json::from_str(inner).with_context(|| format!("bad decision JSON: {inner}"))?;
     let mode = Mode::parse(&d.state).ok_or_else(|| anyhow!("unknown state {:?}", d.state))?;
     let reason: String = d.reason.chars().take(120).collect();
+    let say: String = d.say.trim().trim_matches('"').chars().take(60).collect();
     Ok(Directive {
         mode,
         reason,
+        say,
         source: Source::Llm,
     })
 }
 
 /// Built-in director used when the LLM is unavailable.
 pub fn fallback(obs: &Observation, roll: f32) -> Directive {
-    let (mode, reason) = if obs.agent_health < 35.0 {
-        (Mode::Idle, "too hurt to fight")
+    let (mode, reason, say) = if obs.agent_health < 35.0 {
+        (Mode::Idle, "too hurt to fight", "I need a nap.")
     } else if obs.hits_last_minute >= 2 || obs.agent_frustration > 55.0 {
-        (Mode::Combat, "you hit me, now it's war")
+        (
+            Mode::Combat,
+            "you hit me, now it's war",
+            "That's it. It's on!",
+        )
     } else if obs.mouse_speed_avg > 900.0 {
-        (Mode::Observe, "what are you doing with that mouse?")
+        (
+            Mode::Observe,
+            "what are you doing with that mouse?",
+            "Whoa, easy there.",
+        )
     } else if obs.user_idle_seconds > 20.0 && roll < 0.5 {
-        (Mode::Sabotage, "nobody's looking, time for mischief")
+        (
+            Mode::Sabotage,
+            "nobody's looking, time for mischief",
+            "Nobody's looking…",
+        )
     } else if obs.seconds_in_state > 25.0 {
         match obs.current_state {
-            "IDLE" if roll < 0.4 => (Mode::Sabotage, "bored, let's stomp a window"),
-            "IDLE" => (Mode::Observe, "let's see what you're up to"),
-            _ => (Mode::Idle, "taking a break"),
+            "IDLE" if roll < 0.4 => (Mode::Sabotage, "bored, let's stomp a window", "So bored."),
+            "IDLE" => (
+                Mode::Observe,
+                "let's see what you're up to",
+                "Whatcha doing?",
+            ),
+            _ => (Mode::Idle, "taking a break", "Break time."),
         }
     } else {
         return Directive {
             mode: Mode::parse(obs.current_state).unwrap_or(Mode::Idle),
             reason: "carry on".into(),
+            say: String::new(),
             source: Source::Fallback,
         };
     };
     Directive {
         mode,
         reason: reason.into(),
+        say: say.into(),
         source: Source::Fallback,
     }
 }
@@ -318,11 +344,12 @@ pub fn spawn(
                 }
             };
             log::info!(
-                "director: {} ({:?}, {} ms) \"{}\"",
+                "director: {} ({:?}, {} ms) \"{}\" says \"{}\"",
                 d.mode.as_str(),
                 d.source,
                 started.elapsed().as_millis(),
-                d.reason
+                d.reason,
+                d.say
             );
             if tx.send(d).is_err() {
                 return;
@@ -390,12 +417,15 @@ mod tests {
 
     #[test]
     fn parses_structured_output() {
-        let body = r#"{"model":"x","response":"{\"state\":\"COMBAT\",\"reason\":\"you poked me\"}","done":true}"#;
+        let body = r#"{"model":"x","response":"{\"state\":\"COMBAT\",\"reason\":\"you poked me\",\"say\":\"Put 'em up!\"}","done":true}"#;
         let d = parse_response(body).unwrap();
         assert_eq!(
-            (d.mode, d.reason.as_str(), d.source),
-            (Mode::Combat, "you poked me", Source::Llm)
+            (d.mode, d.reason.as_str(), d.say.as_str(), d.source),
+            (Mode::Combat, "you poked me", "Put 'em up!", Source::Llm)
         );
+        // Older models may leave `say` out.
+        let body = r#"{"response":"{\"state\":\"IDLE\",\"reason\":\"meh\"}"}"#;
+        assert_eq!(parse_response(body).unwrap().say, "");
     }
 
     #[test]

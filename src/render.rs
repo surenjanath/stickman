@@ -431,6 +431,11 @@ impl Renderer {
         self.sprites.remove(&id);
     }
 
+    /// Backing pixels per point.
+    pub fn scale_factor(&self) -> f64 {
+        self.window.scale_factor()
+    }
+
     pub fn sprite_count(&self) -> usize {
         self.sprites.len()
     }

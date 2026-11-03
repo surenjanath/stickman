@@ -101,6 +101,10 @@ pub struct Settings {
     /// Let the figure rip words off the screen and throw them (they look missing
     /// until the page changes).
     pub throw_words: bool,
+    /// Show speech bubbles.
+    pub speech: bool,
+    /// Play sound effects.
+    pub sound: bool,
     pub visible: bool,
     pub paused: bool,
 }
@@ -114,6 +118,8 @@ impl Default for Settings {
             window_shake: true,
             walk_on_text: true,
             throw_words: true,
+            speech: true,
+            sound: true,
             visible: true,
             paused: false,
         }
@@ -129,6 +135,8 @@ pub enum Command {
     ToggleWindowShake,
     ToggleWalkOnText,
     ToggleThrowWords,
+    ToggleSpeech,
+    ToggleSound,
     ToggleVisible,
     TogglePaused,
     Respawn,
@@ -153,6 +161,8 @@ impl Command {
             Command::ToggleVisible => 303,
             Command::TogglePaused => 304,
             Command::ToggleThrowWords => 305,
+            Command::ToggleSpeech => 306,
+            Command::ToggleSound => 307,
             Command::Respawn => 400,
             Command::OpenAccessibilitySettings => 500,
             Command::OpenScreenRecordingSettings => 501,
@@ -170,6 +180,8 @@ impl Command {
             303 => Command::ToggleVisible,
             304 => Command::TogglePaused,
             305 => Command::ToggleThrowWords,
+            306 => Command::ToggleSpeech,
+            307 => Command::ToggleSound,
             400 => Command::Respawn,
             500 => Command::OpenAccessibilitySettings,
             501 => Command::OpenScreenRecordingSettings,
@@ -191,6 +203,8 @@ impl Settings {
             Command::ToggleWindowShake => self.window_shake = !self.window_shake,
             Command::ToggleWalkOnText => self.walk_on_text = !self.walk_on_text,
             Command::ToggleThrowWords => self.throw_words = !self.throw_words,
+            Command::ToggleSpeech => self.speech = !self.speech,
+            Command::ToggleSound => self.sound = !self.sound,
             Command::ToggleVisible => self.visible = !self.visible,
             Command::TogglePaused => self.paused = !self.paused,
             _ => {}
@@ -256,6 +270,8 @@ mod tests {
             Command::ToggleWindowShake,
             Command::ToggleWalkOnText,
             Command::ToggleThrowWords,
+            Command::ToggleSpeech,
+            Command::ToggleSound,
             Command::ToggleVisible,
             Command::TogglePaused,
             Command::Respawn,

@@ -38,6 +38,7 @@ use stickman::particles::Particles;
 use stickman::physics::{window_platforms, Platform, World};
 use stickman::render::{DrawList, Renderer};
 use stickman::settings::{Behaviour, Command, Settings};
+use stickman::speech::{Moment, Priority, Speech};
 use stickman::stickman::{Segment, BONES, WALKER_RGB};
 use stickman::windows::{self, Snapshot};
 use stickman::words::{WordEvent, WordPlay};
@@ -151,6 +152,9 @@ impl ClickIntent {
     }
 }
 
+/// Minimum gap between director remarks that don't come with a mood change.
+const DIRECTOR_CHATTER: Duration = Duration::from_secs(20);
+
 /// Minimum time in a mode before the director may change it, so behaviour reads
 /// as a mood rather than jitter.
 const MIN_MODE_DWELL: Duration = Duration::from_secs(12);
@@ -182,6 +186,8 @@ struct Scene {
     ocr_tx: Option<Sender<ocr::Job>>,
     ocr_rx: Receiver<ocr::Output>,
     words: WordPlay,
+    speech: Speech,
+    last_director_line: Instant,
     ocr_target: Option<ocr::Request>,
     ocr_candidate: Option<ocr::Request>,
     ocr_candidate_since: Instant,
@@ -362,7 +368,24 @@ impl Scene {
                 );
                 self.mode = d.mode;
                 self.mode_since = Instant::now();
+                // Announce the new mood.
+                let line = if d.say.is_empty() { &d.reason } else { &d.say };
+                let lines = self.speech.say(line, Priority::Director);
+                self.speak(lines);
+                self.last_director_line = Instant::now();
+            } else if !d.say.is_empty()
+                && self.last_director_line.elapsed() > DIRECTOR_CHATTER
+                && (self.seed >> 33) % 4 == 0
+            {
+                // Now and then, a remark without a change of mood.
+                let lines = self.speech.say(&d.say, Priority::Director);
+                self.speak(lines);
+                self.last_director_line = Instant::now();
             }
+            self.seed = self
+                .seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
         }
         let now = Instant::now();
         while self
@@ -391,6 +414,34 @@ impl Scene {
         });
     }
 
+    /// Rasterise and show lines accepted by [`Speech`] (no-op when bubbles are off).
+    fn speak(&mut self, lines: Option<Vec<String>>) {
+        let Some(lines) = lines else { return };
+        if !self.settings.speech {
+            self.speech.clear();
+            return;
+        }
+        log::info!("speech: \"{}\"", lines.join(" "));
+        let scale = self.renderer.scale_factor();
+        let Some(img) = stickman::text::render_lines(&lines, 13.0, [0.1, 0.1, 0.1], scale) else {
+            return;
+        };
+        if let Some(id) = self
+            .renderer
+            .create_sprite(&img.rgba, img.width, img.height)
+        {
+            self.speech.attach(id, v2(img.size_pt.0, img.size_pt.1));
+            self.shown = None;
+        }
+    }
+
+    fn quip(&mut self, m: Moment) {
+        if self.settings.speech {
+            let lines = self.speech.quip(m);
+            self.speak(lines);
+        }
+    }
+
     /// A grabbed word's pixels arrived from the OCR worker.
     fn word_captured(&mut self, g: ocr::GrabResult) {
         let (sprite, bg) = match &g.cutout {
@@ -413,6 +464,7 @@ impl Scene {
         {
             log::info!("event: ripped a word off the screen");
             self.shown = None;
+            self.quip(Moment::GrabbedWord);
         } else {
             log::debug!("grab fizzled (busy background or capture failed)");
             if let Some(id) = sprite {
@@ -449,6 +501,9 @@ impl Scene {
                     self.particles.explosion(at, -dir);
                     self.hits.push_back(Instant::now());
                     log::info!("event: knockback (health {:.0})", self.agent.health);
+                    if self.agent.health > 0.0 {
+                        self.quip(Moment::Hit);
+                    }
                 }
                 Event::StruckCursor { at, dir } => {
                     self.particles.sparks(at, dir, 18);
@@ -456,6 +511,7 @@ impl Scene {
                         self.cursor.push(dir * CURSOR_PUSH, size);
                     }
                     log::info!("event: struck cursor");
+                    self.quip(Moment::StruckCursor);
                 }
                 Event::Dust { at, strength } => self.particles.dust(at, strength),
                 Event::Jumped { at } => self.particles.dust(at, 0.2),
@@ -470,6 +526,7 @@ impl Scene {
                         }
                     }
                     log::info!("event: stomp on window {window}");
+                    self.quip(Moment::Stomp);
                 }
                 Event::Grabbed { id } => match self.words.grabbed(id) {
                     Some(need) => {
@@ -490,11 +547,15 @@ impl Scene {
                     }
                     None => self.agent.holding = false, // nothing there after all
                 },
-                Event::Threw { from, vel } => self.words.threw(from, vel),
+                Event::Threw { from, vel } => {
+                    self.words.threw(from, vel);
+                    self.quip(Moment::ThrewWord);
+                }
                 Event::Dropped { at } => self.words.dropped(at),
                 Event::KnockedOut { .. } => {
                     self.particles.stars(self.agent.head());
                     log::info!("event: knocked out");
+                    self.quip(Moment::KnockedOut);
                 }
             }
         }
@@ -572,6 +633,10 @@ impl Scene {
             if env_flag("STICKMAN_DEBUG_OPEN_MENU") {
                 self.menubar.open();
             }
+            if let Ok(line) = std::env::var("STICKMAN_DEBUG_SAY") {
+                let lines = self.speech.say(&line, Priority::Event);
+                self.speak(lines);
+            }
         }
     }
 
@@ -586,6 +651,10 @@ impl Scene {
             // nothing (or keep the last frame when paused).
             self.overlay.set_click_through(true);
             self.busy = false;
+            if !self.settings.visible {
+                self.speech.clear();
+                self.free_speech_sprites();
+            }
             self.last_tick = Instant::now();
             self.accumulator = 0.0;
             if !self.settings.visible && self.shown.is_some() {
@@ -656,6 +725,7 @@ impl Scene {
             };
             self.agent.update(&senses, &self.world, &mut events);
             self.particles.update(FIXED_DT);
+            self.speech.update(FIXED_DT);
             let (we, fr) = self.words.update(
                 FIXED_DT,
                 self.cursor.pos,
@@ -669,6 +739,10 @@ impl Scene {
         }
         self.handle(&events);
         self.handle_word_events(&word_events, &freed);
+        if !self.settings.speech {
+            self.speech.clear();
+        }
+        self.free_speech_sprites();
 
         // PRD 3.1: intercept clicks only while the user is aiming at the figure.
         let over = self.agent.hit_test(self.cursor.pos);
@@ -703,15 +777,28 @@ impl Scene {
             || !self.particles.is_empty()
             || self.agent.since_hit() < 4.0
             || !self.agent.action.is_still()
-            || self.words.animating();
+            || self.words.animating()
+            || self.speech.visible();
         self.present();
         true
     }
 
+    fn free_speech_sprites(&mut self) {
+        let retired = self.speech.take_retired();
+        if !retired.is_empty() {
+            self.shown = None;
+        }
+        for id in retired {
+            self.renderer.free_sprite(id);
+        }
+    }
+
     fn present(&mut self) {
         let segments = self.agent.segments();
-        let effects =
-            !self.particles.is_empty() || self.agent.since_hit() < 4.0 || self.words.animating();
+        let effects = !self.particles.is_empty()
+            || self.agent.since_hit() < 4.0
+            || self.words.animating()
+            || self.speech.visible();
         if let Some(shown) = &self.shown {
             if !effects
                 && !shown.had_effects
@@ -727,6 +814,13 @@ impl Scene {
         self.draw.figure(&segments, WALKER_RGB);
         self.particles.draw(&mut self.draw);
         self.health_bar();
+        let head_r = 22.0 * self.agent.scale;
+        self.speech.draw(
+            &mut self.draw,
+            self.agent.head(),
+            head_r,
+            (8.0, self.display.width as f32 - 8.0, 40.0),
+        );
         if !self.renderer.render(&self.draw) {
             // Not on screen (occluded/timeout): don't record it, or a still figure
             // might never be drawn at all.
@@ -926,6 +1020,8 @@ impl App {
             ocr_tx,
             ocr_rx,
             words: WordPlay::new(seed ^ 0x5157),
+            speech: Speech::new(seed ^ 0x7A11),
+            last_director_line: now,
             ocr_target: None,
             ocr_candidate: None,
             ocr_candidate_since: now,
