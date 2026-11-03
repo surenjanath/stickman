@@ -1749,6 +1749,7 @@ impl Scene {
                 .as_ref()
                 .is_some_and(|r| r.agent.hit_test(self.cursor.pos));
         let catch = self.intent.update(over, cursor_moved, Instant::now());
+
         // Keep catching mouse events for the whole press, so the drag and the
         // release reach us.
         let through =
@@ -2388,8 +2389,10 @@ impl ApplicationHandler for App {
         match event {
             WindowEvent::CloseRequested | WindowEvent::Destroyed => event_loop.exit(),
             WindowEvent::Resized(size) => scene.renderer.resize(id, size.width, size.height),
+            // Finish draw mode on the right button's release, so neither half
+            // of the click leaks through to the app underneath.
             WindowEvent::MouseInput {
-                state: ElementState::Pressed,
+                state: ElementState::Released,
                 button: MouseButton::Right,
                 ..
             } if scene.drawing.is_some() => scene.end_drawing(),
