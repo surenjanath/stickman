@@ -466,6 +466,12 @@ impl MenuBar {
             Some(Command::ToggleThrowWords),
             "",
         );
+        self.add(
+            menu,
+            "Rip Icons Off the Dock & Throw Them",
+            Some(Command::TogglePeltIcons),
+            "",
+        );
         let stay = self.submenu(menu, "Thrown Words Stay");
         for w in WordStay::ALL {
             self.add(stay, w.label(), Some(Command::SetWordStay(w)), "");

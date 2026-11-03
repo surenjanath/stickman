@@ -117,7 +117,7 @@ launching terminal.
 | `STICKMAN_OLLAMA_URL` | Ollama URL (default `http://localhost:11434`). |
 | `STICKMAN_DIRECTOR_INTERVAL_S` | Seconds between director decisions (default 4). |
 | `STICKMAN_NO_CURSOR_PUSH=1` | Punches don't move your pointer. |
-| `STICKMAN_NO_WINDOW_SHAKE=1` | Stomps don't move your windows. |
+| `STICKMAN_NO_WINDOW_SHAKE=1` | Nothing moves your windows (no shakes, shoves or throws). |
 | `STICKMAN_NO_OCR=1` | Don't read screen text (no walking on text). |
 | `STICKMAN_NO_PROMPTS=1` | Never show macOS permission dialogs. |
 | `STICKMAN_NO_SOUND=1` | No sound effects. |

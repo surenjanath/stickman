@@ -35,6 +35,9 @@ pub struct ScreenWord {
     pub line_y: f32,
 }
 
+/// The `window` of Dock icons (they belong to no app window).
+pub const ICON_WINDOW: u32 = u32::MAX;
+
 /// Where a word was ripped out: painted over with the page colour.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Hole {
@@ -105,6 +108,13 @@ pub struct CaptureNeeded {
     pub window: u32,
 }
 
+impl CaptureNeeded {
+    /// A Dock icon rather than a word.
+    pub fn is_icon(&self) -> bool {
+        self.window == ICON_WINDOW
+    }
+}
+
 #[derive(Default)]
 pub struct WordPlay {
     words: Vec<ScreenWord>,
@@ -115,10 +125,16 @@ pub struct WordPlay {
     /// Chosen ammo (stable across ticks): (ammo, exact rect to rip, window, age).
     target: Option<(Ammo, Rect, u32, f32)>,
     pending: Option<CaptureNeeded>,
+    /// Seconds the pending capture has been waiting.
+    pending_age: f32,
     pending_throw: Option<(V2, V2)>,
     rng: u64,
     /// How long landed words stay before fading; `None` keeps them for good.
     pub rest_time: Option<f32>,
+    /// Dock icons the figure can rip up (when it stands on the Dock).
+    icons: Vec<ScreenWord>,
+    /// Icons thrown lately (rect, seconds ago): it picks others for a while.
+    used_icons: Vec<(Rect, f32)>,
     /// Telekinesis: captures still on their way, and words in orbit.
     tk_pending: Vec<CaptureNeeded>,
     pub hovering: Vec<Hover>,
@@ -244,6 +260,16 @@ impl WordPlay {
         }
     }
 
+    /// Carrying something, or waiting for its pixels.
+    pub fn holding_anything(&self) -> bool {
+        self.carried.is_some() || self.pending.is_some()
+    }
+
+    /// The capture on its way for `id` is a Dock icon.
+    pub fn pending_icon(&self, id: u64) -> bool {
+        self.pending.is_some_and(|p| p.id == id && p.is_icon())
+    }
+
     pub fn tk_active(&self) -> bool {
         !self.hovering.is_empty() || !self.tk_pending.is_empty()
     }
@@ -289,13 +315,51 @@ impl WordPlay {
             }
         }
         self.words = out;
-        // The chosen target may be gone or renumbered: choose again.
-        self.target = None;
+        // A word target may be gone or renumbered: choose again.
+        if self.target.is_some_and(|t| t.2 != ICON_WINDOW) {
+            self.target = None;
+        }
+    }
+
+    /// Dock icons (global rects) and the floor line each sits under. Icons
+    /// that didn't move keep their ids, so a chosen target stays valid.
+    pub fn set_icons(&mut self, icons: &[(Rect, f32)]) {
+        let mut out = Vec::with_capacity(icons.len());
+        for (rect, floor) in icons {
+            if self.used_icons.iter().any(|(r, _)| r == rect) {
+                continue; // thrown lately: give the others a turn
+            }
+            let id = match self.icons.iter().find(|i| i.rect == *rect) {
+                Some(i) => i.id,
+                None => {
+                    self.next_id += 1;
+                    self.next_id
+                }
+            };
+            out.push(ScreenWord {
+                id,
+                rect: *rect,
+                chars: 0,
+                window: ICON_WINDOW,
+                line_y: *floor,
+            });
+        }
+        self.icons = out;
+        if self
+            .target
+            .is_some_and(|t| t.2 == ICON_WINDOW && !self.icons.iter().any(|i| i.id == t.0.id))
+        {
+            log::debug!("icons: target gone after a Dock re-read");
+            self.target = None;
+        }
     }
 
     pub fn clear_words(&mut self) {
         self.words.clear();
-        self.target = None;
+        // An icon target stays: icons aren't words.
+        if self.target.is_some_and(|t| t.2 != ICON_WINDOW) {
+            self.target = None;
+        }
     }
 
     /// Ammo for the figure: a whole word on the active
@@ -313,21 +377,28 @@ impl WordPlay {
         }
         if let Some((a, _, win, age)) = &mut self.target {
             *age += dt;
-            if Some(*win) == active && *age < 10.0 {
+            if (*win == ICON_WINDOW || Some(*win) == active) && *age < 10.0 {
                 return Some(*a);
             }
             self.target = None;
         }
-        let active = active?;
+        // Words on the line underfoot (or Dock icons under the floor it
+        // stands on) first, then the nearest.
         let on_line = |w: &ScreenWord| {
-            ground.is_some_and(|g| g.kind == PlatformKind::Text && (g.y - w.line_y).abs() < 2.0)
+            ground.is_some_and(|g| {
+                matches!(g.kind, PlatformKind::Text | PlatformKind::Ground)
+                    && (g.y - w.line_y).abs() < 2.0
+                    && g.contains_x(center(&w.rect).x)
+            })
         };
         let best = self
             .words
             .iter()
             .filter(|w| {
-                w.window == active && !self.holes.iter().any(|h| overlaps(&h.rect, &w.rect) > 0.3)
+                Some(w.window) == active
+                    && !self.holes.iter().any(|h| overlaps(&h.rect, &w.rect) > 0.3)
             })
+            .chain(self.icons.iter())
             .min_by(|a, b| {
                 let score = |w: &ScreenWord| {
                     let d = (center(&w.rect) - figure).length();
@@ -358,8 +429,13 @@ impl WordPlay {
             return None;
         }
         self.words.retain(|w| w.id != id);
+        if self.icons.iter().any(|w| w.id == id) {
+            self.used_icons.push((rect, 0.0));
+        }
+        self.icons.retain(|w| w.id != id);
         let need = CaptureNeeded { id, rect, window };
         self.pending = Some(need);
+        self.pending_age = 0.0;
         Some(need)
     }
 
@@ -406,6 +482,19 @@ impl WordPlay {
         };
         self.pending = None;
         let Some(sprite) = sprite else { return false };
+        if need.is_icon() {
+            // A copy of the icon: the Dock keeps its own.
+            let half = v2(need.rect.width as f32 / 2.0, need.rect.height as f32 / 2.0);
+            let carried = Carried { sprite, half };
+            if let Some((from, vel)) = self.pending_throw.take() {
+                self.launch(carried, from, vel);
+            } else if holding {
+                self.carried = Some(carried);
+            } else {
+                self.launch(carried, hands, v2(0.0, -80.0));
+            }
+            return true;
+        }
         self.holes.push(Hole {
             rect: need.rect,
             color: background.map(|c| f32::from(c) / 255.0),
@@ -480,6 +569,18 @@ impl WordPlay {
     ) -> (Vec<WordEvent>, Vec<u32>) {
         let mut events = Vec::new();
         let mut freed = Vec::new();
+        for (_, age) in &mut self.used_icons {
+            *age += dt;
+        }
+        self.used_icons.retain(|(_, age)| *age < 30.0);
+        // Give up on a capture that never arrives (worker busy or missing).
+        if self.pending.is_some() {
+            self.pending_age += dt;
+            if self.pending_age > 3.0 {
+                self.pending = None;
+                self.pending_throw = None;
+            }
+        }
         for h in &mut self.holes {
             h.age += dt;
         }
@@ -962,6 +1063,40 @@ mod tests {
         assert_eq!(p.projectiles.len(), 1, "falls instead of vanishing");
         // The other capture arriving late is not lifted.
         assert!(!p.captured(needs[1].id, Some(2), [255; 3], wr, false, V2::ZERO));
+    }
+
+    #[test]
+    fn dock_icons_underfoot_become_ammo_without_holes() {
+        let mut p = WordPlay::new(4);
+        let ground = Platform::ground(1800.0, 1100.0);
+        let icon = r(700.0, 1102.0, 40.0, 40.0);
+        p.set_icons(&[(icon, 1100.0), (r(760.0, 1102.0, 40.0, 40.0), 1100.0)]);
+        let a = p
+            .ammo(0.016, v2(705.0, 1100.0), Some(ground), None)
+            .expect("an icon");
+        assert!((a.at - v2(720.0, 1122.0)).length() < 1.0);
+        assert_eq!(a.line_y, 1100.0);
+        // Re-reading the Dock keeps the id while the icon stays put.
+        p.set_icons(&[(icon, 1100.0), (r(760.0, 1102.0, 40.0, 40.0), 1100.0)]);
+        let need = p.grabbed(a.id).expect("capture needed");
+        assert!(need.is_icon());
+        assert!(p.captured(a.id, Some(9), [0; 3], r(0.0, 0.0, 1.0, 1.0), true, V2::ZERO));
+        assert!(p.holes.is_empty(), "no hole in the Dock");
+        assert!(p.carried.is_some());
+        // Words on the line underfoot still beat icons further away.
+        let mut q = play_with_words();
+        q.set_icons(&[(icon, 1100.0)]);
+        let line = Platform {
+            x0: 100.0,
+            x1: 900.0,
+            y: 400.0,
+            kind: PlatformKind::Text,
+            owner: WIN,
+        };
+        let a = q
+            .ammo(0.016, v2(150.0, 400.0), Some(line), Some(WIN))
+            .unwrap();
+        assert_eq!(a.line_y, 400.0, "picked the word underfoot");
     }
 
     #[test]

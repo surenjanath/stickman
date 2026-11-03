@@ -505,6 +505,8 @@ pub struct Agent {
     super_air: bool,
     /// Seconds until telekinesis can be used again.
     tk_cooldown: f32,
+    /// Seconds until the next super jump at the cursor.
+    super_cooldown: f32,
     /// Where telekinesis is aimed (the cursor).
     tk_aim: V2,
     /// The second scripted moment of the current action happened.
@@ -566,6 +568,7 @@ impl Agent {
             bounces: 0,
             super_air: false,
             tk_cooldown: 1.5,
+            super_cooldown: 0.0,
             tk_aim: V2::ZERO,
             act_fired2: false,
             pet: 0.0,
@@ -1094,6 +1097,7 @@ impl Agent {
     fn act(&mut self, s: &Senses, world: &World, events: &mut Vec<Event>) {
         self.pet_cooldown -= FIXED_DT;
         self.tk_cooldown -= FIXED_DT;
+        self.super_cooldown -= FIXED_DT;
         self.tk_aim = s.cursor;
         // Asleep: wake up when the user is back, or a fight starts.
         if matches!(self.action, Action::Sleep | Action::LieDown)
@@ -1631,7 +1635,8 @@ impl Agent {
                     // Cursor above punching reach: leap at it (and flying-kick it).
                     // Way up high: a super jump, with powers.
                     let high = self.pos.y - s.cursor.y > MAX_JUMP_RISE;
-                    let max = if self.traits.powers {
+                    let super_ready = self.traits.powers && self.super_cooldown <= 0.0;
+                    let max = if super_ready {
                         SUPER_RISE
                     } else {
                         MAX_JUMP_RISE
@@ -1639,7 +1644,8 @@ impl Agent {
                     let rise = (self.pos.y - s.cursor.y).min(max);
                     self.attack_cooldown = 1.2;
                     let target = v2(s.cursor.x, self.pos.y - rise + 40.0);
-                    if high && self.traits.powers {
+                    if high && super_ready {
+                        self.super_cooldown = 6.0;
                         self.super_jump_to(target);
                     } else {
                         self.jump_to(target);
@@ -1703,7 +1709,8 @@ impl Agent {
             return false;
         };
         let dx = a.at.x - self.pos.x;
-        let on_line = ground.kind == PlatformKind::Text
+        // On the word's line (or on the Dock, over the icon).
+        let on_line = matches!(ground.kind, PlatformKind::Text | PlatformKind::Ground)
             && (ground.y - a.line_y).abs() < 2.0
             && ground.contains_x(a.at.x);
         if on_line {

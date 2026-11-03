@@ -13,8 +13,9 @@
 //! - `STICKMAN_MODE=IDLE|OBSERVE|SABOTAGE|COMBAT`: force a mode; the director is off.
 //! - `STICKMAN_HOLD_IDLE=1`: stand still (used to measure idle CPU).
 //! - `STICKMAN_CLICK_THROUGH=0`: the overlay catches every click (blocks the screen).
-//! - `STICKMAN_NO_CURSOR_PUSH=1`, `STICKMAN_NO_WINDOW_SHAKE=1`, `STICKMAN_NO_OCR=1`: disable
-//!   the effects that touch the user's cursor, windows or screen contents.
+//! - `STICKMAN_NO_CURSOR_PUSH=1`, `STICKMAN_NO_WINDOW_SHAKE=1` (also no window
+//!   shoves or throws), `STICKMAN_NO_OCR=1`: disable the effects that touch the
+//!   user's cursor, windows or screen contents.
 //! - `STICKMAN_NO_PROMPTS=1`: don't show macOS permission dialogs.
 //! - `STICKMAN_NO_SOUND=1`: no sound effects.
 //! - `STICKMAN_NO_INTRO=1`: skip the jail-break intro.
@@ -318,6 +319,11 @@ struct Scene {
     os_tx: Sender<OsAction>,
     /// Moves the active window while it's thrown.
     mover: macos::WindowMover,
+    /// Accessibility lookups (Dock icons, scrollbars) on a worker thread.
+    ax_tx: Sender<macos::AxQuery>,
+    ax_rx: Receiver<macos::AxAnswer>,
+    dock_pid: Option<i64>,
+    dock_polled: Instant,
     flight: Option<WindowFlight>,
     force_catch_clicks: bool,
     // Input bookkeeping.
@@ -563,11 +569,28 @@ impl Scene {
             .get(self.layout.index_at(c))
             .or(self.overlays.first())
             .map_or(0, |o| o.state().window_number as u32);
+        // Dock icons: a square from the middle of the item, inset to the
+        // artwork (the Dock's own background shows around it).
+        let (global, cut) = if need.is_icon() {
+            let side = need.rect.width.min(need.rect.height) * 0.84;
+            (
+                Rect {
+                    x: need.rect.x + (need.rect.width - side) / 2.0,
+                    y: need.rect.y + (need.rect.height - side) / 2.0,
+                    width: side,
+                    height: side,
+                },
+                ocr::Cut::Icon,
+            )
+        } else {
+            (need.rect, ocr::Cut::Keyed)
+        };
         let job = ocr::GrabRequest {
             id: need.id,
             window: need.window,
             below,
-            global: need.rect,
+            global,
+            cut,
         };
         if let Some(tx) = &self.ocr_tx {
             let _ = tx.send(ocr::Job::Grab(job));
@@ -868,6 +891,40 @@ impl Scene {
         }
     }
 
+    /// Re-read the Dock's icons every few seconds (off the main thread), and
+    /// take in the answers.
+    fn poll_dock(&mut self) {
+        while let Ok(a) = self.ax_rx.try_recv() {
+            if let macos::AxAnswer::DockIcons(icons) = a {
+                let mut near = Vec::new();
+                for i in icons {
+                    let c = v2(
+                        (i.rect.x + i.rect.width / 2.0) as f32,
+                        (i.rect.y + i.rect.height / 2.0) as f32,
+                    );
+                    let screen = self.layout.screen_at(c);
+                    // Only icons right under a floor line (a bottom Dock).
+                    if (i.rect.y as f32 - screen.ground_y).abs() < 25.0 {
+                        near.push((i.rect, screen.ground_y));
+                    }
+                }
+                if self.settings.pelt_icons {
+                    self.words.set_icons(&near);
+                }
+            }
+        }
+        if !self.settings.pelt_icons || !self.accessibility {
+            self.words.set_icons(&[]);
+            return;
+        }
+        if let Some(pid) = self.dock_pid {
+            if self.dock_polled.elapsed() > Duration::from_secs(3) {
+                self.dock_polled = Instant::now();
+                let _ = self.ax_tx.send(macos::AxQuery::DockIcons { dock_pid: pid });
+            }
+        }
+    }
+
     /// Advance a thrown window and move the real one along.
     fn fly_window(&mut self, dt: f32) {
         let Some(f) = &mut self.flight else { return };
@@ -1014,13 +1071,19 @@ impl Scene {
             height: 0.0,
         });
         let hands = self.agent.hands();
+        let icon = self.words.pending_icon(g.id);
         if self
             .words
             .captured(g.id, sprite, bg, window_rect, self.agent.holding, hands)
         {
-            log::info!("event: ripped a word off the screen");
+            if icon {
+                log::info!("event: ripped an icon off the Dock");
+                self.quip(Moment::GrabbedIcon);
+            } else {
+                log::info!("event: ripped a word off the screen");
+                self.quip(Moment::GrabbedWord);
+            }
             self.shown = None;
-            self.quip(Moment::GrabbedWord);
             self.sfx(Sfx::Pop, 0.6, self.agent.hands());
         } else {
             log::debug!("grab fizzled (busy background or capture failed)");
@@ -1680,9 +1743,14 @@ impl Scene {
         let mut events = Vec::new();
         let mut word_events = Vec::new();
         let mut freed = Vec::new();
-        let wants_ammo = self.settings.throw_words
-            && self.settings.walk_on_text
+        let wants_ammo = ((self.settings.throw_words && self.settings.walk_on_text)
+            || self.settings.pelt_icons)
             && matches!(self.mode, Mode::Combat | Mode::Sabotage);
+        self.poll_dock();
+        // A capture that never came back: let go of nothing.
+        if self.agent.holding && !self.words.holding_anything() {
+            self.agent.holding = false;
+        }
         let mut jail_cues = Vec::new();
         let mut rival_events = Vec::new();
         let mut rival_cues = Vec::new();
@@ -2263,7 +2331,10 @@ impl App {
             settings.cursor_push = false;
         }
         if env_flag("STICKMAN_NO_WINDOW_SHAKE") {
+            // No effects on the user's windows at all: shakes, shoves, throws.
             settings.window_shake = false;
+            settings.window_shoves = false;
+            settings.throw_windows = false;
         }
         if env_flag("STICKMAN_NO_OCR") {
             settings.walk_on_text = false;
@@ -2306,7 +2377,8 @@ impl App {
         // Permissions: Accessibility (window shakes) and Screen Recording (OCR).
         let prompts = !env_flag("STICKMAN_NO_PROMPTS");
         let ax = macos::accessibility_trusted(prompts);
-        let ocr_wanted = settings.walk_on_text;
+        // The capture worker reads text and also grabs words and icons.
+        let ocr_wanted = settings.walk_on_text || settings.pelt_icons;
         let mut ocr_allowed = ocr_wanted && ocr::screen_capture_allowed();
         if ocr_wanted && !ocr_allowed && prompts {
             ocr_allowed = ocr::request_screen_capture();
@@ -2378,6 +2450,7 @@ impl App {
         );
 
         let now = Instant::now();
+        let (ax_tx, ax_rx) = macos::spawn_ax_queries();
         self.scene = Some(Scene {
             overlays,
             renderer,
@@ -2433,6 +2506,10 @@ impl App {
             seed,
             os_tx: macos::os_actions(),
             mover: macos::WindowMover::spawn(),
+            ax_tx,
+            ax_rx,
+            dock_pid: if ax { macos::dock_pid() } else { None },
+            dock_polled: now - Duration::from_secs(10),
             flight: None,
             force_catch_clicks: !self.click_through,
             pending_click: false,

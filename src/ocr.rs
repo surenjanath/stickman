@@ -67,6 +67,40 @@ pub struct GrabRequest {
     pub below: u32,
     /// Region in global CoreGraphics points.
     pub global: Rect,
+    /// How to cut it out.
+    pub cut: Cut,
+}
+
+/// How a grabbed region is cut out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Cut {
+    /// A word: the page colour is keyed out so only the glyphs fly.
+    #[default]
+    Keyed,
+    /// An app icon: a rounded square, as is.
+    Icon,
+    /// A rectangle as is (a scrollbar, say).
+    Plain,
+}
+
+/// Round the corners of an RGBA image (premultiplied): an app-icon shape.
+pub fn round_corners(rgba: &mut [u8], w: u32, h: u32, radius: f32) {
+    let (wf, hf) = (w as f32, h as f32);
+    for y in 0..h {
+        for x in 0..w {
+            let (px, py) = (x as f32 + 0.5, y as f32 + 0.5);
+            let cx = px.clamp(radius, wf - radius);
+            let cy = py.clamp(radius, hf - radius);
+            let d = ((px - cx).powi(2) + (py - cy).powi(2)).sqrt();
+            let a = (radius + 0.5 - d).clamp(0.0, 1.0);
+            if a < 1.0 {
+                let i = ((y * w + x) * 4) as usize;
+                for c in &mut rgba[i..i + 4] {
+                    *c = (f32::from(*c) * a) as u8;
+                }
+            }
+        }
+    }
 }
 
 /// Premultiplied RGBA pixels of a grabbed word with its background keyed out.
@@ -414,6 +448,27 @@ pub fn key_out(rgba: &[u8], w: u32, h: u32) -> Option<Cutout> {
 pub const GRAB_PAD_Y: f64 = 3.0;
 
 fn grab(req: GrabRequest) -> GrabResult {
+    if req.cut != Cut::Keyed {
+        // Icons and scrollbars: the pixels as they are.
+        let captured = capture_region(req.window, req.below, req.global);
+        let cutout = captured.and_then(|img| {
+            let decoded = to_rgba(&img);
+            drop(img); // release the capture right away (claude.md rule 4)
+            decoded.map(|(mut rgba, w, h)| {
+                if req.cut == Cut::Icon {
+                    let r = 0.23 * w.min(h) as f32;
+                    round_corners(&mut rgba, w, h, r);
+                }
+                Cutout {
+                    rgba,
+                    width: w,
+                    height: h,
+                    background: [0; 3],
+                }
+            })
+        });
+        return GrabResult { id: req.id, cutout };
+    }
     let padded = Rect {
         y: req.global.y - GRAB_PAD_Y,
         height: req.global.height + 2.0 * GRAB_PAD_Y,
@@ -506,6 +561,18 @@ pub fn spawn_worker(rx: Receiver<Job>, tx: Sender<Output>) -> JoinHandle<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn icon_corners_are_rounded_and_the_middle_kept() {
+        let (w, h) = (40u32, 40u32);
+        let mut rgba = vec![255u8; (w * h * 4) as usize];
+        round_corners(&mut rgba, w, h, 9.0);
+        assert_eq!(rgba[3], 0, "corner pixel cleared");
+        let mid = ((20 * w + 20) * 4 + 3) as usize;
+        assert_eq!(rgba[mid], 255);
+        let edge = ((20 * w) * 4 + 3) as usize;
+        assert_eq!(rgba[edge], 255, "straight edges untouched");
+    }
 
     #[test]
     fn converts_vision_boxes_to_platform_tops() {

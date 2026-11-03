@@ -55,6 +55,7 @@ pub enum Moment {
     /// Hit by the rival.
     Struck,
     MindWindow,
+    GrabbedIcon,
 }
 
 /// Words the bleep filter hides (whole words, any case).
@@ -142,6 +143,7 @@ impl Moment {
             Moment::MindWords => &["Eat words, jerk!", "Incoming, dammit!"],
             Moment::Struck => &["Son of a—!", "You little sh—!", "Damn, that hurt!"],
             Moment::MindWindow => &["Catch this damn window!", "Your window's going for a ride!"],
+            Moment::GrabbedIcon => &["Eat this damn app!", "Hell yeah, an icon!"],
         }
     }
 
@@ -202,6 +204,14 @@ impl Moment {
             Moment::MindWindow => (
                 &["Behold, your window!", "Up you go!", "Window, take flight!"],
                 1.0,
+            ),
+            Moment::GrabbedIcon => (
+                &[
+                    "Ooh, shiny icon!",
+                    "Your app is mine!",
+                    "Catch, it's an app!",
+                ],
+                0.7,
             ),
         }
     }

@@ -303,6 +303,10 @@ impl SettingsWindow {
             "Rip words off the screen & throw them",
             Command::ToggleThrowWords,
         );
+        let icons = self.check(
+            "Rip icons off the Dock & throw them",
+            Command::TogglePeltIcons,
+        );
         let stay = self.popup(
             WordStay::ALL
                 .iter()
@@ -329,6 +333,7 @@ impl SettingsWindow {
             ),
             ("Text:", walk),
             ("", words),
+            ("Dock:", icons),
             ("Thrown words stay:", stay),
             ("Powers:", powers),
             ("", throw_win),
