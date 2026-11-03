@@ -76,7 +76,7 @@ pub struct Senses {
     /// Horizontal walking range.
     pub min_x: f32,
     pub max_x: f32,
-    /// A word (or letter) the figure could rip off the screen and throw.
+    /// A word the figure could rip off the screen and throw.
     pub ammo: Option<Ammo>,
 }
 

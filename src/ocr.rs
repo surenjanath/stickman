@@ -40,7 +40,7 @@ pub struct Request {
 }
 
 /// A recognised word: its box (normalised to the window, Vision's bottom-left
-/// origin) and how many characters it has (for cutting out single letters).
+/// origin) and how many characters it has.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Word {
     pub rect: Rect,
@@ -56,7 +56,7 @@ pub struct Result {
     pub words: Vec<Word>,
 }
 
-/// Capture one word (or letter) for the figure to carry.
+/// Capture one word for the figure to carry.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GrabRequest {
     pub id: u64,
@@ -280,24 +280,6 @@ pub fn words_in(window: Rect, words: &[Word]) -> Vec<(Rect, u16)> {
         .collect()
 }
 
-/// Box of character `i` of a word with `chars` characters (even split, padded a
-/// little since real glyph widths vary).
-pub fn letter_box(word: Rect, chars: u16, i: u16) -> Rect {
-    let n = f64::from(chars.max(1));
-    let w = word.width / n;
-    // A hair of padding: monospace boxes are exact, proportional fonts vary.
-    let pad = w * 0.09;
-    let i = f64::from(i.min(chars.saturating_sub(1)));
-    let x0 = (word.x + w * i - pad).max(word.x);
-    let x1 = (word.x + w * (i + 1.0) + pad).min(word.right());
-    Rect {
-        x: x0,
-        y: word.y,
-        width: x1 - x0,
-        height: word.height,
-    }
-}
-
 /// What's on screen in `global` just below the overlay window `below` (or,
 /// with `below == 0`, window `window` alone).
 fn capture_region(window: u32, below: u32, global: Rect) -> Option<CGImage> {
@@ -374,7 +356,7 @@ pub fn key_out(rgba: &[u8], w: u32, h: u32) -> Option<Cutout> {
     };
     // Page colour from the top and bottom rows: the capture is padded into the
     // line spacing there, while the left/right edges can touch neighbouring
-    // glyphs (tight word boxes, letters cut out of words).
+    // glyphs (Vision's word boxes are tight).
     let mut border: Vec<[u8; 3]> = Vec::new();
     for x in 0..w {
         border.push(px(x, 0));
@@ -582,20 +564,6 @@ mod tests {
         let (b, n) = r[0];
         assert_eq!((b.x, b.width, n), (200.0, 50.0, 4));
         assert!((b.y - 580.0).abs() < 1e-9 && (b.height - 20.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn letter_boxes_tile_the_word() {
-        let w = Rect {
-            x: 0.0,
-            y: 0.0,
-            width: 100.0,
-            height: 20.0,
-        };
-        let first = letter_box(w, 5, 0);
-        let last = letter_box(w, 5, 4);
-        assert!(first.x >= 0.0 && first.width < 30.0);
-        assert!(last.right() <= 100.0 + 1e-9 && last.x > 70.0);
     }
 
     fn page(w: usize, h: usize, bg: [u8; 3]) -> Vec<u8> {

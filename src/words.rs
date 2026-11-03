@@ -1,6 +1,6 @@
 //! Ripping words off the screen.
 //!
-//! The figure grabs a word (or a single letter) from the active window — any app,
+//! The figure grabs a whole word from the active window — any app,
 //! including web pages — and throws it at the cursor. The word's pixels are
 //! captured and keyed out, so the real glyphs fly; where it was, the overlay
 //! paints a patch of the page's own background colour, so the word looks
@@ -177,7 +177,7 @@ impl WordPlay {
         self.target = None;
     }
 
-    /// Ammo for the figure: a word (sometimes just one letter) on the active
+    /// Ammo for the figure: a whole word on the active
     /// window, not already ripped out, preferring the line it stands on, then the
     /// nearest. Stays on the same target until it's taken or goes stale.
     pub fn ammo(
@@ -219,13 +219,8 @@ impl WordPlay {
                 score(a).total_cmp(&score(b))
             })
             .copied()?;
-        // Sometimes just pluck out a single letter.
-        let rect = if best.chars > 2 && self.rand() < 0.35 {
-            let i = (self.rand() * f32::from(best.chars)) as u16;
-            crate::ocr::letter_box(best.rect, best.chars, i)
-        } else {
-            best.rect
-        };
+        // Always whole words: they read better in flight than single letters.
+        let rect = best.rect;
         let ammo = Ammo {
             id: best.id,
             at: center(&rect),
