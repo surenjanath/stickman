@@ -311,6 +311,10 @@ impl SettingsWindow {
         );
         let powers = self.check("Super jump & telekinesis", Command::TogglePowers);
         let intro = self.check("Jail-break intro at launch", Command::ToggleJailIntro);
+        let rival = self.check(
+            "A rival drops in to duel now and then",
+            Command::ToggleRivalVisits,
+        );
         Self::grid(vec![
             ("Cursor:", push),
             ("Windows:", shake),
@@ -324,6 +328,7 @@ impl SettingsWindow {
             ("Thrown words stay:", stay),
             ("Powers:", powers),
             ("Intro:", intro),
+            ("Rival:", rival),
         ])
     }
 

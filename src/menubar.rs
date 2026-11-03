@@ -427,6 +427,7 @@ impl MenuBar {
             "d",
         );
         self.add(menu, "Clear Drawings", Some(Command::ClearDrawings), "");
+        self.add(menu, "Summon a Rival", Some(Command::SummonRival), "");
         Self::separator(menu);
 
         let behaviour = self.submenu(menu, "Behaviour");

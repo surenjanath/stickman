@@ -17,6 +17,7 @@ pub mod particles;
 pub mod physics;
 pub mod poses;
 pub mod render;
+pub mod rival;
 pub mod screens;
 pub mod settings;
 pub mod settings_window;

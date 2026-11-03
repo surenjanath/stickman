@@ -253,6 +253,8 @@ pub struct Settings {
     pub powers: bool,
     /// Start locked in a jail cell and break out.
     pub jail_intro: bool,
+    /// A rival drops in now and then to duel.
+    pub rival_visits: bool,
     pub visible: bool,
     pub paused: bool,
 }
@@ -283,6 +285,7 @@ impl Default for Settings {
             window_shoves: true,
             powers: true,
             jail_intro: true,
+            rival_visits: true,
             visible: true,
             paused: false,
         }
@@ -318,6 +321,8 @@ pub enum Command {
     ClearDrawings,
     /// Forget experience and grudges.
     ResetStats,
+    SummonRival,
+    ToggleRivalVisits,
     ToggleVisible,
     TogglePaused,
     Respawn,
@@ -357,6 +362,8 @@ impl Command {
             Command::ToggleDrawMode => 402,
             Command::ClearDrawings => 403,
             Command::ResetStats => 404,
+            Command::SummonRival => 405,
+            Command::ToggleRivalVisits => 319,
             Command::SetLanguage(l) => {
                 700 + Language::ALL.iter().position(|x| *x == l).unwrap_or(0) as isize
             }
@@ -398,6 +405,8 @@ impl Command {
             402 => Command::ToggleDrawMode,
             403 => Command::ClearDrawings,
             404 => Command::ResetStats,
+            405 => Command::SummonRival,
+            319 => Command::ToggleRivalVisits,
             700..=702 => Command::SetLanguage(Language::ALL[(tag - 700) as usize]),
             800..=806 => Command::SetColor(FigureColor::ALL[(tag - 800) as usize]),
             600..=604 => Command::SetWordStay(WordStay::ALL[(tag - 600) as usize]),
@@ -433,6 +442,7 @@ impl Settings {
             Command::ToggleWindowShoves => self.window_shoves = !self.window_shoves,
             Command::TogglePowers => self.powers = !self.powers,
             Command::ToggleJailIntro => self.jail_intro = !self.jail_intro,
+            Command::ToggleRivalVisits => self.rival_visits = !self.rival_visits,
             Command::SetLanguage(l) => self.language = l,
             Command::ToggleBleep => self.bleep = !self.bleep,
             Command::SetColor(c) => self.color = c,
@@ -466,6 +476,7 @@ impl Settings {
             Command::ToggleWindowShoves => self.window_shoves && self.window_shake,
             Command::TogglePowers => self.powers,
             Command::ToggleJailIntro => self.jail_intro,
+            Command::ToggleRivalVisits => self.rival_visits,
             Command::ToggleBleep => self.bleep,
             Command::ToggleVisible => self.visible,
             Command::TogglePaused => self.paused,
@@ -562,6 +573,8 @@ mod tests {
             Command::ToggleDrawMode,
             Command::ClearDrawings,
             Command::ResetStats,
+            Command::SummonRival,
+            Command::ToggleRivalVisits,
             Command::ToggleVisible,
             Command::TogglePaused,
             Command::Respawn,

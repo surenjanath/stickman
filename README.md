@@ -28,6 +28,10 @@ Written in Rust for Apple Silicon:
 | **Word throwing** | In combat the figure jumps onto lines of text in your active window (any app, web pages included), rips a whole word right off the screen and lobs it at your cursor. The word flies as the real pixels, spinning, knocks the pointer and falls to the Dock. Where it was taken from, the page looks blank: the overlay paints the exact on-screen background colour over it. Nothing in the real app changes, and the gap heals when the window scrolls, moves or loses focus, or after 45 s. In sabotage mode it steals words and flings them away. |
 | **Jail-break intro** | It starts locked in a steel cell: rattles the bars ("Let me out!"), grumbles, kicks the door off in an explosion of flying bars, then comes for your cursor. Click it while it's locked up to blast the cell open early. Plays again on Respawn. |
 | **Super powers** | **Super jump:** a glowing power-up crouch, then a leap of up to ~1000 pt with a trail and a shockwave, to reach a cursor up high, a far-off window or a word. **Telekinesis:** hand out, purple aura: it lifts your pointer, wobbles it in the air and flings it; or raises a group of up to 6 words off the page, keeps them orbiting overhead, then fires them at your cursor one after another. |
+| **Rival duels** | Every 6–12 minutes (or via **Summon a Rival**), a red ninja stick figure drops in on the far side: "You! Me! Now!" The two fight each other with the full combat moveset (punches, kicks, leaps, super jumps); no healing mid-duel. Click either one to join in. Knock the rival out for a big experience bonus; then it limps off screen ("I'll be back!"). |
+| **Levels & grudges** | Experience from fights levels it up (Doodle → Scrapper → Brawler → Champion → Legend) for more health and a quicker step. Hitting it builds a grudge that fades slowly, makes it fiercer, and is remembered between launches ("Remember me? I remember YOU."). |
+| **Draw for it** | **Draw Platforms** (⌘D): sketch lines with the mouse to make platforms; hold Shift for a trampoline that bounces it high. Right-click to finish. |
+| **Dances to music** | When your Mac is playing audio, it dances along. |
 | **Personality** | Name, temper (gentle ↔ fierce), chattiness, colour, and language: Polite, Cheeky or Salty (it swears, bleeped as `#$%&!` unless you turn that off; never slurs or anything hateful). The AI director is told all of it. |
 | **Pick it up** | Press on the figure and drag: it dangles from your pointer by the scruff of the neck, swinging as you move ("Hey! Put me down!"). Let go with a flick and it flies off with your mouse's speed, tumbling and bouncing; hard throws hurt. A quick click is still a hit. |
 | **Naps** | Leave the computer for a while and it lies down on its back, knee up, with a "Zzz" over its head. Move the mouse and it wakes with a start ("I wasn't sleeping!"). |
@@ -49,8 +53,8 @@ Written in Rust for Apple Silicon:
 | Tab | What's there |
 |---|---|
 | Personality | Name, Temper and Chattiness sliders, Language, Bleep swear words, Behaviour, Colour, Size. |
-| Abilities | Cursor pushes and grabs, window shakes and shoves, walking on text, ripping words, how long thrown words stay (5 s … Forever), super powers, jail-break intro. |
-| Hobbies & Sound | Naps, dancing, doodles, sitting on edges, speech bubbles, sound effects. |
+| Abilities | Cursor pushes and grabs, window shakes and shoves, walking on text, ripping words, how long thrown words stay (5 s … Forever), super powers, jail-break intro, rival visits. |
+| Hobbies & Sound | Naps, dancing, dancing to music, doodles, sitting on edges, speech bubbles, sound effects. |
 
 The menu bar keeps quick toggles for the same options; both stay in sync and
 everything is saved.
@@ -123,7 +127,7 @@ launching terminal.
 | `STICKMAN_CLICK_THROUGH=0` | Debug: the overlay catches every click (blocks the screen). |
 | `STICKMAN_DEBUG_OPEN_MENU=1` | Debug: pop the menu bar menu open once at startup. |
 | `STICKMAN_DEBUG_SAY="…"` | Debug: say this line at startup. |
-| `STICKMAN_DEBUG_DO=sleep\|dance\|cheer\|doodle\|superjump\|mindwords` | Debug: do that 3 s after launch. |
+| `STICKMAN_DEBUG_DO=sleep\|dance\|cheer\|doodle\|superjump\|mindwords\|rival\|draw\|sketch` | Debug: do that 3 s after launch. |
 | `STICKMAN_DEBUG_OPEN_SETTINGS=1` | Debug: open the Settings window at launch. |
 | `STICKMAN_DEBUG_GRAB=1` | Debug: in combat, always grab a slow cursor in reach (instead of 30% of the time). |
 | `RUST_LOG=debug` | Verbose logs: director decisions, OCR, perf stats, click-through toggles. |
@@ -141,7 +145,7 @@ cargo run --release --example pose_sheet -- docs/poses.png   # re-render the pos
 cargo run --release --example sfx_demo     # hear every sound effect
 ```
 
-**Unit tests (148).**
+**Unit tests (160).**
 - **Collision:** one-way landings, no tunnelling, window-edge occlusion clipping.
 - **Walking and running:** feet never slide; feet always on the ground.
 - **Poses:** IK accuracy and knee direction; hands and arms never cross the head.
@@ -158,6 +162,11 @@ cargo run --release --example sfx_demo     # hear every sound effect
   chattiness shaping quips, temperament in the director's prompt and fallback,
   settings-window controls reaching the app, thrown words staying "forever"
   but falling when their window goes, at most 40 lying around.
+- **Rivals, levels, drawing, music:** a full duel between two figures ends in
+  a knockout and the rival leaves; levels from experience, grudges growing and
+  fading, saved and loaded; faster walking at higher levels without foot
+  sliding; strokes fitted to flat platforms; trampolines bouncing it high and
+  letting go after three; dancing for as long as music plays.
 - **Everyday life:** napping when you're away and waking when you're back,
   being petted, sitting on edges (hips on the edge, legs hanging), dancing,
   doodles traced by the pen in its hand, shoving windows and riding them
@@ -230,6 +239,10 @@ main thread (winit / AppKit)                         background
 | `src/director.rs` | Ollama client, prompt, structured output, fallback director. |
 | `src/macos.rs` | AppKit and Accessibility wrappers (overlay setup, focus, window shake, opening URLs). |
 | `src/words.rs` | Word throwing: ammo choice, "holes", flying words. |
+| `src/rival.rs` | The rival and the duel (each figure fights the other as its "cursor"). |
+| `src/stats.rs` | Experience, levels and grudges, saved to `stats.json`. |
+| `src/draw.rs` | Draw mode: strokes into platforms and trampolines. |
+| `src/music.rs` | Whether the Mac is playing audio (CoreAudio). |
 | `src/jail.rs` | The jail-break intro: cell, timeline, flying bars. |
 | `src/settings_window.rs` | The native Settings window (AppKit tabs, sliders, pop-ups). |
 | `src/doodle.rs` | Doodle shapes as pen strokes, drawing progress, fading. |

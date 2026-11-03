@@ -249,6 +249,11 @@ pub enum Event {
         from: V2,
         vel: V2,
     },
+    /// Hit by another figure (a duel).
+    Struck {
+        at: V2,
+        dir: V2,
+    },
     /// Bounced off a trampoline.
     Boing {
         at: V2,
@@ -451,6 +456,8 @@ pub struct Agent {
     pub hold_still: bool,
     /// Following a script (the jail-break intro): no behaviour of its own.
     pub scripted: bool,
+    /// In a duel: no healing until it's over.
+    pub dueling: bool,
     /// Chance of grabbing a slow cursor in reach instead of hitting it.
     pub snatch_chance: f32,
     /// Carrying a word overhead.
@@ -525,6 +532,7 @@ impl Agent {
             action: Action::Stand,
             hold_still: false,
             scripted: false,
+            dueling: false,
             snatch_chance: 0.3,
             holding: false,
             holding_cursor: false,
@@ -980,7 +988,7 @@ impl Agent {
         self.attack_cooldown -= dt;
         self.decide_left -= dt;
         self.since_hit += dt;
-        if self.action != Action::Ko && self.since_hit > 3.0 {
+        if self.action != Action::Ko && self.since_hit > 3.0 && !self.dueling {
             self.health = (self.health + 4.0 * dt).min(self.traits.max_health);
         }
         self.frustration = (self.frustration - 1.5 * dt).max(0.0);
@@ -1150,29 +1158,69 @@ impl Agent {
         }
     }
 
+    /// Sent flying along `away` (plus `extra` velocity), losing `damage` health.
+    fn knock(&mut self, away: V2, extra: V2, damage: f32, events: &mut Vec<Event>) {
+        self.holding_cursor = false;
+        if self.holding {
+            self.holding = false;
+            events.push(Event::Dropped { at: self.hands() });
+        }
+        let knock = (away * 620.0 + v2(0.0, -520.0) + extra).clamp_length_max(1500.0);
+        self.vel = knock;
+        self.ground = None;
+        self.spin_rate = 15.0 * knock.x.signum() * self.facing;
+        if self.action != Action::Tumble {
+            self.spin = 0.0;
+        }
+        self.health -= damage;
+        self.frustration = (self.frustration + 22.0).min(100.0);
+        self.since_hit = 0.0;
+        if self.action != Action::Tumble {
+            self.set_action(Action::Tumble);
+        }
+    }
+
+    /// Hit by another figure's punch or kick along `dir`.
+    pub fn take_hit(&mut self, dir: V2, damage: f32, events: &mut Vec<Event>) {
+        if matches!(self.action, Action::Ko | Action::GetUp) {
+            return; // no hitting someone who's down
+        }
+        let dir = dir.normalize_or(v2(-self.facing, 0.0));
+        self.knock(v2(dir.x, dir.y.min(0.0)), V2::ZERO, damage, events);
+        events.push(Event::Struck {
+            at: self.center(),
+            dir,
+        });
+    }
+
+    /// Drop in from above at `at` (falling).
+    pub fn drop_in(&mut self, at: V2) {
+        self.pos = at;
+        self.vel = V2::ZERO;
+        self.ground = None;
+        self.set_action(Action::Fall);
+    }
+
+    /// Walk to `x` (scripted).
+    pub fn go_to(&mut self, x: f32) {
+        if !matches!(self.action, Action::Walk { .. })
+            && self.ground.is_some()
+            && self.action.interruptible()
+        {
+            self.walk_to(x, true);
+        }
+    }
+
+    /// Knocked out right now.
+    pub fn knocked_out(&self) -> bool {
+        self.action == Action::Ko
+    }
+
     fn reflexes(&mut self, s: &Senses, events: &mut Vec<Event>) {
         // Clicks land even mid-air (juggling), except while knocked out.
         if s.clicked && self.action != Action::Ko {
-            self.holding_cursor = false;
-            if self.holding {
-                self.holding = false;
-                events.push(Event::Dropped { at: self.hands() });
-            }
             let away = (self.center() - s.cursor).normalize_or(v2(-self.facing, 0.0));
-            let mut knock = away * 620.0 + v2(0.0, -520.0) + s.cursor_vel * 0.25;
-            knock = knock.clamp_length_max(1500.0);
-            self.vel = knock;
-            self.ground = None;
-            self.spin_rate = 15.0 * knock.x.signum() * self.facing;
-            if self.action != Action::Tumble {
-                self.spin = 0.0;
-            }
-            self.health -= 20.0;
-            self.frustration = (self.frustration + 22.0).min(100.0);
-            self.since_hit = 0.0;
-            if self.action != Action::Tumble {
-                self.set_action(Action::Tumble);
-            }
+            self.knock(away, s.cursor_vel * 0.25, 20.0, events);
             events.push(Event::Knockback {
                 at: s.cursor,
                 dir: away,
@@ -1226,7 +1274,11 @@ impl Agent {
                 self.set_action(Action::Air);
                 events.push(Event::SuperJumped { at: self.pos });
             }
-            Action::Ko => self.set_action(Action::GetUp),
+            Action::Ko => {
+                // Back from a knockout with some health.
+                self.health = self.health.max(40.0);
+                self.set_action(Action::GetUp)
+            }
             Action::LieDown => self.set_action(Action::Sleep),
             Action::FlyingKick { .. } => self.set_action(Action::Air),
             Action::SnatchCursor { .. } if self.holding_cursor => {
@@ -1246,7 +1298,6 @@ impl Agent {
             }
             Action::GetUp => {
                 self.spin = 0.0;
-                self.health = self.health.max(40.0);
                 self.set_action(Action::Stand);
             }
             Action::Think | Action::Taunt => self.t = 0.0, // loop until behaviour changes

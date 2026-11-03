@@ -43,6 +43,7 @@ use stickman::ocr;
 use stickman::particles::Particles;
 use stickman::physics::{window_platforms, Platform, World};
 use stickman::render::{DrawList, Renderer};
+use stickman::rival::{self, Phase, Rival};
 use stickman::screens::{self, Layout, Screen};
 use stickman::settings::{Behaviour, Command, Settings};
 use stickman::settings_window::SettingsWindow;
@@ -110,6 +111,9 @@ fn max_joint_shift(a: &[Segment], b: &[Segment]) -> f32 {
 /// instead of hitting it.
 const DRAG_START_PT: f32 = 6.0;
 const DRAG_START_HOLD: Duration = Duration::from_millis(250);
+
+/// The first rival comes this long after launch; later ones every 6-12 min.
+const RIVAL_FIRST: Duration = Duration::from_secs(360);
 
 /// Draw mode turns itself off after this long without a stroke.
 const DRAW_TIMEOUT: Duration = Duration::from_secs(60);
@@ -264,6 +268,11 @@ struct Scene {
     speech: Speech,
     last_director_line: Instant,
     doodles: Doodles,
+    /// A rival visiting for a duel, its speech bubble, and when the next comes.
+    rival: Option<Rival>,
+    rival_speech: Speech,
+    rival_click: bool,
+    next_rival: Instant,
     /// Platforms and trampolines the user drew.
     sketch: Sketchpad,
     /// In draw mode since / last stroke at.
@@ -482,12 +491,15 @@ impl Scene {
                 );
                 self.mode = d.mode;
                 self.mode_since = Instant::now();
-                // Announce the new mood.
-                let line = if d.say.is_empty() { &d.reason } else { &d.say };
-                let lines = self.speech.say(line, Priority::Director);
-                self.speak(lines);
+                // Announce the new mood (not mid-duel: it's busy).
+                if self.rival.is_none() {
+                    let line = if d.say.is_empty() { &d.reason } else { &d.say };
+                    let lines = self.speech.say(line, Priority::Director);
+                    self.speak(lines);
+                }
                 self.last_director_line = Instant::now();
             } else if !d.say.is_empty()
+                && self.rival.is_none()
                 && self.settings.chattiness > 0
                 && self.last_director_line.elapsed()
                     > DIRECTOR_CHATTER.mul_f32(2.0 - f32::from(self.settings.chattiness) / 100.0)
@@ -566,17 +578,133 @@ impl Scene {
             return;
         }
         log::info!("speech: \"{}\"", lines.join(" "));
-        let scale = self.renderer.scale_factor();
-        let Some(img) = stickman::text::render_lines(&lines, 13.0, [0.1, 0.1, 0.1], scale) else {
-            return;
-        };
-        if let Some(id) = self
-            .renderer
-            .create_sprite(&img.rgba, img.width, img.height)
-        {
-            self.speech.attach(id, v2(img.size_pt.0, img.size_pt.1));
+        if let Some((id, size)) = self.rasterize(&lines) {
+            self.speech.attach(id, size);
             self.shown = None;
             self.sfx(Sfx::Babble, 0.22, self.agent.head());
+        }
+    }
+
+    /// A text sprite for speech bubbles.
+    fn rasterize(&mut self, lines: &[String]) -> Option<(u32, V2)> {
+        let scale = self.renderer.scale_factor();
+        let img = stickman::text::render_lines(lines, 13.0, [0.1, 0.1, 0.1], scale)?;
+        let id = self
+            .renderer
+            .create_sprite(&img.rgba, img.width, img.height)?;
+        Some((id, v2(img.size_pt.0, img.size_pt.1)))
+    }
+
+    /// The rival says something.
+    fn rival_say(&mut self, text: &str) {
+        if !self.settings.speech {
+            return;
+        }
+        let Some(lines) = self.rival_speech.say(text, Priority::Event) else {
+            return;
+        };
+        log::info!("rival: \"{}\"", lines.join(" "));
+        if let Some((id, size)) = self.rasterize(&lines) {
+            self.rival_speech.attach(id, size);
+            self.shown = None;
+            if let Some(r) = &self.rival {
+                self.sfx(Sfx::Babble, 0.2, r.agent.head());
+            }
+        }
+    }
+
+    /// Bring in a rival on the far side of the figure's screen.
+    fn summon_rival(&mut self) {
+        if self.rival.is_some() || self.jail.is_some() || !self.settings.visible {
+            return;
+        }
+        let screen = self.layout.screen_at(self.agent.pos - v2(0.0, 1.0));
+        let f = screen.frame;
+        let mid = (f.x + f.width / 2.0) as f32;
+        let x = if self.agent.pos.x < mid {
+            f.right() as f32 - 220.0
+        } else {
+            f.x as f32 + 220.0
+        };
+        let ground = Platform {
+            x0: f.x as f32,
+            x1: f.right() as f32,
+            y: screen.ground_y,
+            kind: stickman::physics::PlatformKind::Ground,
+            owner: 0,
+        };
+        self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(7);
+        self.rival = Some(Rival::new(
+            x,
+            f.y as f32,
+            ground,
+            self.agent.scale,
+            self.seed,
+        ));
+        self.rival_speech.clear();
+        log::info!("rival: drops in at {x:.0}");
+        self.sfx(Sfx::Whoosh, 0.6, v2(x, f.y as f32));
+    }
+
+    fn handle_rival(&mut self, events: &[Event], cues: &[rival::Cue]) {
+        let Some(head) = self.rival.as_ref().map(|r| r.agent.head()) else {
+            return;
+        };
+        for e in events {
+            match *e {
+                Event::Struck { at, dir } => {
+                    self.particles.sparks(at, dir, 20);
+                    self.sfx(Sfx::Punch, 0.8, at);
+                }
+                Event::Dust { at, strength } => self.particles.dust(at, strength),
+                Event::Jumped { at } => self.particles.dust(at, 0.2),
+                Event::SuperJumped { at } => {
+                    self.particles.shockwave(at);
+                    self.sfx(Sfx::Whoosh, 0.6, at);
+                }
+                Event::Swing { at } => self.sfx(Sfx::Whoosh, 0.25, at),
+                Event::KnockedOut { .. } => self.particles.stars(head),
+                Event::Knockback { at, dir } => {
+                    self.particles.explosion(at, -dir);
+                    self.sfx(Sfx::Boom, 0.8, at);
+                }
+                _ => {}
+            }
+        }
+        for c in cues {
+            match *c {
+                rival::Cue::Arrived { at } => {
+                    log::info!("rival: lands, duel on");
+                    self.particles.dust(at, 0.8);
+                    self.rival_say("You! Me! Now!");
+                    let lines = self.speech.say("Who are YOU?!", Priority::Event);
+                    self.speak(lines);
+                }
+                rival::Cue::Won => {
+                    log::info!("rival: defeated");
+                    self.stats.duels_won += 1;
+                    self.earn(Feat::WonDuel);
+                    self.rival_say("Ugh… I'll be back!");
+                    let lines = self.speech.say("Victory!", Priority::Event);
+                    self.speak(lines);
+                }
+                rival::Cue::Lost => {
+                    log::info!("rival: won the duel");
+                    self.stats.duels_lost += 1;
+                    self.rival_say("Too easy!");
+                }
+                rival::Cue::Draw => {
+                    log::info!("rival: duel timed out");
+                    self.rival_say("This isn't over!");
+                }
+            }
+        }
+        if self.rival.as_ref().is_some_and(|r| r.phase == Phase::Gone) {
+            if let Some(r) = self.rival.take() {
+                self.particles.dust(r.agent.pos, 0.6);
+            }
+            self.rival_speech.clear();
+            log::info!("rival: gone");
         }
     }
 
@@ -965,6 +1093,12 @@ impl Scene {
                         self.quip(Moment::ThrewCursor);
                     }
                 }
+                Event::Struck { at, dir } => {
+                    // The rival landed one.
+                    self.particles.sparks(at, dir, 20);
+                    self.sfx(Sfx::Punch, 0.8, at);
+                    self.quip(Moment::Struck);
+                }
                 Event::Boing { at } => {
                     self.particles.dust(at, 0.3);
                     self.sfx(Sfx::Pop, 0.6, at);
@@ -1127,6 +1261,7 @@ impl Scene {
                     macos::open_url("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture");
                 }
                 Command::OpenSettings => self.open_settings(),
+                Command::SummonRival => self.summon_rival(),
                 Command::ToggleDrawMode => {
                     if self.drawing.is_some() {
                         self.end_drawing();
@@ -1286,6 +1421,10 @@ impl Scene {
         }
         self.debug_done = true;
         if let Ok(what) = std::env::var("STICKMAN_DEBUG_DO") {
+            if what.trim() == "rival" {
+                self.summon_rival();
+                return;
+            }
             if what.trim() == "draw" {
                 self.start_drawing();
                 return;
@@ -1460,6 +1599,33 @@ impl Scene {
             && self.settings.walk_on_text
             && matches!(self.mode, Mode::Combat | Mode::Sabotage);
         let mut jail_cues = Vec::new();
+        let mut rival_events = Vec::new();
+        let mut rival_cues = Vec::new();
+        // A click meant for the rival.
+        if self.pending_click {
+            if let Some(r) = &self.rival {
+                if r.agent.hit_test(self.cursor.pos) && !self.agent.hit_test(self.cursor.pos) {
+                    self.pending_click = false;
+                    self.rival_click = true;
+                }
+            }
+        }
+        // Now and then, a rival comes to fight.
+        if self.settings.rival_visits
+            && self.settings.behaviour == Behaviour::Auto
+            && Instant::now() >= self.next_rival
+        {
+            let around = self.last_mouse_move.elapsed() < Duration::from_secs(30);
+            let busy = matches!(
+                self.agent.action,
+                stickman::agent::Action::Sleep | stickman::agent::Action::LieDown
+            );
+            if around && !busy {
+                self.summon_rival();
+            }
+            let wait = 360.0 + 360.0 * ((self.seed >> 40) % 1000) as f32 / 1000.0;
+            self.next_rival = Instant::now() + Duration::from_secs_f32(wait);
+        }
         // Music: some app is playing, and it isn't just our own effects.
         let ours = self
             .sound
@@ -1510,7 +1676,34 @@ impl Scene {
                     && self.settings.window_shake
                     && self.accessibility,
             };
-            self.agent.update(&senses, &self.world, &mut events);
+            let dueling = self.rival.as_ref().is_some_and(|r| r.fighting());
+            if !dueling {
+                self.agent.update(&senses, &self.world, &mut events);
+            }
+            if let Some(r) = &mut self.rival {
+                let rr = self.layout.walk_range(r.agent.pos, EDGE_MARGIN);
+                let rival_base = Senses {
+                    clicked: std::mem::take(&mut self.rival_click),
+                    min_x: rr.min_x,
+                    max_x: rr.max_x,
+                    top: rr.top,
+                    active_window: None,
+                    can_shove: false,
+                    held: false,
+                    ..senses
+                };
+                let cues = r.step(
+                    &mut self.agent,
+                    !dueling,
+                    &self.world,
+                    &senses,
+                    &rival_base,
+                    &mut events,
+                    &mut rival_events,
+                );
+                rival_cues.extend(cues);
+                self.rival_speech.update(FIXED_DT);
+            }
             self.particles.update(FIXED_DT);
             self.speech.update(FIXED_DT);
             if let Some(j) = &mut self.jail {
@@ -1539,6 +1732,7 @@ impl Scene {
             }
         }
         self.handle(&events);
+        self.handle_rival(&rival_events, &rival_cues);
         self.handle_jail(&jail_cues);
         self.handle_word_events(&word_events, &freed);
         self.move_captive();
@@ -1549,7 +1743,11 @@ impl Scene {
         self.free_speech_sprites();
 
         // PRD 3.1: intercept clicks only while the user is aiming at the figure.
-        let over = self.agent.hit_test(self.cursor.pos);
+        let over = self.agent.hit_test(self.cursor.pos)
+            || self
+                .rival
+                .as_ref()
+                .is_some_and(|r| r.agent.hit_test(self.cursor.pos));
         let catch = self.intent.update(over, cursor_moved, Instant::now());
         // Keep catching mouse events for the whole press, so the drag and the
         // release reach us.
@@ -1591,7 +1789,8 @@ impl Scene {
             || self.dragging
             || self.doodles.animating()
             || self.jail.is_some()
-            || self.sketch.stroke.is_some();
+            || self.sketch.stroke.is_some()
+            || self.rival.is_some();
         self.present();
         true
     }
@@ -1606,7 +1805,9 @@ impl Scene {
         let released = !input::left_button_down();
         if !self.dragging && !released {
             let moved = (self.cursor.pos - at).length() > DRAG_START_PT;
-            if moved || since.elapsed() > DRAG_START_HOLD {
+            // Only the user's own figure can be picked up.
+            let on_me = self.agent.hit_test(at);
+            if on_me && (moved || since.elapsed() > DRAG_START_HOLD) {
                 self.dragging = true;
                 self.captive = Captive::Free;
                 self.agent.holding_cursor = false;
@@ -1630,7 +1831,8 @@ impl Scene {
     }
 
     fn free_speech_sprites(&mut self) {
-        let retired = self.speech.take_retired();
+        let mut retired = self.speech.take_retired();
+        retired.extend(self.rival_speech.take_retired());
         if !retired.is_empty() {
             self.shown = None;
         }
@@ -1647,7 +1849,8 @@ impl Scene {
             || self.speech.visible()
             || self.doodles.animating()
             || self.jail.is_some()
-            || self.sketch.stroke.is_some();
+            || self.sketch.stroke.is_some()
+            || self.rival.is_some();
         let zzz = self.zzz_frame();
         if let Some(shown) = &self.shown {
             if !effects
@@ -1668,6 +1871,25 @@ impl Scene {
             self.draw_mode_frame();
         }
         self.draw.figure(&segments, self.settings.color.rgb());
+        if let Some(r) = &self.rival {
+            self.draw.figure(&r.agent.segments(), rival::RIVAL_RGB);
+            // A ninja headband with tails flying behind.
+            let h = r.agent.head();
+            let rad = 22.0 * r.agent.scale;
+            let band = [0.12, 0.12, 0.14, 1.0];
+            let back = -r.agent.facing;
+            self.draw.capsule(
+                h + v2(-rad * 0.98, -rad * 0.3),
+                h + v2(rad * 0.98, -rad * 0.3),
+                2.4,
+                band,
+            );
+            let knot = h + v2(back * rad, -rad * 0.3);
+            self.draw
+                .capsule(knot, knot + v2(back * 14.0, -4.0), 1.8, band);
+            self.draw
+                .capsule(knot, knot + v2(back * 12.0, 7.0), 1.8, band);
+        }
         if let Some(j) = &self.jail {
             j.draw(&mut self.draw); // bars in front of the figure
         }
@@ -1681,6 +1903,30 @@ impl Scene {
         }
         self.particles.draw(&mut self.draw);
         self.health_bar();
+        let rival_bar = self.rival.as_ref().map(|r| {
+            (
+                r.agent.head(),
+                r.agent.health / 100.0,
+                r.agent.since_hit(),
+                r.fighting(),
+            )
+        });
+        if let Some((head, frac, since, fighting)) = rival_bar {
+            if fighting || since < 4.0 {
+                Self::bar(&mut self.draw, head, frac, 1.0);
+            }
+            let screen = self.layout.screen_at(head).frame;
+            self.rival_speech.draw(
+                &mut self.draw,
+                head,
+                22.0 * self.agent.scale,
+                (
+                    screen.x as f32 + 8.0,
+                    screen.right() as f32 - 8.0,
+                    screen.y as f32 + 40.0,
+                ),
+            );
+        }
         let head_r = 22.0 * self.agent.scale;
         let head = self.agent.head();
         let screen = self.layout.screen_at(head).frame;
@@ -1748,14 +1994,24 @@ impl Scene {
     /// Small health bar over the head for a few seconds after a hit.
     fn health_bar(&mut self) {
         let since = self.agent.since_hit();
-        if since >= 4.0 {
+        let dueling = self.rival.as_ref().is_some_and(|r| r.fighting());
+        if since >= 4.0 && !dueling {
             return;
         }
-        let alpha = (1.0 - (since - 3.0).max(0.0)).clamp(0.0, 1.0);
-        let head = self.agent.head();
+        let alpha = if dueling {
+            1.0
+        } else {
+            (1.0 - (since - 3.0).max(0.0)).clamp(0.0, 1.0)
+        };
+        let frac = self.agent.health / self.agent.traits.max_health.max(1.0);
+        Self::bar(&mut self.draw, self.agent.head(), frac, alpha);
+    }
+
+    /// A health bar over `head`, `frac` full.
+    fn bar(draw: &mut DrawList, head: V2, frac: f32, alpha: f32) {
         let (w, y) = (44.0, head.y - 26.0);
         let left = v2(head.x - w / 2.0, y);
-        let frac = (self.agent.health / self.agent.traits.max_health.max(1.0)).clamp(0.0, 1.0);
+        let frac = frac.clamp(0.0, 1.0);
         let color = if frac > 0.5 {
             [0.3, 0.85, 0.4, alpha]
         } else if frac > 0.25 {
@@ -1763,11 +2019,9 @@ impl Scene {
         } else {
             [1.0, 0.25, 0.2, alpha]
         };
-        self.draw
-            .capsule(left, left + v2(w, 0.0), 3.5, [0.1, 0.1, 0.1, 0.75 * alpha]);
+        draw.capsule(left, left + v2(w, 0.0), 3.5, [0.1, 0.1, 0.1, 0.75 * alpha]);
         if frac > 0.0 {
-            self.draw
-                .capsule(left, left + v2(w * frac, 0.0), 2.2, color);
+            draw.capsule(left, left + v2(w * frac, 0.0), 2.2, color);
         }
     }
 }
@@ -2049,6 +2303,10 @@ impl App {
             words: WordPlay::new(seed ^ 0x5157),
             speech: Speech::new(seed ^ 0x7A11),
             doodles: Doodles::default(),
+            rival: None,
+            rival_speech: Speech::new(seed ^ 0xBEEF),
+            rival_click: false,
+            next_rival: now + RIVAL_FIRST,
             sketch: Sketchpad::default(),
             drawing: None,
             jail: None,

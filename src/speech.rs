@@ -52,6 +52,8 @@ pub enum Moment {
     Boing,
     MindCursor,
     MindWords,
+    /// Hit by the rival.
+    Struck,
 }
 
 /// Words the bleep filter hides (whole words, any case).
@@ -137,6 +139,7 @@ impl Moment {
             Moment::Boing => &["Boing, baby!", "Hell yeah, trampoline!"],
             Moment::MindCursor => &["Get over here, you damn arrow!", "With my damn mind!"],
             Moment::MindWords => &["Eat words, jerk!", "Incoming, dammit!"],
+            Moment::Struck => &["Son of a—!", "You little sh—!", "Damn, that hurt!"],
         }
     }
 
@@ -193,6 +196,7 @@ impl Moment {
                 0.8,
             ),
             Moment::MindWords => (&["Words, rise!", "Behold!", "Incoming!"], 0.9),
+            Moment::Struck => (&["Oof!", "Cheap shot!", "Is that all?", "Grr!"], 0.35),
         }
     }
 }
@@ -407,7 +411,7 @@ impl Speech {
     /// `[min_x, max_x]` and below `min_y`. Returns (centre, half size).
     pub fn layout(text: V2, head: V2, head_r: f32, min_x: f32, max_x: f32, min_y: f32) -> (V2, V2) {
         let half = text / 2.0 + PAD;
-        let mut c = v2(head.x + 0.35 * half.x, head.y - head_r - 18.0 - half.y);
+        let mut c = v2(head.x + 0.35 * half.x, head.y - head_r - 30.0 - half.y);
         c.x =
             c.x.clamp(min_x + half.x, (max_x - half.x).max(min_x + half.x));
         if c.y - half.y < min_y {
