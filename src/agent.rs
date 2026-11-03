@@ -78,6 +78,8 @@ pub struct Senses {
     pub max_x: f32,
     /// A word the figure could rip off the screen and throw.
     pub ammo: Option<Ammo>,
+    /// May grab and throw the user's cursor (the app moves the real pointer).
+    pub can_grab_cursor: bool,
 }
 
 /// A grabbable word on a text line.
@@ -151,6 +153,15 @@ pub enum Event {
     KnockedOut {
         at: V2,
     },
+    /// Caught the cursor: the app should pin the pointer to the hands.
+    CaughtCursor {
+        at: V2,
+    },
+    /// Threw the cursor from `from` with velocity `vel`.
+    ThrewCursor {
+        from: V2,
+        vel: V2,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -188,6 +199,16 @@ pub enum Action {
     Ko,
     GetUp,
     Stomp,
+    /// Lunge at the cursor with both hands.
+    SnatchCursor {
+        aim: f32,
+    },
+    /// Hold the caught cursor overhead.
+    HoldCursor,
+    /// Lob the cursor at `target`.
+    ThrowCursor {
+        target: V2,
+    },
 }
 
 impl Action {
@@ -202,6 +223,9 @@ impl Action {
             Action::Stomp => 0.6,
             Action::Grab { .. } => 0.55,
             Action::Throw { .. } => 0.55,
+            Action::SnatchCursor { .. } => 0.4,
+            Action::HoldCursor => 0.75,
+            Action::ThrowCursor { .. } => 0.55,
             Action::Taunt => 1.6,
             Action::Think => 3.0,
             _ => return None,
@@ -241,6 +265,8 @@ pub struct Agent {
     pub hold_still: bool,
     /// Carrying a word overhead.
     pub holding: bool,
+    /// Holding the user's cursor. The app clears this when the user yanks free.
+    pub holding_cursor: bool,
     /// The grab/throw moment of the current action already happened.
     act_fired: bool,
     /// Platform currently stood on.
@@ -281,6 +307,7 @@ impl Agent {
             action: Action::Stand,
             hold_still: false,
             holding: false,
+            holding_cursor: false,
             act_fired: false,
             ground: Some(ground),
             t: 0.0,
@@ -394,9 +421,11 @@ impl Agent {
             Action::GetUp => poses::crouch(1.0 - smoothstep((t - 0.3) / 0.4)),
             Action::Stomp => poses::stomp(k(self.action)),
             Action::Grab { .. } => poses::grab(k(self.action)),
-            Action::Throw { target } => {
+            Action::Throw { target } | Action::ThrowCursor { target } => {
                 poses::throw(k(self.action), self.aim_at(target, -1.2, 1.2))
             }
+            Action::SnatchCursor { aim } => poses::snatch(k(self.action), aim),
+            Action::HoldCursor => poses::hoist(t),
         };
         let mut p = p;
         let carrying_pose = !matches!(
@@ -570,6 +599,16 @@ impl Agent {
         let before_pos = self.pos.y;
 
         self.reflexes(s, events);
+        // The user yanked the cursor free (or a click made us let go).
+        let lost_grip = match self.action {
+            Action::SnatchCursor { .. } => self.act_fired && !self.holding_cursor,
+            Action::HoldCursor => !self.holding_cursor,
+            Action::ThrowCursor { .. } => !self.holding_cursor && !self.act_fired,
+            _ => false,
+        };
+        if lost_grip {
+            self.set_action(Action::Stand);
+        }
         self.finish_actions(events);
         self.attack_contacts(s, events);
         if self.ground.is_some() && self.action.interruptible() && !self.hold_still {
@@ -596,6 +635,7 @@ impl Agent {
     fn reflexes(&mut self, s: &Senses, events: &mut Vec<Event>) {
         // Clicks land even mid-air (juggling), except while knocked out.
         if s.clicked && self.action != Action::Ko {
+            self.holding_cursor = false;
             if self.holding {
                 self.holding = false;
                 events.push(Event::Dropped { at: self.hands() });
@@ -662,6 +702,21 @@ impl Agent {
                 events.push(Event::Jumped { at: self.pos });
             }
             Action::Ko => self.set_action(Action::GetUp),
+            Action::SnatchCursor { .. } if self.holding_cursor => {
+                self.set_action(Action::HoldCursor)
+            }
+            Action::HoldCursor if self.holding_cursor => {
+                // Fling it far across the screen, high.
+                let side = if self.random(0.0, 1.0) < 0.5 {
+                    -1.0
+                } else {
+                    1.0
+                };
+                let target =
+                    self.pos + v2(side * self.random(450.0, 850.0), -self.random(300.0, 600.0));
+                self.face(side);
+                self.set_action(Action::ThrowCursor { target });
+            }
             Action::GetUp => {
                 self.spin = 0.0;
                 self.health = self.health.max(40.0);
@@ -670,6 +725,24 @@ impl Agent {
             Action::Think | Action::Taunt => self.t = 0.0, // loop until behaviour changes
             _ => self.set_action(Action::Stand),
         }
+    }
+
+    /// A slow cursor within arm's reach, between hip and head height, is
+    /// sometimes grabbed instead of punched.
+    fn wants_to_snatch(&mut self, s: &Senses) -> bool {
+        let hip_y = self.pos.y - poses::STAND_HIP * self.scale;
+        let head_y = self.pos.y - 240.0 * self.scale;
+        s.can_grab_cursor
+            && s.cursor_vel.length() < 350.0
+            && (head_y..=hip_y).contains(&s.cursor.y)
+            && self.random(0.0, 1.0) < 0.3
+    }
+
+    fn snatch(&mut self, target: V2) {
+        self.face((target.x - self.pos.x).signum());
+        self.attack_cooldown = 1.5;
+        let aim = self.aim_at(target, -0.7, 0.9);
+        self.set_action(Action::SnatchCursor { aim });
     }
 
     fn attack(&mut self, target: V2) {
@@ -701,6 +774,27 @@ impl Agent {
                     at: self.pos,
                     strength: 0.15,
                 });
+                return;
+            }
+            Action::SnatchCursor { .. } if !self.act_fired && (0.14..=0.26).contains(&self.t) => {
+                if (self.hands() - s.cursor).length() < 42.0 {
+                    self.act_fired = true;
+                    self.holding_cursor = true;
+                    events.push(Event::CaughtCursor { at: s.cursor });
+                }
+                return;
+            }
+            Action::ThrowCursor { target }
+                if !self.act_fired && self.t >= 0.22 && self.holding_cursor =>
+            {
+                self.act_fired = true;
+                self.holding_cursor = false;
+                let from = self.hands();
+                events.push(Event::ThrewCursor {
+                    from,
+                    vel: lob_velocity(from, target),
+                });
+                self.frustration = (self.frustration - 20.0).max(0.0);
                 return;
             }
             Action::Throw { target } if !self.act_fired && self.t >= 0.22 && self.holding => {
@@ -792,7 +886,11 @@ impl Agent {
                 }
                 if (s.cursor - self.shoulder()).length() < self.reach() + 25.0 {
                     if self.attack_cooldown <= 0.0 {
-                        self.attack(s.cursor);
+                        if self.wants_to_snatch(s) {
+                            self.snatch(s.cursor);
+                        } else {
+                            self.attack(s.cursor);
+                        }
                         events.push(Event::Swing {
                             at: self.shoulder(),
                         });
@@ -1147,6 +1245,7 @@ mod tests {
             min_x: 60.0,
             max_x: 1740.0,
             ammo: None,
+            can_grab_cursor: false,
         }
     }
 
@@ -1289,6 +1388,85 @@ mod tests {
         }
         assert!(ev.contains(&Event::Grabbed { id: 4 }));
         assert!(ev.iter().any(|e| matches!(e, Event::Threw { .. })));
+    }
+
+    /// Hold a slow cursor in reach until the figure snatches it.
+    fn snatched(seed: u64) -> (Agent, World, Senses, Vec<Event>) {
+        let w = world(vec![]);
+        let mut a = Agent::new(900.0, Platform::ground(1800.0, GROUND_Y), SCALE, seed);
+        let mut s = senses(Mode::Combat);
+        s.can_grab_cursor = true;
+        s.cursor = v2(960.0, GROUND_Y - 100.0);
+        let mut ev = vec![];
+        for _ in 0..(20.0 / FIXED_DT) as usize {
+            a.update(&s, &w, &mut ev);
+            if a.holding_cursor {
+                break;
+            }
+            // Stay where the hands are reaching (a real pointer would be caught
+            // anywhere near the hands).
+            if matches!(a.action, Action::SnatchCursor { .. }) {
+                s.cursor = a.hands();
+            }
+        }
+        (a, w, s, ev)
+    }
+
+    #[test]
+    fn combat_snatches_a_slow_cursor_and_throws_it() {
+        let (mut a, w, mut s, mut ev) = snatched(21);
+        assert!(a.holding_cursor, "never caught the cursor");
+        assert!(ev.iter().any(|e| matches!(e, Event::CaughtCursor { .. })));
+        let mut threw = None;
+        for _ in 0..(3.0 / FIXED_DT) as usize {
+            // The app pins the pointer to the hands while held.
+            if a.holding_cursor {
+                s.cursor = a.hands();
+            }
+            let n = ev.len();
+            a.update(&s, &w, &mut ev);
+            if let Some(Event::ThrewCursor { from, vel }) = ev[n..]
+                .iter()
+                .find(|e| matches!(e, Event::ThrewCursor { .. }))
+            {
+                threw = Some((*from, *vel));
+            }
+        }
+        let (from, vel) = threw.expect("held the cursor but never threw it");
+        assert!(!a.holding_cursor);
+        assert!(vel.y < -300.0, "a high lob: {vel:?}");
+        assert!(vel.x.abs() > 300.0, "thrown far: {vel:?}");
+        assert!((from - a.pos).length() < 200.0);
+    }
+
+    #[test]
+    fn never_snatches_when_not_allowed() {
+        let w = world(vec![]);
+        let mut a = agent();
+        let mut s = senses(Mode::Combat);
+        s.cursor = v2(960.0, GROUND_Y - 100.0);
+        let mut ev = vec![];
+        for _ in 0..(20.0 / FIXED_DT) as usize {
+            a.update(&s, &w, &mut ev);
+            assert!(!matches!(a.action, Action::SnatchCursor { .. }));
+        }
+        assert!(ev.iter().any(|e| matches!(e, Event::StruckCursor { .. })));
+    }
+
+    #[test]
+    fn yanking_free_or_clicking_makes_it_let_go() {
+        let (mut a, w, s, mut ev) = snatched(21);
+        assert!(a.holding_cursor);
+        run(&mut a, &w, &s, 0.1, &mut ev);
+        a.holding_cursor = false; // the app noticed the user pull away
+        a.update(&s, &w, &mut ev);
+        assert_eq!(a.action, Action::Stand);
+        let (mut a, w, mut s, mut ev) = snatched(21);
+        s.cursor = a.center();
+        s.clicked = true;
+        a.update(&s, &w, &mut ev);
+        assert!(!a.holding_cursor);
+        assert_eq!(a.action, Action::Tumble);
     }
 
     #[test]
@@ -1621,6 +1799,7 @@ mod tests {
         {
             let mut a = Agent::new(900.0, Platform::ground(1800.0, GROUND_Y), SCALE, seed);
             let mut s = senses(mode);
+            s.can_grab_cursor = true;
             s.active_window = Some((
                 9,
                 Rect {

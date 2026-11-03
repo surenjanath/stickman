@@ -154,6 +154,64 @@ impl ClickIntent {
     }
 }
 
+/// The user escapes a grab by moving the mouse this far (points) from where
+/// the figure is holding it.
+const ESCAPE_PT: f32 = 55.0;
+/// Never hold the user's pointer longer than this.
+const MAX_HOLD: Duration = Duration::from_secs(3);
+/// Longest flight of a thrown cursor, seconds.
+const MAX_FLIGHT: f32 = 1.2;
+
+/// Whether the figure has the user's pointer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Captive {
+    Free,
+    /// Pinned to the figure's hands; `at` is where we last put it.
+    Held {
+        at: V2,
+        since: Instant,
+    },
+    /// Thrown: flying along a ballistic arc.
+    Flying {
+        pos: V2,
+        vel: V2,
+        at: V2,
+        t: f32,
+    },
+}
+
+impl Captive {
+    /// Where we last put the pointer, if we control it.
+    fn pinned_at(self) -> Option<V2> {
+        match self {
+            Captive::Free => None,
+            Captive::Held { at, .. } | Captive::Flying { at, .. } => Some(at),
+        }
+    }
+}
+
+/// One fixed step of a thrown cursor inside `size`. Returns `false` when the
+/// flight is over (it hit the bottom or ran out of time).
+fn fly(pos: &mut V2, vel: &mut V2, t: &mut f32, size: V2, dt: f32) -> bool {
+    vel.y += stickman::agent::PROJECTILE_GRAVITY * dt;
+    *pos += *vel * dt;
+    *t += dt;
+    let (lo, hi) = (V2::splat(2.0), size - V2::splat(2.0));
+    if pos.x < lo.x || pos.x > hi.x {
+        pos.x = pos.x.clamp(lo.x, hi.x);
+        vel.x = -vel.x * 0.5;
+    }
+    if pos.y < lo.y {
+        pos.y = lo.y;
+        vel.y = vel.y.abs() * 0.3;
+    }
+    if pos.y >= hi.y {
+        pos.y = hi.y;
+        return false;
+    }
+    *t < MAX_FLIGHT
+}
+
 /// Minimum gap between director remarks that don't come with a mood change.
 const DIRECTOR_CHATTER: Duration = Duration::from_secs(20);
 
@@ -218,6 +276,7 @@ struct Scene {
     force_catch_clicks: bool,
     // Input bookkeeping.
     pending_click: bool,
+    captive: Captive,
     /// App to give focus back to after a click on the figure activated us.
     focus_restore: Option<(i64, Instant)>,
     intent: ClickIntent,
@@ -439,6 +498,68 @@ impl Scene {
         }
     }
 
+    /// The user pulled the pointer away from the figure (or a limit was hit).
+    fn check_escape(&mut self) {
+        let Some(at) = self.captive.pinned_at() else {
+            return;
+        };
+        let held_too_long =
+            matches!(self.captive, Captive::Held { since, .. } if since.elapsed() > MAX_HOLD);
+        let yanked = (self.cursor.pos - at).length() > ESCAPE_PT;
+        if yanked || held_too_long || !self.settings.cursor_push {
+            let was_held = matches!(self.captive, Captive::Held { .. });
+            self.captive = Captive::Free;
+            self.agent.holding_cursor = false;
+            if was_held && yanked {
+                log::info!("event: the cursor escaped");
+                self.quip(Moment::CursorEscaped);
+            }
+        }
+    }
+
+    fn fly_cursor(&mut self, dt: f32) {
+        let size = v2(self.display.width as f32, self.display.height as f32);
+        if let Captive::Flying {
+            mut pos,
+            mut vel,
+            at,
+            mut t,
+        } = self.captive
+        {
+            if fly(&mut pos, &mut vel, &mut t, size, dt) {
+                self.captive = Captive::Flying { pos, vel, at, t };
+            } else {
+                self.captive = Captive::Free;
+                self.cursor.warp_to(pos, size);
+                self.last_cursor = self.cursor.pos;
+                self.particles.dust(pos, 0.4);
+                self.sfx(Sfx::Thud, 0.5, pos);
+                log::info!("event: the thrown cursor landed");
+            }
+        }
+    }
+
+    /// Put the pointer where the figure has it: in its hands, or in flight.
+    fn move_captive(&mut self) {
+        let size = v2(self.display.width as f32, self.display.height as f32);
+        let target = match self.captive {
+            Captive::Free => return,
+            Captive::Held { .. } if !self.agent.holding_cursor => {
+                // Let go (got hit, or the throw is about to happen).
+                self.captive = Captive::Free;
+                return;
+            }
+            Captive::Held { .. } => self.agent.hands() - v2(0.0, 6.0),
+            Captive::Flying { pos, .. } => pos,
+        };
+        self.cursor.warp_to(target, size);
+        self.last_cursor = self.cursor.pos;
+        match &mut self.captive {
+            Captive::Held { at, .. } | Captive::Flying { at, .. } => *at = self.cursor.pos,
+            Captive::Free => {}
+        }
+    }
+
     /// Play a sound effect panned to where it happens.
     fn sfx(&mut self, sfx: Sfx, gain: f32, at: V2) {
         if self.settings.sound {
@@ -587,6 +708,32 @@ impl Scene {
                     self.quip(Moment::ThrewWord);
                 }
                 Event::Dropped { at } => self.words.dropped(at),
+                Event::CaughtCursor { at } => {
+                    if self.settings.cursor_push {
+                        self.captive = Captive::Held {
+                            at: self.cursor.pos,
+                            since: Instant::now(),
+                        };
+                        log::info!("event: caught the cursor");
+                        self.sfx(Sfx::Pop, 0.7, at);
+                        self.quip(Moment::CaughtCursor);
+                    } else {
+                        self.agent.holding_cursor = false;
+                    }
+                }
+                Event::ThrewCursor { from, vel } => {
+                    if matches!(self.captive, Captive::Held { .. }) {
+                        self.captive = Captive::Flying {
+                            pos: from,
+                            vel,
+                            at: self.cursor.pos,
+                            t: 0.0,
+                        };
+                        log::info!("event: threw the cursor");
+                        self.sfx(Sfx::Whoosh, 0.6, from);
+                        self.quip(Moment::ThrewCursor);
+                    }
+                }
                 Event::KnockedOut { .. } => {
                     self.particles.stars(self.agent.head());
                     log::info!("event: knocked out");
@@ -711,6 +858,7 @@ impl Scene {
             return true;
         }
         self.cursor.sample();
+        self.check_escape();
         let cursor_moved = (self.cursor.pos - self.last_cursor).length() > 0.5;
         if cursor_moved {
             self.last_mouse_move = Instant::now();
@@ -765,10 +913,12 @@ impl Scene {
                 min_x: EDGE_MARGIN,
                 max_x: self.display.width as f32 - EDGE_MARGIN,
                 ammo,
+                can_grab_cursor: self.settings.cursor_push,
             };
             self.agent.update(&senses, &self.world, &mut events);
             self.particles.update(FIXED_DT);
             self.speech.update(FIXED_DT);
+            self.fly_cursor(FIXED_DT);
             let (we, fr) = self.words.update(
                 FIXED_DT,
                 self.cursor.pos,
@@ -782,6 +932,7 @@ impl Scene {
         }
         self.handle(&events);
         self.handle_word_events(&word_events, &freed);
+        self.move_captive();
         if !self.settings.speech {
             self.speech.clear();
         }
@@ -1097,6 +1248,7 @@ impl App {
             os_tx: macos::os_actions(),
             force_catch_clicks: !self.click_through,
             pending_click: false,
+            captive: Captive::Free,
             focus_restore: None,
             intent: ClickIntent::default(),
             hits: VecDeque::new(),
@@ -1299,6 +1451,26 @@ mod tests {
     }
 
     #[test]
+    fn thrown_cursor_arcs_and_lands_on_screen() {
+        let size = v2(1800.0, 1169.0);
+        let (mut pos, mut vel, mut t) = (v2(900.0, 900.0), v2(900.0, -1100.0), 0.0);
+        let mut peak = pos.y;
+        let mut steps = 0;
+        while fly(&mut pos, &mut vel, &mut t, size, FIXED_DT) {
+            peak = peak.min(pos.y);
+            steps += 1;
+            assert!(pos.x >= 2.0 && pos.x <= 1798.0 && pos.y >= 2.0 && pos.y <= 1167.0);
+        }
+        assert!(peak < 600.0, "rose to {peak}");
+        assert!(pos.x > 1200.0, "travelled to {}", pos.x);
+        assert!(steps as f32 * FIXED_DT <= MAX_FLIGHT + 1e-3);
+        // Bounces off the side wall instead of leaving the screen.
+        let (mut pos, mut vel, mut t) = (v2(1700.0, 500.0), v2(3000.0, 0.0), 0.0);
+        while fly(&mut pos, &mut vel, &mut t, size, FIXED_DT) {}
+        assert!(pos.x <= 1798.0);
+    }
+
+    #[test]
     fn env_parsing() {
         assert!(click_through_from_env(None));
         assert!(click_through_from_env(Some("1")));
@@ -1328,6 +1500,7 @@ mod tests {
             min_x: 30.0,
             max_x: 1770.0,
             ammo: None,
+            can_grab_cursor: false,
         };
         let count = |hold: bool| {
             let mut a = Agent::new(900.0, ground, FIGURE_SCALE, 11);

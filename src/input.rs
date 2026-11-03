@@ -106,7 +106,12 @@ impl Cursor {
     /// Shove the pointer by `by` points (clamped to the display). The user's
     /// physical mouse is unaffected afterwards: the pointer just jumps.
     pub fn push(&mut self, by: V2, display_size: V2) {
-        let target = (self.pos + by).clamp(V2::splat(2.0), display_size - V2::splat(2.0));
+        self.warp_to(self.pos + by, display_size);
+    }
+
+    /// Move the pointer to `target` (overlay points, clamped to the display).
+    pub fn warp_to(&mut self, target: V2, display_size: V2) {
+        let target = target.clamp(V2::splat(2.0), display_size - V2::splat(2.0));
         let global = target + self.origin;
         if CGDisplay::warp_mouse_cursor_position(CGPoint::new(
             f64::from(global.x),

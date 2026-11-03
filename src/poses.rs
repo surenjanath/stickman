@@ -314,6 +314,36 @@ pub fn throw(k: f32, aim: f32) -> Pose {
     )
 }
 
+/// Lunge and snatch something at `aim` with both hands, then hoist it
+/// overhead. Hands close at k ≈ 0.45; overhead by k = 1.
+pub fn snatch(k: f32, aim: f32) -> Pose {
+    let aim = aim.clamp(-0.7, 0.9);
+    let base = stance(0.0);
+    let mut reach = base;
+    plant(&mut reach, 0.82 * LEG_LEN, 50.0, 0.0, -34.0, 0.0);
+    let up = aim.min(0.0);
+    reach[TORSO] = -H + 0.32 + 0.9 * up;
+    reach[HEAD] = -H + 0.26 + 0.9 * up;
+    arm(&mut reach, A, aim - 0.05, aim);
+    arm(&mut reach, B, aim + 0.12, aim + 0.1);
+    let mut lift = stance(0.0);
+    hold_arms(&mut lift);
+    sequence(&[(0.0, base), (0.4, reach), (0.55, reach), (1.0, lift)], k)
+}
+
+/// Holding a prize overhead and shaking it (t: seconds).
+pub fn hoist(t: f32) -> Pose {
+    let mut p = stance(t);
+    hold_arms(&mut p);
+    // Only ever shake forward, away from the head.
+    let shake = 0.09 * (0.5 + 0.5 * (t * TAU * 5.0).sin());
+    for side in [A, B] {
+        p[UPPER_ARM[side]] += shake;
+        p[FOREARM[side]] += shake;
+    }
+    p
+}
+
 /// Landing squash (k = 0 at touchdown → 1 recovered).
 pub fn land(k: f32) -> Pose {
     crouch(0.65 * (1.0 - smoothstep(k)))
@@ -348,6 +378,9 @@ mod tests {
         for q in [0.0, 0.2, 0.4, 0.6, 0.8] {
             v.push(("run", run_pose(q)));
         }
+        for t in [0.0, 0.05, 0.1, 0.15] {
+            v.push(("hoist", hoist(t)));
+        }
         let mut held = walk_pose_for_test(0.3);
         hold_arms(&mut held);
         v.push(("carry", held));
@@ -360,6 +393,9 @@ mod tests {
             v.push(("punch", punch(k, -0.2)));
             v.push(("kick", kick(k, 0.2)));
             v.push(("stomp", stomp(k)));
+            v.push(("snatch", snatch(k, 0.0)));
+            v.push(("snatch up", snatch(k, -0.7)));
+            v.push(("snatch down", snatch(k, 0.9)));
         }
         v
     }
