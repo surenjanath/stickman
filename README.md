@@ -57,6 +57,57 @@ Written in Rust for Apple Silicon:
 
 ![The hats it can earn: bandana, top hat, crown, pirate, party, wizard, horns, viking](docs/hats.png)
 
+## How it learns and remembers
+
+The figure has a long-term memory and a psychology that carry over between
+launches (`mind.json`, next to the settings). It doesn't retrain a model: the
+local LLM's weights never change. Instead it keeps rewriting the notes it
+brings into every decision, a small, local take on self-improving agent
+harnesses.
+
+1. **It remembers everything you do to it.** Every hit, throw, knockout, pet,
+   blow it lands on the cursor, cursor escape, duel and long silence is stored
+   with the time and the app you were in. It keeps the last 300 events plus
+   lifetime totals, and counts which app you hit it in most.
+2. **Each memory moves its feelings.** Four feelings, 0–100:
+   - **Resentment** rises when you hit or throw it and falls when you pet it.
+   - **Fear** rises after a beating (four quick hits scare it more than one)
+     and after a lost duel.
+   - **Affection** rises with petting and falls when it's hit or ignored.
+   - **Pride** rises when it lands blows, throws the cursor or wins duels, and
+     falls when it's knocked out.
+
+   They drift slowly back toward neutral, about 0.6 points a minute. A grudge
+   score in `stats.json` works the same way and greets you on the next launch
+   ("Remember me? I remember YOU.").
+3. **Feelings change how it behaves.** Resentment makes it fiercer; fear and
+   affection calm it down. The bias is added to its temper slider.
+   Resentment over 75 and it **loses its temper** (red, steaming, swearing,
+   all-out attack) until resentment falls below 55.
+4. **It reflects and draws conclusions.** About every 2½ minutes, it hands
+   the local AI a summary of its memories and feelings and asks what it now
+   believes. The answer rewrites:
+   - its **beliefs** about you ("The user hits me most in Safari");
+   - its **scheme** ("Operation Pointer Doom: …"), which it sometimes says out loud;
+   - the next **ransom note** it wants to spell with letters torn off your screen;
+   - its **inner thought**.
+
+   Without Ollama, simple rules over the same memories do this instead.
+5. **The conclusions feed its next decisions.** The memory summary, beliefs,
+   scheme and mood go into every prompt the AI director gets, so what it
+   learned shapes which mood it picks next (calm, observing, sabotage or
+   combat). Then the loop repeats: new events → new feelings → a new
+   reflection.
+6. **It keeps a diary and earns a record.**
+   - Each day ends with a diary entry about what you did to it.
+   - Achievements, levels and unlocked moves track its history with you.
+
+**Watch it think** in Settings → Mind: live feeling bars (yellow, then red),
+its current thought, beliefs, scheme, next note, a log of memories and
+thoughts, and the diary. **Reflect Now** forces a reflection. **Wipe Its
+Memory** makes it forget everything ("Huh? Who am I?"), and **Forgive & Reset
+Level** clears its experience and grudge.
+
 ## Settings window
 
 **Settings…** (⌘,) in the menu bar opens a window with every option, in four
