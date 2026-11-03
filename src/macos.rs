@@ -242,6 +242,22 @@ pub fn restore_focus(pid: i64) {
     }
 }
 
+/// Open a URL (e.g. a System Settings privacy pane). Main thread only.
+pub fn open_url(url: &str) -> bool {
+    let c = std::ffi::CString::new(url).unwrap_or_default();
+    // SAFETY: documented NSWorkspace/NSURL APIs on the main thread; autoreleased.
+    unsafe {
+        let s: *mut Object = msg_send![class!(NSString), stringWithUTF8String: c.as_ptr()];
+        let u: *mut Object = msg_send![class!(NSURL), URLWithString: s];
+        if u.is_null() {
+            return false;
+        }
+        let ws: *mut Object = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let ok: BOOL = msg_send![ws, openURL: u];
+        ok != NO
+    }
+}
+
 // --- Accessibility ---------------------------------------------------------------
 
 /// Whether this process may control other apps' windows. With `prompt`, macOS

@@ -58,6 +58,12 @@ impl Overlay {
             .env("STYK_NO_CURSOR_PUSH", "1")
             .env("STYK_NO_WINDOW_SHAKE", "1")
             .env("STYK_MODE", "IDLE")
+            // Never read or write the user's real settings file.
+            .env(
+                "STYK_SETTINGS",
+                std::env::temp_dir()
+                    .join(format!("styk-test-settings-{}.json", std::process::id())),
+            )
             .envs(envs.iter().copied())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -432,7 +438,10 @@ fn capture(o: &Overlay) -> Capture {
     }
 }
 
-fn test_stickman_is_drawn_on_the_ground(o: &Overlay) {
+fn test_stickman_is_drawn_on_the_ground() {
+    // Standing still, so it can't have wandered onto a window by now.
+    let o = &Overlay::spawn(&[("STYK_HOLD_IDLE", "1")]);
+    pump_run_loop(Duration::from_millis(400));
     let c = capture(o);
     let bbox = c
         .bbox
@@ -688,6 +697,31 @@ fn test_ocr_finds_text_platforms() {
     assert!(line.contains("text platforms on window"));
 }
 
+/// The menu bar extra exists, is visible, and sits in the menu bar strip.
+fn test_menu_bar_icon(o: &Overlay) {
+    let line = o
+        .wait_for("menubar: visible=", Duration::from_secs(4))
+        .expect("menu bar item never reported its placement");
+    println!("      {}", line.split("] ").nth(1).unwrap_or(&line));
+    assert!(line.contains("visible=true"), "{line}");
+    let frame = field(&line, "frame");
+    let nums: Vec<f64> = frame
+        .split([',', 'x'])
+        .filter_map(|n| n.parse().ok())
+        .collect();
+    let [x, y, w, h] = nums[..] else {
+        panic!("bad frame {frame}")
+    };
+    let d = main_display();
+    assert!(w >= 16.0 && h >= 16.0, "icon too small: {w}x{h}");
+    // AppKit y is bottom-up: the menu bar strip is at the top of the main display.
+    assert!(
+        (y + h - d.size.height).abs() < 2.0,
+        "not in the menu bar (y={y}, h={h})"
+    );
+    assert!(x >= 0.0 && x + w <= d.size.width, "off screen (x={x})");
+}
+
 type SharedTest = (&'static str, fn(&Overlay));
 
 fn main() {
@@ -721,13 +755,10 @@ fn main() {
     {
         let shared: &[SharedTest] = &[
             ("startup_time", test_startup_time),
+            ("menu_bar_icon", test_menu_bar_icon),
             (
                 "stickman_animates_and_walks",
                 test_stickman_animates_and_walks,
-            ),
-            (
-                "stickman_is_drawn_on_the_ground",
-                test_stickman_is_drawn_on_the_ground,
             ),
             ("appkit_properties_applied", test_appkit_properties_applied),
             (
@@ -759,6 +790,10 @@ fn main() {
             }
         }
     }
+    run(
+        "stickman_is_drawn_on_the_ground",
+        &test_stickman_is_drawn_on_the_ground,
+    );
     run(
         "idle_cpu_is_under_prd_budget",
         &test_idle_cpu_is_under_prd_budget,

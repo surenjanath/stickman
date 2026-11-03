@@ -18,6 +18,8 @@
 //! - `STYK_OLLAMA_URL`, `STYK_OLLAMA_MODEL`, `STYK_DIRECTOR_INTERVAL_S`: director.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -30,10 +32,12 @@ use stykanimate_overlay::input::Cursor;
 use stykanimate_overlay::macos::{
     self, OsAction, OverlayWindow, OVERLAY_COLLECTION_BEHAVIOR, OVERLAY_WINDOW_LEVEL,
 };
+use stykanimate_overlay::menubar::{MenuBar, Status};
 use stykanimate_overlay::ocr;
 use stykanimate_overlay::particles::Particles;
 use stykanimate_overlay::physics::{window_platforms, Platform, World};
 use stykanimate_overlay::render::{DrawList, Renderer};
+use stykanimate_overlay::settings::{Behaviour, Command, Settings};
 use stykanimate_overlay::stickman::{Segment, BONES, WALKER_RGB};
 use stykanimate_overlay::windows::{self, Snapshot};
 use tokio::sync::watch;
@@ -46,7 +50,8 @@ use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
 #[cfg(not(target_os = "macos"))]
 compile_error!("stykanimate-overlay targets macOS (aarch64-apple-darwin) only");
 
-/// Figure scale: the source rig is ~250 pt tall, this makes it ~140 pt.
+/// Default figure scale (Settings: Medium): the ~250 pt rig becomes ~140 pt.
+#[cfg(test)]
 const FIGURE_SCALE: f32 = 0.55;
 /// Keep the figure this far (pt) from the screen edges.
 const EDGE_MARGIN: f32 = 30.0;
@@ -187,11 +192,20 @@ struct Scene {
     obs_tx: watch::Sender<Observation>,
     mode: Mode,
     mode_since: Instant,
-    forced_mode: Option<Mode>,
+    director_active: Arc<AtomicBool>,
+    director_model: String,
+    last_reason: String,
+    director_online: Option<bool>,
+    // Settings and the menu bar.
+    settings: Settings,
+    settings_path: Option<PathBuf>,
+    menubar: MenuBar,
+    menubar_logged: bool,
+    accessibility: bool,
+    screen_recording: bool,
+    seed: u64,
     // Effects on the user's desktop.
     os_tx: Sender<OsAction>,
-    cursor_push: bool,
-    window_shake: bool,
     force_catch_clicks: bool,
     // Input bookkeeping.
     pending_click: bool,
@@ -265,7 +279,12 @@ impl Scene {
             self.ocr_candidate_since = Instant::now();
         }
         let settled = self.ocr_candidate_since.elapsed() >= OCR_SETTLE;
-        if let (Some(tx), Some(req), true) = (&self.ocr_tx, active, settled) {
+        if !self.settings.walk_on_text {
+            self.text.clear();
+        }
+        if let (Some(tx), Some(req), true, true) =
+            (&self.ocr_tx, active, settled, self.settings.walk_on_text)
+        {
             if self.ocr_target != Some(req) || self.ocr_sent.elapsed() >= OCR_INTERVAL {
                 let _ = tx.send(req);
                 self.ocr_target = Some(req);
@@ -278,12 +297,25 @@ impl Scene {
     }
 
     fn sync_director(&mut self) {
+        let forced = self.settings.behaviour.forced_mode();
+        if let Some(m) = forced {
+            if m != self.mode {
+                self.mode = m;
+                self.mode_since = Instant::now();
+            }
+        }
+        self.director_active.store(
+            forced.is_none() && self.settings.visible && !self.settings.paused,
+            Ordering::Relaxed,
+        );
         while let Ok(d) = self.directive_rx.try_recv() {
+            self.director_online = Some(d.source == director::Source::Llm);
+            self.last_reason = d.reason.clone();
             let recently_hit = self
                 .hits
                 .back()
                 .is_some_and(|t| t.elapsed() < Duration::from_secs(10));
-            if self.forced_mode.is_none()
+            if forced.is_none()
                 && d.mode != self.mode
                 && accept_directive(self.mode, d.mode, self.mode_since.elapsed(), recently_hit)
             {
@@ -335,7 +367,7 @@ impl Scene {
                 }
                 Event::StruckCursor { at, dir } => {
                     self.particles.sparks(at, dir, 18);
-                    if self.cursor_push {
+                    if self.settings.cursor_push {
                         self.cursor.push(dir * CURSOR_PUSH, size);
                     }
                     log::info!("event: struck cursor");
@@ -344,7 +376,7 @@ impl Scene {
                 Event::Jumped { at } => self.particles.dust(at, 0.2),
                 Event::Stomp { at, window } => {
                     self.particles.dust(at, 0.5);
-                    if self.window_shake {
+                    if self.settings.window_shake && self.accessibility {
                         if let Some(w) = self.snapshot.windows.iter().find(|w| w.id == window) {
                             let dx = if self.frames % 2 == 0 { 9.0 } else { -9.0 };
                             let _ = self
@@ -362,7 +394,104 @@ impl Scene {
         }
     }
 
-    fn tick(&mut self) {
+    /// Apply menu picks. Returns `false` when the user chose Quit.
+    fn handle_commands(&mut self) -> bool {
+        for cmd in self.menubar.drain_commands() {
+            log::info!("menu: {cmd:?}");
+            match cmd {
+                Command::Quit => return false,
+                Command::Respawn => {
+                    let x = (self.display.width / 2.0) as f32;
+                    let hold = self.agent.hold_still;
+                    self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    self.agent = Agent::new(x, self.ground, self.settings.size.scale(), self.seed);
+                    self.agent.hold_still = hold;
+                    self.particles.dust(v2(x, self.ground.y), 0.8);
+                }
+                Command::OpenAccessibilitySettings => {
+                    macos::open_url("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility");
+                }
+                Command::OpenScreenRecordingSettings => {
+                    macos::open_url("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture");
+                }
+                _ => {}
+            }
+            if self.settings.apply(cmd) {
+                self.agent.scale = self.settings.size.scale();
+                if matches!(cmd, Command::SetBehaviour(Behaviour::Auto)) {
+                    // Let the director's next decision apply immediately.
+                    self.mode_since = Instant::now() - MIN_MODE_DWELL;
+                }
+                self.shown = None; // redraw (size/visibility changed)
+                if let Some(path) = &self.settings_path {
+                    if let Err(e) = self.settings.save(path) {
+                        log::warn!("settings: could not save {}: {e:#}", path.display());
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    fn sync_menubar(&mut self) {
+        let director = if self.settings.behaviour != Behaviour::Auto {
+            format!("{} — paused (behaviour pinned)", self.director_model)
+        } else {
+            match self.director_online {
+                Some(true) => format!("{} — online", self.director_model),
+                Some(false) => "Ollama offline — built-in director".to_string(),
+                None => format!("{} — starting…", self.director_model),
+            }
+        };
+        let status = Status {
+            mode: self.mode,
+            reason: self.last_reason.clone(),
+            health: self.agent.health.max(0.0).round(),
+            director,
+            accessibility: self.accessibility,
+            screen_recording: self.screen_recording,
+        };
+        self.menubar.sync(&self.settings, &status);
+        if !self.menubar_logged && self.stats_at.elapsed() > Duration::from_secs(1) {
+            // Report once the menu bar has laid the icon out.
+            let (shown, f) = self.menubar.placement();
+            log::info!(
+                "menubar: visible={shown} frame={},{},{}x{}",
+                f[0],
+                f[1],
+                f[2],
+                f[3]
+            );
+            self.menubar_logged = true;
+            if env_flag("STYK_DEBUG_OPEN_MENU") {
+                self.menubar.open();
+            }
+        }
+    }
+
+    /// One frame. Returns `false` when the app should quit.
+    fn tick(&mut self) -> bool {
+        if !self.handle_commands() {
+            return false;
+        }
+        self.sync_menubar();
+        if !self.settings.visible || self.settings.paused {
+            // Frozen or hidden: no simulation, never intercept clicks, and draw
+            // nothing (or keep the last frame when paused).
+            self.overlay.set_click_through(true);
+            self.busy = false;
+            self.last_tick = Instant::now();
+            self.accumulator = 0.0;
+            if !self.settings.visible && self.shown.is_some() {
+                self.draw.clear();
+                if self.renderer.render(&self.draw) {
+                    self.shown = None;
+                }
+            } else if self.settings.visible && self.shown.is_none() {
+                self.present();
+            }
+            return true;
+        }
         self.cursor.sample();
         let cursor_moved = (self.cursor.pos - self.last_cursor).length() > 0.5;
         if cursor_moved {
@@ -435,6 +564,7 @@ impl Scene {
             || self.agent.since_hit() < 4.0
             || !self.agent.action.is_still();
         self.present();
+        true
     }
 
     fn present(&mut self) {
@@ -539,13 +669,38 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|t| t.as_nanos() as u64)
             .unwrap_or(1);
-        let mut agent = Agent::new((d.width / 2.0) as f32, ground, FIGURE_SCALE, seed);
+        // Settings: saved file, then environment overrides (not saved unless the
+        // user changes something in the menu).
+        let settings_path = Settings::default_path();
+        let mut settings = settings_path
+            .as_deref()
+            .map(Settings::load)
+            .unwrap_or_default();
+        if let Some(m) = std::env::var("STYK_MODE")
+            .ok()
+            .and_then(|m| Mode::parse(&m))
+        {
+            settings.behaviour = Behaviour::from_mode(m);
+        } else if std::env::var("STYK_MODE").is_ok_and(|m| m.trim().is_empty()) {
+            settings.behaviour = Behaviour::Auto;
+        }
+        if env_flag("STYK_NO_CURSOR_PUSH") {
+            settings.cursor_push = false;
+        }
+        if env_flag("STYK_NO_WINDOW_SHAKE") {
+            settings.window_shake = false;
+        }
+        if env_flag("STYK_NO_OCR") {
+            settings.walk_on_text = false;
+        }
+        settings.paused = false;
+        let mut agent = Agent::new((d.width / 2.0) as f32, ground, settings.size.scale(), seed);
         agent.hold_still = env_flag("STYK_HOLD_IDLE");
 
         // Permissions: Accessibility (window shakes) and Screen Recording (OCR).
         let prompts = !env_flag("STYK_NO_PROMPTS");
         let ax = macos::accessibility_trusted(prompts);
-        let ocr_wanted = !env_flag("STYK_NO_OCR");
+        let ocr_wanted = settings.walk_on_text;
         let mut ocr_allowed = ocr_wanted && ocr::screen_capture_allowed();
         if ocr_wanted && !ocr_allowed && prompts {
             ocr_allowed = ocr::request_screen_capture();
@@ -574,13 +729,21 @@ impl App {
         };
         let (dir_tx, directive_rx) = mpsc::channel();
         let (obs_tx, obs_rx) = watch::channel(Observation::default());
-        let forced_mode = std::env::var("STYK_MODE")
-            .ok()
-            .and_then(|m| Mode::parse(&m));
-        if forced_mode.is_none() && !agent.hold_still {
-            director::spawn(&self.runtime, director::Config::from_env(), obs_rx, dir_tx);
+        let forced_mode = settings.behaviour.forced_mode();
+        let director_cfg = director::Config::from_env();
+        let director_model = director_cfg.model.clone();
+        let director_active = Arc::new(AtomicBool::new(forced_mode.is_none()));
+        if !agent.hold_still {
+            director::spawn(
+                &self.runtime,
+                director_cfg,
+                obs_rx,
+                dir_tx,
+                director_active.clone(),
+            );
         }
         let mode = forced_mode.unwrap_or(Mode::Idle);
+        let menubar = MenuBar::new();
 
         // Single machine-readable line; the integration tests parse it.
         log::info!(
@@ -596,7 +759,7 @@ impl App {
             state.ignores_mouse_events,
             window.scale_factor(),
             ground_y,
-            FIGURE_SCALE,
+            settings.size.scale(),
             mode.as_str(),
             ax,
             ocr_allowed,
@@ -626,10 +789,18 @@ impl App {
             obs_tx,
             mode,
             mode_since: now,
-            forced_mode,
+            director_active,
+            director_model,
+            last_reason: String::new(),
+            director_online: None,
+            settings,
+            settings_path,
+            menubar,
+            menubar_logged: false,
+            accessibility: ax,
+            screen_recording: ocr_allowed,
+            seed,
             os_tx: macos::os_actions(),
-            cursor_push: !env_flag("STYK_NO_CURSOR_PUSH"),
-            window_shake: ax && !env_flag("STYK_NO_WINDOW_SHAKE"),
             force_catch_clicks: !self.click_through,
             pending_click: false,
             focus_restore: None,
@@ -707,7 +878,11 @@ impl ApplicationHandler for App {
             // Simulate and render straight from the timer: `window.request_redraw()`
             // would mark the full-screen NSView dirty and run an AppKit display
             // pass every frame (~14% CPU by itself).
-            scene.tick();
+            if !scene.tick() {
+                log::info!("quit from the menu bar");
+                event_loop.exit();
+                return;
+            }
             let interval = if scene.busy { TICK } else { IDLE_TICK };
             scene.next_tick += interval;
             if scene.next_tick < now {

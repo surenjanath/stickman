@@ -28,6 +28,30 @@ Written in Rust for Apple Silicon:
 | **AI director** | Every 4 s a local Ollama model (`llama3.2:1b` by default, ~200–300 ms) picks `IDLE` / `OBSERVE` / `SABOTAGE` / `COMBAT` from what you're doing: active app, mouse speed, hits, health, frustration, idle time. Modes last at least 12 s, except immediate retaliation after a hit. If Ollama is down, a built-in director takes over. |
 | **Efficiency** | 60 Hz simulation when something moves, 30 Hz otherwise; frames that wouldn't visibly change are skipped. Idle ≈ 2–3% of one core (PRD budget 5%), walking ≈ 13–16%. |
 
+## Menu bar
+
+A little stickman icon sits in the menu bar, next to Wi-Fi and the clock. Its pose
+shows the figure's mood: standing (idle), hand on chin (observing), knee up
+(sabotage), fists up (combat). It's a template image, so it matches light and dark
+menu bars. Click it for:
+
+| Item | What it does |
+|---|---|
+| Mood / Health / AI | Live status: current mood and the director's reason, health, and whether Ollama is online. |
+| **Behaviour ▸** | *Auto (AI director)*, or pin *Idle*, *Observe*, *Sabotage* or *Combat*. Pinning pauses the LLM calls. |
+| **Figure Size ▸** | Small / Medium / Large. |
+| Punches Push My Cursor | Whether combat hits move your real pointer. |
+| Stomps Shake My Windows | Whether stomps jolt your windows (needs Accessibility). |
+| Walk on Text | Whether to read the active window's text lines (needs Screen Recording). |
+| Show Figure (⌘H) | Hide or show the figure. Hidden means fully click-through, no simulation and no AI calls. |
+| Pause (⌘P) / Respawn (⌘R) | Freeze the figure / bring it back to the middle of the Dock. |
+| Grant … | Shortcuts to the right System Settings pane, shown only while a permission is missing. |
+| Quit (⌘Q) | Quit the app. |
+
+Settings are saved to `~/Library/Application Support/StykAnimate/settings.json`
+(override with `STYK_SETTINGS`) and restored on the next launch. Environment
+variables below override them at startup.
+
 ## Requirements
 
 - macOS on Apple Silicon (`aarch64-apple-darwin`). Developed on an M1 Max.
@@ -47,8 +71,8 @@ Written in Rust for Apple Silicon:
 cargo run --release
 ```
 
-There's no Dock icon and the window ignores the mouse, so **quit with Ctrl+C** in
-the launching terminal.
+There's no Dock icon; use the menu bar icon (**Quit**, ⌘Q) or Ctrl+C in the
+launching terminal.
 
 ### Environment variables
 
@@ -63,7 +87,9 @@ the launching terminal.
 | `STYK_NO_OCR=1` | Don't read screen text (no walking on text). |
 | `STYK_NO_PROMPTS=1` | Never show macOS permission dialogs. |
 | `STYK_HOLD_IDLE=1` | Stand still (used to measure idle CPU). |
+| `STYK_SETTINGS` | Settings file path (default `~/Library/Application Support/StykAnimate/settings.json`). |
 | `STYK_CLICK_THROUGH=0` | Debug: the overlay catches every click (blocks the screen). |
+| `STYK_DEBUG_OPEN_MENU=1` | Debug: pop the menu bar menu open once at startup. |
 | `RUST_LOG=debug` | Verbose logs: director decisions, OCR, perf stats, click-through toggles. |
 
 ## Testing
@@ -100,12 +126,13 @@ through the window server and AppKit:
 - **AI director:** makes a decision with the live model.
 - **OCR:** finds text platforms on the active window.
 - **Exit:** clean shutdown on SIGINT.
+- **Menu bar:** the icon is visible and placed in the menu bar.
 - **Click (opt-in):** clicking the figure knocks it back, bursts particles and
   returns focus to your app. It drives the real pointer, so it only runs with
   `STYK_INTERACTIVE_TESTS=1`.
 
 The GUI tests run overlays with cursor pushes, window shakes and permission
-prompts disabled. Set `STYK_SKIP_GUI_TESTS=1` to skip them (e.g. on CI).
+prompts disabled, and with a throwaway settings file. Set `STYK_SKIP_GUI_TESTS=1` to skip them (e.g. on CI).
 
 ## Architecture
 
@@ -139,7 +166,9 @@ main thread (winit / AppKit)                         background
 | `src/windows.rs` | Window-server polling for app windows. |
 | `src/ocr.rs` | Window capture and Vision text-line detection, turned into text platforms. |
 | `src/director.rs` | Ollama client, prompt, structured output, fallback director. |
-| `src/macos.rs` | AppKit and Accessibility wrappers (overlay setup, focus, window shake). |
+| `src/macos.rs` | AppKit and Accessibility wrappers (overlay setup, focus, window shake, opening URLs). |
+| `src/menubar.rs` | Menu bar extra: mood icon drawn from the rig, settings menu, Objective-C action target. |
+| `src/settings.rs` | Persistent settings and menu commands. |
 | `tests/overlay.rs` | Live GUI test harness. |
 | `examples/pose_sheet.rs` | Renders `docs/poses.png`. |
 

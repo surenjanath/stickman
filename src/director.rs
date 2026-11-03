@@ -255,12 +255,13 @@ pub async fn ask(client: &reqwest::Client, cfg: &Config, obs: &Observation) -> R
 }
 
 /// Run the director loop on `rt`. Reads the latest observation from `obs`, sends
-/// each decision to `tx`; stops when the receiver is gone.
+/// each decision to `tx` while `active` is set; stops when the receiver is gone.
 pub fn spawn(
     rt: &tokio::runtime::Runtime,
     cfg: Config,
     obs: watch::Receiver<Observation>,
     tx: Sender<Directive>,
+    active: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     rt.spawn(async move {
         let client = match reqwest::Client::builder().build() {
@@ -280,6 +281,11 @@ pub fn spawn(
         let mut seed: u32 = 0x9e37_79b9;
         loop {
             tokio::time::sleep(cfg.interval).await;
+            // Paused while the behaviour is pinned or the figure is hidden: don't
+            // spend GPU/CPU on the model.
+            if !active.load(std::sync::atomic::Ordering::Relaxed) {
+                continue;
+            }
             let o = obs.borrow().clone();
             let started = std::time::Instant::now();
             // One retry: small models occasionally emit malformed JSON.
