@@ -1,14 +1,12 @@
-//! The stick figure: StykAnimate's "Walker" rig, forward kinematics, two-bone leg
+//! The stick figure: the "Walker" rig, forward kinematics, two-bone leg
 //! IK, the procedural walk and the idle pose. Action poses live in `poses.rs`,
 //! behaviour in `agent.rs`.
 //!
-//! The rig is ported verbatim from StykAnimate's `src/demo.mjs`
-//! (`defaultFigure()`, see docs/STYKANIMATE_ANALYSIS.md). StykAnimate's own demo
-//! walk is authored *in place* (feet slide, knees bend backwards when the figure
-//! travels), so the walk here is our own gait: stance feet stay planted on the
-//! ground and legs are solved with two-bone IK so knees always bend forward.
+//! The rig's proportions come from a third-party figure (see Credits in the
+//! README). The walk is our own gait: stance feet stay planted on the ground and
+//! legs are solved with two-bone IK so knees always bend forward.
 //!
-//! Conventions match StykAnimate: angles are radians, *absolute* (not relative to
+//! Conventions: angles are radians, *absolute* (not relative to
 //! the parent bone), in a y-down screen space, so `-π/2` points up. The root
 //! (parent 0) is the hip. Poses are authored facing right (+x).
 
@@ -43,7 +41,7 @@ const fn line(parent: usize, length: f32, rest_angle: f32, thickness: f32) -> Bo
     }
 }
 
-/// `defaultFigure()` from StykAnimate `src/demo.mjs`. Index i is bone id i + 1.
+/// The source figure. Index i is bone id i + 1.
 pub const WALKER: [Bone; BONES] = [
     line(0, 78.0, -FRAC_PI_2, 11.0), // 1 torso (hip -> neck)
     Bone {
@@ -71,7 +69,7 @@ pub(crate) const FOREARM: [usize; 2] = [3, 5];
 pub(crate) const THIGH: [usize; 2] = [6, 8];
 pub(crate) const SHIN: [usize; 2] = [7, 9];
 
-/// StykAnimate figure colour `rgb(43, 43, 43)`.
+/// Figure colour `rgb(43, 43, 43)`.
 pub const WALKER_RGB: [u8; 3] = [43, 43, 43];
 
 /// Absolute angle per bone.
@@ -319,7 +317,7 @@ mod tests {
     }
 
     #[test]
-    fn rig_matches_stykanimate_default_figure() {
+    fn rig_matches_source_figure() {
         let lengths: Vec<f32> = WALKER.iter().map(|b| b.length).collect();
         assert_eq!(lengths, [78., 44., 53., 48., 53., 48., 66., 63., 66., 63.]);
         let parents: Vec<usize> = WALKER.iter().map(|b| b.parent).collect();

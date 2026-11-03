@@ -154,7 +154,7 @@ pub fn spawn_poller(
     tx: Sender<Snapshot>,
 ) -> JoinHandle<()> {
     std::thread::Builder::new()
-        .name("styk-windows".into())
+        .name("stickman-windows".into())
         .spawn(move || {
             let mut last = None;
             loop {
@@ -225,7 +225,7 @@ mod tests {
 
     #[test]
     fn live_snapshot_excludes_our_process() {
-        if std::env::var_os("STYK_SKIP_GUI_TESTS").is_some() {
+        if std::env::var_os("STICKMAN_SKIP_GUI_TESTS").is_some() {
             return;
         }
         let display = Rect {

@@ -362,7 +362,7 @@ fn shake(pid: i64, dx: f64) -> bool {
 /// Worker thread for [`OsAction`]s (Accessibility IPC can block).
 pub fn spawn_os_actions(rx: Receiver<OsAction>) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
-        .name("styk-os".into())
+        .name("stickman-os".into())
         .spawn(move || {
             while let Ok(action) = rx.recv() {
                 match action {

@@ -179,7 +179,7 @@ impl Renderer {
         }))
         .context("no compatible GPU adapter")?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("styk-device"),
+            label: Some("stickman-device"),
             ..Default::default()
         }))
         .context("request GPU device")?;

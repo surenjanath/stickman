@@ -166,7 +166,7 @@ mod tests {
     #[test]
     fn cursor_is_readable() {
         // Needs a window-server session; skip gracefully on headless CI.
-        if std::env::var_os("STYK_SKIP_GUI_TESTS").is_none() {
+        if std::env::var_os("STICKMAN_SKIP_GUI_TESTS").is_none() {
             assert!(global_cursor().is_some());
         }
     }

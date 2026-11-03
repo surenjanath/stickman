@@ -5,7 +5,7 @@ fn main() {
         .and_then(|a| a.parse().ok())
         .expect("window id");
     let t = std::time::Instant::now();
-    match stykanimate_overlay::ocr::read_window_now(id) {
+    match stickman::ocr::read_window_now(id) {
         Some((lines, words)) => println!(
             "{} lines, {} words in {:?}",
             lines.len(),

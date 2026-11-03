@@ -464,7 +464,7 @@ pub fn read_window_now(id: u32) -> Option<(Vec<Rect>, Vec<Word>)> {
 /// coalesced to the newest one; grabs are always served, first.
 pub fn spawn_worker(rx: Receiver<Job>, tx: Sender<Output>) -> JoinHandle<()> {
     std::thread::Builder::new()
-        .name("styk-ocr".into())
+        .name("stickman-ocr".into())
         .spawn(move || {
             while let Ok(first) = rx.recv() {
                 let mut read = None;
@@ -650,7 +650,7 @@ mod tests {
     /// End-to-end Vision check on a rendered image with known text.
     #[test]
     fn vision_finds_text_lines() {
-        if std::env::var_os("STYK_SKIP_GUI_TESTS").is_some() {
+        if std::env::var_os("STICKMAN_SKIP_GUI_TESTS").is_some() {
             return;
         }
         let img = render_text_image(&["The quick brown fox jumps", "over the lazy dog 12345"]);

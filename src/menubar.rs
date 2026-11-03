@@ -24,7 +24,7 @@ use crate::stickman::{forward_kinematics, idle_pose, BoneKind, Pose};
 static QUEUE: Mutex<Vec<isize>> = Mutex::new(Vec::new());
 static REGISTER: Once = Once::new();
 
-/// `-[StykMenuTarget menuAction:]`: queue the clicked item's tag.
+/// `-[StickmanMenuTarget menuAction:]`: queue the clicked item's tag.
 extern "C" fn menu_action(_this: &Object, _sel: Sel, sender: *mut Object) {
     if sender.is_null() {
         return;
@@ -38,8 +38,8 @@ extern "C" fn menu_action(_this: &Object, _sel: Sel, sender: *mut Object) {
 
 fn target_class() -> &'static Class {
     REGISTER.call_once(|| {
-        let mut decl =
-            ClassDecl::new("StykMenuTarget", class!(NSObject)).expect("register StykMenuTarget");
+        let mut decl = ClassDecl::new("StickmanMenuTarget", class!(NSObject))
+            .expect("register StickmanMenuTarget");
         // SAFETY: the signature matches an action method `- (void)menuAction:(id)sender`.
         unsafe {
             decl.add_method(
@@ -49,7 +49,7 @@ fn target_class() -> &'static Class {
         }
         decl.register();
     });
-    class!(StykMenuTarget)
+    class!(StickmanMenuTarget)
 }
 
 #[repr(C)]
@@ -225,9 +225,9 @@ impl MenuBar {
             let bar: *mut Object = msg_send![class!(NSStatusBar), systemStatusBar];
             let item: *mut Object = msg_send![bar, statusItemWithLength: -1.0f64]; // variable length
             let item: *mut Object = msg_send![item, retain]; // the status bar doesn't keep it alive
-            let _: () = msg_send![item, setAutosaveName: ns_string("StykAnimate")];
+            let _: () = msg_send![item, setAutosaveName: ns_string("Stickman")];
             let button: *mut Object = msg_send![item, button];
-            let _: () = msg_send![button, setToolTip: ns_string("StykAnimate")];
+            let _: () = msg_send![button, setToolTip: ns_string("Stickman")];
 
             let mut mb = MenuBar {
                 item,
@@ -300,15 +300,15 @@ impl MenuBar {
     }
 
     unsafe fn build_menu(&mut self) -> *mut Object {
-        let menu = Self::new_menu("StykAnimate");
-        let title = self.add(menu, "StykAnimate", None, "");
+        let menu = Self::new_menu("Stickman");
+        let title = self.add(menu, "Stickman", None, "");
         let bold: *mut Object = msg_send![class!(NSFont), boldSystemFontOfSize: 13.0f64];
         let key = ns_string("NSFont");
         let attrs: *mut Object =
             msg_send![class!(NSDictionary), dictionaryWithObject: bold forKey: key];
         let at: *mut Object = msg_send![class!(NSAttributedString), alloc];
         let at: *mut Object =
-            msg_send![at, initWithString: ns_string("StykAnimate") attributes: attrs];
+            msg_send![at, initWithString: ns_string("Stickman") attributes: attrs];
         let _: () = msg_send![title, setAttributedTitle: at];
         let _: () = msg_send![at, release];
         self.mood = self.add(menu, "Mood: —", None, "");
@@ -370,7 +370,7 @@ impl MenuBar {
             "",
         );
         Self::separator(menu);
-        self.add(menu, "Quit StykAnimate", Some(Command::Quit), "q");
+        self.add(menu, "Quit Stickman", Some(Command::Quit), "q");
         menu
     }
 
@@ -384,7 +384,7 @@ impl MenuBar {
             let button: *mut Object = msg_send![self.item, button];
             let _: () = msg_send![button, setImage: img];
             let _: () = msg_send![img, release];
-            let tip = format!("StykAnimate — {}", mode_name(mode));
+            let tip = format!("Stickman — {}", mode_name(mode));
             let _: () = msg_send![button, setToolTip: ns_string(&tip)];
         }
         self.icon_mode = Some(mode);

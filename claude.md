@@ -1,4 +1,4 @@
-# StykAnimate AI Desktop Overlay - Agent Instructions
+# Stickman AI Desktop Overlay - Agent Instructions
 
 ## Project Overview
 This is a native macOS desktop overlay written in Rust. It renders an autonomous 2D stickman that interacts with OS windows, text, and the user's cursor. It uses a transparent, click-through window, real-time physics, and a local LLM decision engine.

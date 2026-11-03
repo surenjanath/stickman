@@ -74,15 +74,15 @@ pub struct Config {
 }
 
 impl Config {
-    /// `STYK_OLLAMA_URL` (default `http://localhost:11434`), `STYK_OLLAMA_MODEL`
-    /// (default `llama3.2:1b`, small and fast), `STYK_DIRECTOR_INTERVAL_S` (4).
+    /// `STICKMAN_OLLAMA_URL` (default `http://localhost:11434`), `STICKMAN_OLLAMA_MODEL`
+    /// (default `llama3.2:1b`, small and fast), `STICKMAN_DIRECTOR_INTERVAL_S` (4).
     pub fn from_env() -> Config {
         let get = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
         Config {
-            url: get("STYK_OLLAMA_URL").unwrap_or_else(|| "http://localhost:11434".into()),
-            model: get("STYK_OLLAMA_MODEL").unwrap_or_else(|| "llama3.2:1b".into()),
+            url: get("STICKMAN_OLLAMA_URL").unwrap_or_else(|| "http://localhost:11434".into()),
+            model: get("STICKMAN_OLLAMA_MODEL").unwrap_or_else(|| "llama3.2:1b".into()),
             interval: Duration::from_secs_f32(
-                get("STYK_DIRECTOR_INTERVAL_S")
+                get("STICKMAN_DIRECTOR_INTERVAL_S")
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(4.0f32)
                     .max(1.0),

@@ -1,9 +1,9 @@
 [package]
-name = "stykanimate-overlay"
+name = "stickman"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-description = "Transparent, click-through macOS desktop overlay hosting an autonomous StykAnimate stickman"
+description = "Transparent, click-through macOS desktop overlay hosting an autonomous stickman"
 publish = false
 
 # -----------------------------------------------------------------------------

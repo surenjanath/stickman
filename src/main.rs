@@ -1,21 +1,21 @@
-//! StykAnimate desktop overlay: a transparent, click-through, always-on-top window
+//! Stickman: a transparent, click-through, always-on-top window
 //! covering the main display, with an AI-directed stick figure living on it.
 //!
 //! Threads (claude.md rule 1):
 //! - **main**: winit/AppKit event loop, fixed-step simulation, wgpu rendering.
-//! - **styk-windows**: polls the window server for app windows (platforms).
-//! - **styk-ocr**: Vision text detection on the active window (text platforms).
-//! - **styk-os**: Accessibility IPC (window shakes), which can block.
+//! - **stickman-windows**: polls the window server for app windows (platforms).
+//! - **stickman-ocr**: Vision text detection on the active window (text platforms).
+//! - **stickman-os**: Accessibility IPC (window shakes), which can block.
 //! - **tokio**: the AI director talking to Ollama.
 //!
 //! Environment (diagnostics and opt-outs):
-//! - `STYK_MODE=IDLE|OBSERVE|SABOTAGE|COMBAT`: force a mode; the director is off.
-//! - `STYK_HOLD_IDLE=1`: stand still (used to measure idle CPU).
-//! - `STYK_CLICK_THROUGH=0`: the overlay catches every click (blocks the screen).
-//! - `STYK_NO_CURSOR_PUSH=1`, `STYK_NO_WINDOW_SHAKE=1`, `STYK_NO_OCR=1`: disable
+//! - `STICKMAN_MODE=IDLE|OBSERVE|SABOTAGE|COMBAT`: force a mode; the director is off.
+//! - `STICKMAN_HOLD_IDLE=1`: stand still (used to measure idle CPU).
+//! - `STICKMAN_CLICK_THROUGH=0`: the overlay catches every click (blocks the screen).
+//! - `STICKMAN_NO_CURSOR_PUSH=1`, `STICKMAN_NO_WINDOW_SHAKE=1`, `STICKMAN_NO_OCR=1`: disable
 //!   the effects that touch the user's cursor, windows or screen contents.
-//! - `STYK_NO_PROMPTS=1`: don't show macOS permission dialogs.
-//! - `STYK_OLLAMA_URL`, `STYK_OLLAMA_MODEL`, `STYK_DIRECTOR_INTERVAL_S`: director.
+//! - `STICKMAN_NO_PROMPTS=1`: don't show macOS permission dialogs.
+//! - `STICKMAN_OLLAMA_URL`, `STICKMAN_OLLAMA_MODEL`, `STICKMAN_DIRECTOR_INTERVAL_S`: director.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;
@@ -25,22 +25,22 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use stykanimate_overlay::agent::{Agent, Event, Mode, Senses, FIXED_DT};
-use stykanimate_overlay::director::{self, Directive, Observation};
-use stykanimate_overlay::geom::{cg_to_cocoa, v2, Rect, V2};
-use stykanimate_overlay::input::Cursor;
-use stykanimate_overlay::macos::{
+use stickman::agent::{Agent, Event, Mode, Senses, FIXED_DT};
+use stickman::director::{self, Directive, Observation};
+use stickman::geom::{cg_to_cocoa, v2, Rect, V2};
+use stickman::input::Cursor;
+use stickman::macos::{
     self, OsAction, OverlayWindow, OVERLAY_COLLECTION_BEHAVIOR, OVERLAY_WINDOW_LEVEL,
 };
-use stykanimate_overlay::menubar::{MenuBar, Status};
-use stykanimate_overlay::ocr;
-use stykanimate_overlay::particles::Particles;
-use stykanimate_overlay::physics::{window_platforms, Platform, World};
-use stykanimate_overlay::render::{DrawList, Renderer};
-use stykanimate_overlay::settings::{Behaviour, Command, Settings};
-use stykanimate_overlay::stickman::{Segment, BONES, WALKER_RGB};
-use stykanimate_overlay::windows::{self, Snapshot};
-use stykanimate_overlay::words::{WordEvent, WordPlay};
+use stickman::menubar::{MenuBar, Status};
+use stickman::ocr;
+use stickman::particles::Particles;
+use stickman::physics::{window_platforms, Platform, World};
+use stickman::render::{DrawList, Renderer};
+use stickman::settings::{Behaviour, Command, Settings};
+use stickman::stickman::{Segment, BONES, WALKER_RGB};
+use stickman::windows::{self, Snapshot};
+use stickman::words::{WordEvent, WordPlay};
 use tokio::sync::watch;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalPosition, LogicalSize};
@@ -49,7 +49,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId, WindowLevel};
 
 #[cfg(not(target_os = "macos"))]
-compile_error!("stykanimate-overlay targets macOS (aarch64-apple-darwin) only");
+compile_error!("stickman targets macOS (aarch64-apple-darwin) only");
 
 /// Default figure scale (Settings: Medium): the ~250 pt rig becomes ~140 pt.
 #[cfg(test)]
@@ -122,10 +122,8 @@ fn main_display_rect() -> Rect {
 
 // The instance buffer must fit the figure (outline + fill), every particle and
 // the health bar.
-const _: () = assert!(
-    stykanimate_overlay::render::MAX_INSTANCES
-        >= 2 * BONES + stykanimate_overlay::particles::MAX_PARTICLES + 4
-);
+const _: () =
+    assert!(stickman::render::MAX_INSTANCES >= 2 * BONES + stickman::particles::MAX_PARTICLES + 4);
 
 /// How long the user must hover over the figure before clicks are intercepted.
 const AIM_DWELL: Duration = Duration::from_millis(120);
@@ -571,7 +569,7 @@ impl Scene {
                 f[3]
             );
             self.menubar_logged = true;
-            if env_flag("STYK_DEBUG_OPEN_MENU") {
+            if env_flag("STICKMAN_DEBUG_OPEN_MENU") {
                 self.menubar.open();
             }
         }
@@ -781,7 +779,7 @@ impl App {
 
         let d = self.display;
         let attributes = WindowAttributes::default()
-            .with_title("StykAnimate Overlay")
+            .with_title("Stickman")
             .with_transparent(true)
             .with_decorations(false) // borderless + frameless
             .with_resizable(false)
@@ -823,29 +821,29 @@ impl App {
             .as_deref()
             .map(Settings::load)
             .unwrap_or_default();
-        if let Some(m) = std::env::var("STYK_MODE")
+        if let Some(m) = std::env::var("STICKMAN_MODE")
             .ok()
             .and_then(|m| Mode::parse(&m))
         {
             settings.behaviour = Behaviour::from_mode(m);
-        } else if std::env::var("STYK_MODE").is_ok_and(|m| m.trim().is_empty()) {
+        } else if std::env::var("STICKMAN_MODE").is_ok_and(|m| m.trim().is_empty()) {
             settings.behaviour = Behaviour::Auto;
         }
-        if env_flag("STYK_NO_CURSOR_PUSH") {
+        if env_flag("STICKMAN_NO_CURSOR_PUSH") {
             settings.cursor_push = false;
         }
-        if env_flag("STYK_NO_WINDOW_SHAKE") {
+        if env_flag("STICKMAN_NO_WINDOW_SHAKE") {
             settings.window_shake = false;
         }
-        if env_flag("STYK_NO_OCR") {
+        if env_flag("STICKMAN_NO_OCR") {
             settings.walk_on_text = false;
         }
         settings.paused = false;
         let mut agent = Agent::new((d.width / 2.0) as f32, ground, settings.size.scale(), seed);
-        agent.hold_still = env_flag("STYK_HOLD_IDLE");
+        agent.hold_still = env_flag("STICKMAN_HOLD_IDLE");
 
         // Permissions: Accessibility (window shakes) and Screen Recording (OCR).
-        let prompts = !env_flag("STYK_NO_PROMPTS");
+        let prompts = !env_flag("STICKMAN_NO_PROMPTS");
         let ax = macos::accessibility_trusted(prompts);
         let ocr_wanted = settings.walk_on_text;
         let mut ocr_allowed = ocr_wanted && ocr::screen_capture_allowed();
@@ -1045,14 +1043,15 @@ impl ApplicationHandler for App {
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
-    let click_through = click_through_from_env(std::env::var("STYK_CLICK_THROUGH").ok().as_deref());
+    let click_through =
+        click_through_from_env(std::env::var("STICKMAN_CLICK_THROUGH").ok().as_deref());
     if !click_through {
-        log::warn!("STYK_CLICK_THROUGH=0: overlay will block mouse input to the whole screen");
+        log::warn!("STICKMAN_CLICK_THROUGH=0: overlay will block mouse input to the whole screen");
     }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
-        .thread_name("styk-worker")
+        .thread_name("stickman-worker")
         .enable_all()
         .build()
         .context("failed to start tokio runtime")?;
@@ -1084,7 +1083,7 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stykanimate_overlay::physics::PlatformKind;
+    use stickman::physics::PlatformKind;
 
     #[test]
     fn ground_sits_on_top_of_bottom_dock() {
@@ -1162,7 +1161,7 @@ mod tests {
 
     #[test]
     fn idle_breathing_skips_most_frames_but_walking_never_does() {
-        use stykanimate_overlay::agent::Action;
+        use stickman::agent::Action;
         let ground = Platform {
             x0: 0.0,
             x1: 1800.0,

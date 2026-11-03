@@ -1,4 +1,4 @@
-# StykAnimate Desktop Overlay
+# Stickman
 
 A native macOS desktop companion: a stick figure that lives on top of your desktop.
 It walks along the Dock, climbs onto your windows, stands on lines of text, dodges
@@ -50,8 +50,8 @@ menu bars. Click it for:
 | Grant … | Shortcuts to the right System Settings pane, shown only while a permission is missing. |
 | Quit (⌘Q) | Quit the app. |
 
-Settings are saved to `~/Library/Application Support/StykAnimate/settings.json`
-(override with `STYK_SETTINGS`) and restored on the next launch. Environment
+Settings are saved to `~/Library/Application Support/Stickman/settings.json`
+(override with `STICKMAN_SETTINGS`) and restored on the next launch. Environment
 variables below override them at startup.
 
 ## Requirements
@@ -80,18 +80,18 @@ launching terminal.
 
 | Variable | Effect |
 |---|---|
-| `STYK_MODE=IDLE\|OBSERVE\|SABOTAGE\|COMBAT` | Force a mode (director off). |
-| `STYK_OLLAMA_MODEL` | Ollama model (default `llama3.2:1b`). |
-| `STYK_OLLAMA_URL` | Ollama URL (default `http://localhost:11434`). |
-| `STYK_DIRECTOR_INTERVAL_S` | Seconds between director decisions (default 4). |
-| `STYK_NO_CURSOR_PUSH=1` | Punches don't move your pointer. |
-| `STYK_NO_WINDOW_SHAKE=1` | Stomps don't move your windows. |
-| `STYK_NO_OCR=1` | Don't read screen text (no walking on text). |
-| `STYK_NO_PROMPTS=1` | Never show macOS permission dialogs. |
-| `STYK_HOLD_IDLE=1` | Stand still (used to measure idle CPU). |
-| `STYK_SETTINGS` | Settings file path (default `~/Library/Application Support/StykAnimate/settings.json`). |
-| `STYK_CLICK_THROUGH=0` | Debug: the overlay catches every click (blocks the screen). |
-| `STYK_DEBUG_OPEN_MENU=1` | Debug: pop the menu bar menu open once at startup. |
+| `STICKMAN_MODE=IDLE\|OBSERVE\|SABOTAGE\|COMBAT` | Force a mode (director off). |
+| `STICKMAN_OLLAMA_MODEL` | Ollama model (default `llama3.2:1b`). |
+| `STICKMAN_OLLAMA_URL` | Ollama URL (default `http://localhost:11434`). |
+| `STICKMAN_DIRECTOR_INTERVAL_S` | Seconds between director decisions (default 4). |
+| `STICKMAN_NO_CURSOR_PUSH=1` | Punches don't move your pointer. |
+| `STICKMAN_NO_WINDOW_SHAKE=1` | Stomps don't move your windows. |
+| `STICKMAN_NO_OCR=1` | Don't read screen text (no walking on text). |
+| `STICKMAN_NO_PROMPTS=1` | Never show macOS permission dialogs. |
+| `STICKMAN_HOLD_IDLE=1` | Stand still (used to measure idle CPU). |
+| `STICKMAN_SETTINGS` | Settings file path (default `~/Library/Application Support/Stickman/settings.json`). |
+| `STICKMAN_CLICK_THROUGH=0` | Debug: the overlay catches every click (blocks the screen). |
+| `STICKMAN_DEBUG_OPEN_MENU=1` | Debug: pop the menu bar menu open once at startup. |
 | `RUST_LOG=debug` | Verbose logs: director decisions, OCR, perf stats, click-through toggles. |
 
 ## Testing
@@ -99,7 +99,7 @@ launching terminal.
 ```sh
 cargo test --release                       # everything (PRD CPU budget enforced)
 cargo test --release --test overlay -- ocr # one GUI test by name
-STYK_INTERACTIVE_TESTS=1 cargo test --release --test overlay -- click  # hands off the mouse
+STICKMAN_INTERACTIVE_TESTS=1 cargo test --release --test overlay -- click  # hands off the mouse
 cargo clippy --all-targets -- -D warnings
 cargo run --release --example pose_sheet -- docs/poses.png   # re-render the pose sheet
 ```
@@ -133,23 +133,23 @@ through the window server and AppKit:
 - **Menu bar:** the icon is visible and placed in the menu bar.
 - **Click (opt-in):** clicking the figure knocks it back, bursts particles and
   returns focus to your app. It drives the real pointer, so it only runs with
-  `STYK_INTERACTIVE_TESTS=1`.
+  `STICKMAN_INTERACTIVE_TESTS=1`.
 
 The GUI tests run overlays with cursor pushes, window shakes and permission
-prompts disabled, and with a throwaway settings file. Set `STYK_SKIP_GUI_TESTS=1` to skip them (e.g. on CI).
+prompts disabled, and with a throwaway settings file. Set `STICKMAN_SKIP_GUI_TESTS=1` to skip them (e.g. on CI).
 
 ## Architecture
 
 ```text
 main thread (winit / AppKit)                         background
 ┌───────────────────────────────────────────┐   ┌───────────────────────────────┐
-│ about_to_wait: tick at 60/30 Hz           │   │ styk-windows: CGWindowList    │
+│ about_to_wait: tick at 60/30 Hz           │   │ stickman-windows: CGWindowList    │
 │  ├ Cursor::sample (pos, velocity)         │◄──┤   every 250 ms → Snapshot     │
-│  ├ platforms: ground + window tops + text │◄──┤ styk-ocr: Vision on the       │
+│  ├ platforms: ground + window tops + text │◄──┤ stickman-ocr: Vision on the       │
 │  │   → physics::World (rapier2d)          │   │   settled active window       │
 │  ├ director decisions → Mode              │◄──┤ tokio: director ↔ Ollama      │
 │  ├ Agent::update ×N (fixed 60 Hz steps)   │   │                               │
-│  ├ events → particles, cursor push,       │──►│ styk-os: Accessibility shakes │
+│  ├ events → particles, cursor push,       │──►│ stickman-os: Accessibility shakes │
 │  │          window shake                  │   └───────────────────────────────┘
 │  ├ click intent → setIgnoresMouseEvents   │
 │  └ present (skip if nothing changed)      │
@@ -162,7 +162,7 @@ main thread (winit / AppKit)                         background
 | `src/main.rs` | App wiring: window, threads, tick loop, events, click intent, focus restore, director dwell. |
 | `src/agent.rs` | The figure's brain and body: reflexes, modes, actions, fixed-step physics, pose blending. |
 | `src/poses.rs` | Action poses (stance, punch, kick, jump, flail, tumble, dodge, stomp, taunt, think, run). |
-| `src/stickman.rs` | StykAnimate Walker rig, forward kinematics, leg IK, walk/run gaits, idle pose. |
+| `src/stickman.rs` | Walker rig, forward kinematics, leg IK, walk/run gaits, idle pose. |
 | `src/physics.rs` | rapier2d platform world: one-way landing and support queries, window-edge clipping. |
 | `src/particles.rs` | Explosions, sparks, dust, shockwave rings, KO stars. |
 | `src/render.rs`, `src/stickman.wgsl` | SDF capsule/ring/disc instancing over a transparent Metal surface. |

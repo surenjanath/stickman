@@ -4,10 +4,10 @@
 //!
 //! Custom harness (`harness = false`): AppKit queries want the main thread, and the
 //! tests must run one at a time — two overlays would intercept each other's checks.
-//! Needs a logged-in GUI session; set `STYK_SKIP_GUI_TESTS=1` to skip (e.g. on CI).
+//! Needs a logged-in GUI session; set `STICKMAN_SKIP_GUI_TESTS=1` to skip (e.g. on CI).
 //! While the click-through control test runs (~1 s) the screen briefly ignores clicks.
 //! The click test drives the real pointer, so it only runs with
-//! `STYK_INTERACTIVE_TESTS=1` (keep your hands off the mouse while it runs).
+//! `STICKMAN_INTERACTIVE_TESTS=1` (keep your hands off the mouse while it runs).
 
 #![allow(unexpected_cfgs)] // objc 0.2 macros
 
@@ -32,7 +32,7 @@ use objc::{class, msg_send, sel, sel_impl, Encode, Encoding};
 #[link(name = "AppKit", kind = "framework")]
 extern "C" {}
 
-const BIN: &str = env!("CARGO_BIN_EXE_stykanimate-overlay");
+const BIN: &str = env!("CARGO_BIN_EXE_stickman");
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 
 // ---------------------------------------------------------------------------
@@ -54,15 +54,17 @@ impl Overlay {
             .env("RUST_LOG", "info")
             // Defaults keep test runs off the user's cursor, windows and dialogs,
             // and the behaviour deterministic (no LLM). Tests override as needed.
-            .env("STYK_NO_PROMPTS", "1")
-            .env("STYK_NO_CURSOR_PUSH", "1")
-            .env("STYK_NO_WINDOW_SHAKE", "1")
-            .env("STYK_MODE", "IDLE")
+            .env("STICKMAN_NO_PROMPTS", "1")
+            .env("STICKMAN_NO_CURSOR_PUSH", "1")
+            .env("STICKMAN_NO_WINDOW_SHAKE", "1")
+            .env("STICKMAN_MODE", "IDLE")
             // Never read or write the user's real settings file.
             .env(
-                "STYK_SETTINGS",
-                std::env::temp_dir()
-                    .join(format!("styk-test-settings-{}.json", std::process::id())),
+                "STICKMAN_SETTINGS",
+                std::env::temp_dir().join(format!(
+                    "stickman-test-settings-{}.json",
+                    std::process::id()
+                )),
             )
             .envs(envs.iter().copied())
             .stdout(Stdio::null())
@@ -440,7 +442,7 @@ fn capture(o: &Overlay) -> Capture {
 
 fn test_stickman_is_drawn_on_the_ground() {
     // Standing still, so it can't have wandered onto a window by now.
-    let o = &Overlay::spawn(&[("STYK_HOLD_IDLE", "1")]);
+    let o = &Overlay::spawn(&[("STICKMAN_HOLD_IDLE", "1")]);
     pump_run_loop(Duration::from_millis(400));
     let c = capture(o);
     let bbox = c
@@ -520,7 +522,7 @@ fn test_cpu_while_walking_is_bounded(o: &Overlay) {
 
 /// PRD 5: under 5% CPU during idle observation.
 fn test_idle_cpu_is_under_prd_budget() {
-    let o = Overlay::spawn(&[("STYK_HOLD_IDLE", "1")]);
+    let o = Overlay::spawn(&[("STICKMAN_HOLD_IDLE", "1")]);
     // Warm up: first OCR pass loads Vision's model, first frames compile pipelines.
     pump_run_loop(Duration::from_secs(5));
     let pct = cpu_percent(&o, 8);
@@ -546,7 +548,7 @@ fn test_startup_time(o: &Overlay) {
 /// Control: with click-through off, the same hit test must find the overlay.
 /// Proves `test_mouse_events_pass_through` can actually detect a failure.
 fn test_control_hit_test_detects_opaque_overlay() {
-    let o = Overlay::spawn(&[("STYK_CLICK_THROUGH", "0")]);
+    let o = Overlay::spawn(&[("STICKMAN_CLICK_THROUGH", "0")]);
     assert_eq!(field(&o.log_line, "click_through"), "false");
     let d = main_display();
     let hit = window_hit_at(d.size.width / 2., d.size.height / 2.);
@@ -607,13 +609,13 @@ fn cursor_now() -> CGPoint {
 /// keyboard focus straight back to the app the user was in.
 fn test_click_on_figure_knocks_it_back() {
     use core_graphics::event::CGEventType;
-    if std::env::var_os("STYK_INTERACTIVE_TESTS").is_none() {
-        println!("      (skipped: moves the real pointer; run with STYK_INTERACTIVE_TESTS=1 and hands off the mouse)");
+    if std::env::var_os("STICKMAN_INTERACTIVE_TESTS").is_none() {
+        println!("      (skipped: moves the real pointer; run with STICKMAN_INTERACTIVE_TESTS=1 and hands off the mouse)");
         return;
     }
     let o = Overlay::spawn(&[
-        ("STYK_HOLD_IDLE", "1"),
-        ("RUST_LOG", "info,stykanimate_overlay=debug"),
+        ("STICKMAN_HOLD_IDLE", "1"),
+        ("RUST_LOG", "info,stickman=debug"),
     ]);
     let before_app = frontmost_app_pid();
     let resting = capture(&o);
@@ -671,7 +673,7 @@ fn test_ai_director_decides() {
         Duration::from_millis(300),
     )
     .is_ok();
-    let o = Overlay::spawn(&[("STYK_MODE", ""), ("STYK_DIRECTOR_INTERVAL_S", "1")]);
+    let o = Overlay::spawn(&[("STICKMAN_MODE", ""), ("STICKMAN_DIRECTOR_INTERVAL_S", "1")]);
     // With Ollama up, a model decision must arrive (a transient fallback is fine);
     // without it, the built-in director must keep the figure going.
     let want = if ollama_up { "(Llm," } else { "(Fallback," };
@@ -683,7 +685,7 @@ fn test_ai_director_decides() {
 
 /// PRD 3.2: OCR turns the active window's text into platforms.
 fn test_ocr_finds_text_platforms() {
-    let o = Overlay::spawn(&[("RUST_LOG", "info,stykanimate_overlay=debug")]);
+    let o = Overlay::spawn(&[("RUST_LOG", "info,stickman=debug")]);
     if field(&o.log_line, "ocr") != "true" {
         println!("      (skipped: Screen Recording not granted to the terminal)");
         return;
@@ -726,8 +728,8 @@ fn test_menu_bar_icon(o: &Overlay) {
 /// and throws them at the cursor (pointer pushes are disabled in tests).
 fn test_rips_words_and_throws_them() {
     let o = Overlay::spawn(&[
-        ("STYK_MODE", "COMBAT"),
-        ("RUST_LOG", "info,stykanimate_overlay=debug"),
+        ("STICKMAN_MODE", "COMBAT"),
+        ("RUST_LOG", "info,stickman=debug"),
     ]);
     if field(&o.log_line, "ocr") != "true" {
         println!("      (skipped: Screen Recording not granted to the terminal)");
@@ -773,8 +775,8 @@ fn test_rips_words_and_throws_them() {
 type SharedTest = (&'static str, fn(&Overlay));
 
 fn main() {
-    if std::env::var_os("STYK_SKIP_GUI_TESTS").is_some() {
-        println!("STYK_SKIP_GUI_TESTS set: skipping overlay GUI tests");
+    if std::env::var_os("STICKMAN_SKIP_GUI_TESTS").is_some() {
+        println!("STICKMAN_SKIP_GUI_TESTS set: skipping overlay GUI tests");
         return;
     }
     // AppKit connection for the hit-test / NSWorkspace queries.

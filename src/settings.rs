@@ -1,5 +1,5 @@
 //! User settings, edited from the menu bar and saved to
-//! `~/Library/Application Support/StykAnimate/settings.json` (or `$STYK_SETTINGS`).
+//! `~/Library/Application Support/Stickman/settings.json` (or `$STICKMAN_SETTINGS`).
 
 use std::path::{Path, PathBuf};
 
@@ -198,13 +198,13 @@ impl Settings {
         *self != before
     }
 
-    /// Default location, overridable with `STYK_SETTINGS`.
+    /// Default location, overridable with `STICKMAN_SETTINGS`.
     pub fn default_path() -> Option<PathBuf> {
-        if let Some(p) = std::env::var_os("STYK_SETTINGS") {
+        if let Some(p) = std::env::var_os("STICKMAN_SETTINGS") {
             return Some(PathBuf::from(p));
         }
         let home = std::env::var_os("HOME")?;
-        Some(PathBuf::from(home).join("Library/Application Support/StykAnimate/settings.json"))
+        Some(PathBuf::from(home).join("Library/Application Support/Stickman/settings.json"))
     }
 
     /// Load from `path`; a missing or unreadable file gives the defaults.
@@ -291,7 +291,7 @@ mod tests {
 
     #[test]
     fn save_and_load_round_trip_without_pause() {
-        let dir = std::env::temp_dir().join(format!("styk-settings-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("stickman-settings-{}", std::process::id()));
         let path = dir.join("settings.json");
         let s = Settings {
             behaviour: Behaviour::Sabotage,
@@ -308,7 +308,8 @@ mod tests {
 
     #[test]
     fn missing_or_corrupt_files_give_defaults() {
-        let dir = std::env::temp_dir().join(format!("styk-settings-bad-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("stickman-settings-bad-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(Settings::load(&dir.join("nope.json")), Settings::default());
         let bad = dir.join("bad.json");

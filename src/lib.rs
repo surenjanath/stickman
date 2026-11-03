@@ -1,4 +1,4 @@
-//! StykAnimate desktop overlay: an AI-directed stick figure that lives on the
+//! Stickman: an AI-directed stick figure that lives on the
 //! macOS desktop. The binary (`src/main.rs`) wires these modules into the winit
 //! event loop.
 

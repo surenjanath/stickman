@@ -12,8 +12,8 @@ use core_graphics::context::{CGContext, CGLineCap};
 use core_graphics::geometry::{CGPoint, CGRect, CGSize};
 use objc::runtime::Object;
 use objc::{class, msg_send, sel, sel_impl};
-use stykanimate_overlay::poses;
-use stykanimate_overlay::stickman::{
+use stickman::poses;
+use stickman::stickman::{
     depth_below_root, forward_kinematics, idle_pose, walk_pose, BoneKind, Pose,
 };
 
@@ -66,7 +66,7 @@ fn main() {
         ("throw wind-up", poses::throw(0.25, -0.3)),
         ("throw release", poses::throw(0.45, -0.3)),
         ("knocked out", ko),
-        ("rest (source)", stykanimate_overlay::stickman::rest_pose()),
+        ("rest (source)", stickman::stickman::rest_pose()),
     ];
     let rows = sheet.len().div_ceil(COLS);
     let (w, hgt) = (CELL * COLS as f64, CELL * rows as f64);

@@ -1,8 +1,8 @@
-# Product Requirements Document: StykAnimate AI Desktop Overlay
+# Product Requirements Document: Stickman AI Desktop Overlay
 
 ## 1. Executive Summary
 
-StykAnimate is a native desktop overlay application that deploys an autonomous, interactive 2D stickman onto the user's screen. Operating as an advanced, context-aware desktop companion, the agent dynamically interacts with the operating system environment. It walks on active application windows, scales on-screen text, engages in physics-based combat with the user's mouse cursor, and alters its behavior based on decisions made by a localized AI engine.
+Stickman is a native desktop overlay application that deploys an autonomous, interactive 2D stickman onto the user's screen. Operating as an advanced, context-aware desktop companion, the agent dynamically interacts with the operating system environment. It walks on active application windows, scales on-screen text, engages in physics-based combat with the user's mouse cursor, and alters its behavior based on decisions made by a localized AI engine.
 
 ## 2. Target Platform & Hardware Target
 
@@ -40,7 +40,7 @@ StykAnimate is a native desktop overlay application that deploys an autonomous, 
 * **Core Language:** Rust
 * **Window Management:** `winit` or `tao` for transparent overlay generation.
 * **macOS Interop:** `objc`, `core-graphics`, and `accessibility-sys` for active window polling, global cursor tracking, and toggling `NSWindow` event properties.
-* **Rendering Pipeline:** `wgpu` for hardware-accelerated 2D sprite rendering (StykAnimate assets) and customized particle emission (explosions).
+* **Rendering Pipeline:** `wgpu` for hardware-accelerated 2D sprite rendering (stickman assets) and customized particle emission (explosions).
 * **Physics Engine:** `rapier2d` for managing the agent's kinematic state, window edge colliders, and impulse forces.
 * **OCR Integration:** `tesseract-sys` for high-speed localized text bounding box generation.
 * **AI Networking:** `reqwest` for asynchronous local HTTP polling to the Ollama API.
