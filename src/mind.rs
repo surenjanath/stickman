@@ -256,6 +256,12 @@ pub fn fit_note(text: &str) -> String {
     if out.is_empty() {
         out = text.chars().take(20).collect(); // one long word
     }
+    // A stray last letter (a word cut short by an older version) goes.
+    if let Some((head, last)) = out.rsplit_once(' ') {
+        if last.chars().count() == 1 && !matches!(last, "I" | "A") {
+            out = head.to_string();
+        }
+    }
     out.trim_end_matches([',', ';', ':', '-']).to_string()
 }
 
@@ -788,6 +794,8 @@ mod tests {
         assert_eq!(m.scheme, "Operation Doom: steal the cursor");
         assert_eq!(m.note, "YOU WILL PAY, HUMAN");
         assert_eq!(fit_note("grrr! you will not pass"), "GRRR! YOU WILL NOT");
+        assert_eq!(fit_note("GRRR! YOU WILL NOT P"), "GRRR! YOU WILL NOT");
+        assert_eq!(fit_note("I SEE A"), "I SEE A");
         assert_eq!(m.reflections, 1);
         assert!(m.summary().contains("Operation Doom"));
         // An empty reflection keeps the old conclusions.

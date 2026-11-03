@@ -82,11 +82,12 @@ impl Hat {
     pub fn draw(self, out: &mut DrawList, c: V2, up: V2, r: f32) {
         let right = v2(-up.y, up.x);
         let at = |x: f32, y: f32| c + right * (x * r) + up * (y * r);
-        // A white halo under each stroke keeps hats readable on dark desktops.
-        let mut ink = |a: V2, b: V2, half: f32, color: [f32; 4]| {
-            out.capsule(a, b, half + 1.2, [1.0, 1.0, 1.0, 0.75]);
-            out.capsule(a, b, half, color);
-        };
+        // Strokes are collected, then drawn as one white halo (keeps hats
+        // readable on dark desktops) under all the colour, so overlapping
+        // strokes read as one solid shape.
+        let mut strokes: Vec<(V2, V2, f32, [f32; 4])> = Vec::new();
+        let mut ink = |a: V2, b: V2, half: f32, color: [f32; 4]| strokes.push((a, b, half, color));
+        let mut dots: Vec<(V2, f32, [f32; 4])> = Vec::new();
         let s = r / 22.0; // stroke scale
         match self {
             Hat::None => {}
@@ -118,7 +119,7 @@ impl Hat {
                 }
                 ink(at(-0.4, 0.9), at(-0.4, 1.3), 2.4 * s, gold);
                 ink(at(0.4, 0.9), at(0.4, 1.3), 2.4 * s, gold);
-                out.disc(at(0.0, 1.0), 2.6 * s, [0.85, 0.1, 0.2, 1.0]);
+                dots.push((at(0.0, 1.0), 2.6 * s, [0.85, 0.1, 0.2, 1.0]));
             }
             Hat::Pirate => {
                 let black = [0.1, 0.08, 0.08, 1.0];
@@ -126,7 +127,7 @@ impl Hat {
                 ink(at(-1.45, 0.85), at(0.0, 1.7), 4.0 * s, black);
                 ink(at(1.45, 0.85), at(0.0, 1.7), 4.0 * s, black);
                 ink(at(-0.6, 1.1), at(0.6, 1.1), 5.0 * s, black);
-                out.disc(at(0.0, 1.2), 3.0 * s, [0.95, 0.95, 0.95, 1.0]);
+                dots.push((at(0.0, 1.2), 3.0 * s, [0.95, 0.95, 0.95, 1.0]));
             }
             Hat::Party => {
                 let colors = [
@@ -139,7 +140,7 @@ impl Hat {
                     let w = 0.75 * (1.0 - k as f32 / 6.0);
                     ink(at(-w, y), at(w, y), 2.6 * s, colors[k % 3]);
                 }
-                out.disc(at(0.0, 2.0), 3.6 * s, [1.0, 1.0, 1.0, 1.0]);
+                dots.push((at(0.0, 2.0), 3.6 * s, [1.0, 1.0, 1.0, 1.0]));
             }
             Hat::Wizard => {
                 let purple = [0.35, 0.15, 0.65, 1.0];
@@ -150,7 +151,7 @@ impl Hat {
                     let lean = 0.06 * k as f32;
                     ink(at(-w - lean, y), at(w - lean, y), 2.8 * s, purple);
                 }
-                out.disc(at(0.1, 1.45), 2.8 * s, [1.0, 0.85, 0.2, 1.0]);
+                dots.push((at(0.1, 1.45), 2.8 * s, [1.0, 0.85, 0.2, 1.0]));
             }
             Hat::Horns => {
                 let red = [0.8, 0.08, 0.08, 1.0];
@@ -172,6 +173,15 @@ impl Hat {
                 ink(at(1.0, 0.8), at(1.55, 1.4), 2.8 * s, bone);
                 ink(at(1.55, 1.4), at(1.4, 1.8), 2.0 * s, bone);
             }
+        }
+        for &(a, b, half, _) in &strokes {
+            out.capsule(a, b, half + 1.2, [1.0, 1.0, 1.0, 0.75]);
+        }
+        for &(a, b, half, color) in &strokes {
+            out.capsule(a, b, half, color);
+        }
+        for (c, r, color) in dots {
+            out.disc(c, r, color);
         }
     }
 }

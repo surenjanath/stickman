@@ -30,6 +30,10 @@ Written in Rust for Apple Silicon:
 | **Super powers** | **Super jump:** a glowing power-up crouch, then a leap of up to ~1000 pt with a trail and a shockwave, to reach a cursor up high, a far-off window or a word. **Telekinesis:** hand out, purple aura: it lifts your pointer, wobbles it in the air and flings it; or raises a group of up to 6 words off the page, keeps them orbiting overhead, then fires them at your cursor one after another. |
 | **A mind of its own** | It remembers what you do to it (and in which app), and it develops feelings toward you: resentment, fear, affection, pride. Every couple of minutes it reflects on its memories with the local AI and rewrites its own beliefs ("The user hits me most in Safari"), a scheme ("Operation Pointer Doom: …") and the next note it wants to leave you. All of that feeds back into how it decides what to do: a small, local take on self-improving agent harnesses like Google's Harness². Kept in `mind.json`; see it, or wipe it, in Settings → Mind. |
 | **Losing its temper** | Push its resentment past 75 and it snaps ("THAT'S IT! F*** YOU!"): it flushes red, steams from the head, swears whatever its language (bleeped unless you turn bleeping off; never slurs), spells "F*** YOU" in torn-off letters, and attacks relentlessly until its resentment drops below 55 (petting helps). Switch off with "Loses its temper". |
+| **A diary** | Every day it tallies what happened; when the date changes, the local AI writes a short, dramatic "Dear diary" entry about yesterday (or a rule-based one when Ollama is off). It reads the opening aloud when you're back, and keeps 60 days of entries on the Mind tab. **Write Diary Now** writes today's so far. |
+| **Achievements & hats** | 17 achievements (First Blood, Pickpocket, Icon Thief, Window Wrecker, Swordsman, Duelist, Desk Champion, Beloved, Seething, Pen Pal, Philosopher, Veteran, …), each celebrated with a trophy bubble and sparks. Levels and achievements unlock 8 hats it can wear (ninja bandana, top hat, crown, pirate hat, party hat, wizard hat, devil horns, viking helmet); pick one in Personality, where locked ones say how to earn them. |
+| **Moves you unlock** | Like a game, it starts with just its fists: super jump at level 2, telekinesis at 3, scrollbar swords at 4, window throwing at 5. Each level-up announces what it unlocked. Untick **Earn moves by levelling up** to have everything from the start. |
+| **Polite on calls, sleepy at night** | While any app is using a camera (a video call, most likely) it whispers "Shh… you're on a call", then goes silent and harmless: no speech, sound, notes or rivals, nothing done to your cursor or windows. It only checks whether a camera is running; it never opens one. After 11 pm it nods off four times sooner. Both can be switched off. |
 | **Ransom notes** | It spells messages to you with letters torn off your screen, each one cut out with a scrap of its page; letters that aren't on screen become coloured cut-outs. The message depends on its mood, its mode and its last reflection ("I REMEMBER YOU", "PLEASE STOP", "FIGHT ME"). |
 | **Throwing windows** | With telekinesis it can lift your active window, wobble it in the air and hurl it at your cursor (or fling it aside); it bounces off the screen edges and slides to a stop, always kept on screen. |
 | **Dock icons and swords** | Standing on the Dock it rips app icons up from under its feet and throws them (copies; your Dock is untouched). In combat it rips a scrollbar off your window and fights with it as a sword, then hurls it. |
@@ -45,11 +49,13 @@ Written in Rust for Apple Silicon:
 | **Flying kick** | In combat, when your cursor hovers above it, the figure leaps and kicks it in mid-air. |
 | **Grab & throw the cursor** | In combat, a slow cursor within reach is sometimes snatched with both hands, hoisted overhead and lobbed across the screen: your real pointer is pinned to its hands, then flies along the arc. Yank the mouse away or click the figure to escape; a hold never lasts more than 3 s. Only while *Punches Push My Cursor* is on. |
 | **Speech bubbles** | The AI director gives the figure a short line when its mood changes ("That's it. It's on!"), and it quips when hit, knocked out, dodging, grabbing or throwing. |
-| **Sound** | Punches, kicks, whooshes, knockback booms, landing thuds, pops, stomps, a talking babble and a knockout wah-wah, all synthesised in code (no audio files) and panned by where they happen. |
+| **Sound** | Punches, kicks, whooshes, knockback booms, landing thuds, pops, stomps, a talking babble and a knockout wah-wah, all synthesised in code (no audio files) and panned by where they happen. Volume slider in Fun & Sound. |
 | **Multiple displays** | One overlay per screen. Each screen has its own floor (the Dock top, or the screen bottom), and windows on every screen are platforms. The figure wanders across a shared screen edge, dropping down when the next screen's floor is lower; an edge that would be a step up is a wall. Plugging in or rearranging displays is picked up within 2 s. |
 | **Sabotage** | It climbs onto your active window and stomps on it, shaking the window via Accessibility, or kicks it so the window slides across the screen (it rides along, and the window never leaves its screen). |
 | **AI director** | Every 4 s a local Ollama model (`llama3.2:1b` by default, ~200–300 ms) picks `IDLE` / `OBSERVE` / `SABOTAGE` / `COMBAT` from what you're doing: active app, mouse speed, hits, health, frustration, idle time. Modes last at least 12 s, except immediate retaliation after a hit. If Ollama is down, a built-in director takes over. |
 | **Efficiency** | 60 Hz simulation when something moves, 30 Hz otherwise; frames that wouldn't visibly change are skipped. Idle ≈ 2–3% of one core (PRD budget 5%), walking ≈ 13–16%. |
+
+![The hats it can earn: bandana, top hat, crown, pirate, party, wizard, horns, viking](docs/hats.png)
 
 ## Settings window
 
@@ -58,10 +64,10 @@ tabs with headed sections:
 
 | Tab | What's there |
 |---|---|
-| Mind | Live: its mood and level; bars for resentment, fear, grudge, affection, pride, health and experience (yellow, then red when they get bad); what it's thinking right now, its scheme, beliefs and next note; a log of its thoughts and memories; Reflect Now, Leave Me a Note, Wipe Its Memory, Forgive & Reset Level. |
-| Personality | Name, colour, size; temper and chattiness sliders, language, bleeping, losing its temper; behaviour (Auto or one pinned mood). |
+| Mind | Live: its mood and level; bars for resentment, fear, grudge, affection, pride, health and experience (yellow, then red when they get bad); what it's thinking right now, its scheme, beliefs and next note; a log of its thoughts and memories; its diary; achievements earned and what to go for next; Reflect Now, Leave Me a Note, Write Diary Now, Wipe Its Memory, Forgive & Reset Level. |
+| Personality | Name, colour, size, hat; temper and chattiness sliders, language, bleeping, losing its temper; behaviour (Auto or one pinned mood), quiet during video calls, sleepy at night, earn moves by levelling up. |
 | Abilities | Your cursor (pushes, grabs), your windows (shakes, shoves, throws), your screen (walking on text, ripping words and how long they stay, Dock icons, scrollbar swords), powers and events (super powers, jail-break intro, rival visits). |
-| Fun & Sound | Naps, dancing, dancing to music, doodles, sitting on edges, speech bubbles, sound effects. |
+| Fun & Sound | Naps, dancing, dancing to music, doodles, sitting on edges, speech bubbles, sound effects and their volume. |
 
 Everything is saved and restored on the next launch. Environment variables
 below override settings at startup.
@@ -123,8 +129,9 @@ launching terminal.
 | `STICKMAN_CLICK_THROUGH=0` | Debug: the overlay catches every click (blocks the screen). |
 | `STICKMAN_DEBUG_OPEN_MENU=1` | Debug: pop the menu bar menu open once at startup. |
 | `STICKMAN_DEBUG_SAY="…"` | Debug: say this line at startup. |
-| `STICKMAN_DEBUG_DO=sleep\|dance\|cheer\|doodle\|superjump\|mindwords\|rival\|draw\|sketch\|note\|reflect` | Debug: do that 3 s after launch. |
+| `STICKMAN_DEBUG_DO=sleep\|dance\|cheer\|doodle\|superjump\|mindwords\|throwwindow\|rival\|draw\|sketch\|note\|reflect\|rage\|diary` | Debug: do that 3 s after launch. |
 | `STICKMAN_DEBUG_OPEN_SETTINGS=1` | Debug: open the Settings window at launch (or `=Mind`, `=Abilities`, … for that tab). |
+| `STICKMAN_DEBUG_HAT=Crown` | Debug: wear that hat even if it's locked (`Bandana`, `TopHat`, `Pirate`, `Party`, `Wizard`, `Horns`, `Viking`). |
 | `STICKMAN_DEBUG_GRAB=1` | Debug: in combat, always grab a slow cursor in reach (instead of 30% of the time). |
 | `RUST_LOG=debug` | Verbose logs: director decisions, OCR, perf stats, click-through toggles. |
 
@@ -141,7 +148,7 @@ cargo run --release --example pose_sheet -- docs/poses.png   # re-render the pos
 cargo run --release --example sfx_demo     # hear every sound effect
 ```
 
-**Unit tests (181).**
+**Unit tests (185).**
 - **Collision:** one-way landings, no tunnelling, window-edge occlusion clipping.
 - **Walking and running:** feet never slide; feet always on the ground.
 - **Poses:** IK accuracy and knee direction; hands and arms never cross the head.
@@ -304,7 +311,8 @@ Engineering rules (from `claude.md`):
 | 5 | AI director (Ollama) with fallback | ✅ |
 | 6 | OCR text traversal (Vision) | ✅ |
 | 7 | Speech bubbles, sound effects, grabbing and throwing the cursor, multiple displays | ✅ |
-| Next | Climbing up to a higher neighbouring screen, more combat moves (wall jumps, air kicks), voice lines from the director | — |
+| 8 | A mind (memories, feelings, reflection), ransom notes, rage, a diary, achievements, hats, unlockable moves, politeness on calls | ✅ |
+| Next | Boss fights, a minion army, piles of thrown words and icons that stay physical, climbing up to a higher neighbouring screen | — |
 
 ## Credits
 
