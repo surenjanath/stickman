@@ -87,6 +87,7 @@ impl Rival {
             ammo: None,
             tk_words_near: 0,
             music: false,
+            can_throw_window: false,
             ..*base
         }
     }
@@ -215,6 +216,7 @@ mod tests {
             can_shove: false,
             tk_words_near: 0,
             music: false,
+            can_throw_window: false,
         }
     }
 

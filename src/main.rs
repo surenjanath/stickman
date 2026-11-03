@@ -52,6 +52,7 @@ use stickman::speech::{Moment, Priority, Speech};
 use stickman::stats::{Feat, Stats};
 use stickman::stickman::{Segment, BONES};
 use stickman::windows::{self, Snapshot};
+use stickman::winfly::{Stage, WindowFlight};
 use stickman::words::{WordEvent, WordPlay};
 use tokio::sync::watch;
 use winit::application::ApplicationHandler;
@@ -315,6 +316,9 @@ struct Scene {
     seed: u64,
     // Effects on the user's desktop.
     os_tx: Sender<OsAction>,
+    /// Moves the active window while it's thrown.
+    mover: macos::WindowMover,
+    flight: Option<WindowFlight>,
     force_catch_clicks: bool,
     // Input bookkeeping.
     pending_click: bool,
@@ -837,6 +841,16 @@ impl Scene {
         if self.words.tk_active() && mind.is_none_or(|(_, on)| on != Mind::Words) {
             self.words.tk_drop();
         }
+        if let Some(f) = &self.flight {
+            if f.stage == Stage::Lift {
+                // Glow along the window's edges while it's held.
+                let (p, sz) = (f.pos, f.size);
+                for k in [0.1, 0.5, 0.9] {
+                    self.particles.aura(p + v2(sz.x * k, 0.0), 0.5);
+                    self.particles.aura(p + v2(sz.x * k, sz.y), 0.5);
+                }
+            }
+        }
         if let Some((hand, on)) = mind {
             self.particles.aura(hand, 1.5);
             match (on, self.captive) {
@@ -851,6 +865,45 @@ impl Scene {
         }
         if self.agent.super_flight() {
             self.particles.trail(self.agent.center());
+        }
+    }
+
+    /// Advance a thrown window and move the real one along.
+    fn fly_window(&mut self, dt: f32) {
+        let Some(f) = &mut self.flight else { return };
+        // The spell broke (got hit while lifting): it drops.
+        let lifting = matches!(self.agent.telekinesis(), Some((_, Mind::Window)));
+        if f.stage == Stage::Lift && !lifting {
+            f.drop_now();
+        }
+        let before = f.stage;
+        f.update(dt);
+        self.mover
+            .move_to(f.pid, f64::from(f.pos.x), f64::from(f.pos.y));
+        let f = *f;
+        // A flying window that sweeps over the cursor shoves it.
+        if f.stage == Stage::Fly && !f.hit_cursor && f.rect().contains(self.cursor.pos) {
+            if let Some(fl) = &mut self.flight {
+                fl.hit_cursor = true;
+            }
+            let dir = f.vel.normalize_or(v2(1.0, 0.0));
+            self.particles.sparks(self.cursor.pos, dir, 30);
+            self.sfx(Sfx::Boom, 0.6, self.cursor.pos);
+            if self.settings.cursor_push {
+                let area = self.layout.screen_at(self.cursor.pos).frame;
+                self.cursor.push(dir * 140.0, area);
+                self.last_cursor = self.cursor.pos;
+            }
+            log::info!("event: a thrown window hit the cursor");
+            self.earn(Feat::ThrewCursor);
+        }
+        if f.stage == Stage::Done && before != Stage::Done {
+            let bottom = v2(f.center().x, f.pos.y + f.size.y);
+            self.particles.dust(bottom - v2(f.size.x * 0.3, 0.0), 1.0);
+            self.particles.dust(bottom + v2(f.size.x * 0.3, 0.0), 1.0);
+            self.sfx(Sfx::Stomp, 0.9, bottom);
+            log::info!("event: the thrown window landed");
+            self.flight = None;
         }
     }
 
@@ -1136,6 +1189,38 @@ impl Scene {
                         log::info!("event: flung the cursor with telekinesis");
                         self.earn(Feat::ThrewCursor);
                         self.sfx(Sfx::Whoosh, 0.7, at);
+                    }
+                }
+                Event::MindLiftWindow { at } => {
+                    let can =
+                        self.settings.throw_windows && self.accessibility && self.flight.is_none();
+                    if let (true, Some(w)) = (can, self.snapshot.active()) {
+                        let screen = self.layout.screen_at(v2(
+                            (w.rect.x + w.rect.width / 2.0) as f32,
+                            (w.rect.y + 20.0) as f32,
+                        ));
+                        self.flight = Some(WindowFlight::new(
+                            w.pid,
+                            w.id,
+                            w.rect,
+                            screen.frame,
+                            screen.ground_y,
+                        ));
+                        log::info!(
+                            "event: lifting window {} ({}) with telekinesis",
+                            w.id,
+                            w.owner
+                        );
+                        self.sfx(Sfx::Pop, 0.5, at);
+                        self.quip(Moment::MindWindow);
+                    }
+                }
+                Event::MindThrowWindow { target, side } => {
+                    if let Some(f) = &mut self.flight {
+                        f.throw(target, side);
+                        log::info!("event: threw the window");
+                        let c = f.center();
+                        self.sfx(Sfx::Whoosh, 0.9, c);
                     }
                 }
                 Event::MindLiftWords { at } => {
@@ -1672,6 +1757,10 @@ impl Scene {
                 user_idle: self.last_mouse_move.elapsed().as_secs_f32(),
                 tk_words_near: tk_words,
                 music,
+                can_throw_window: self.settings.throw_windows
+                    && self.accessibility
+                    && self.flight.is_none()
+                    && self.snapshot.active().is_some(),
                 can_shove: self.settings.window_shoves
                     && self.settings.window_shake
                     && self.accessibility,
@@ -1706,6 +1795,7 @@ impl Scene {
             }
             self.particles.update(FIXED_DT);
             self.speech.update(FIXED_DT);
+            self.fly_window(FIXED_DT);
             if let Some(j) = &mut self.jail {
                 jail_cues.extend(j.update(FIXED_DT));
             }
@@ -1791,7 +1881,8 @@ impl Scene {
             || self.doodles.animating()
             || self.jail.is_some()
             || self.sketch.stroke.is_some()
-            || self.rival.is_some();
+            || self.rival.is_some()
+            || self.flight.is_some();
         self.present();
         true
     }
@@ -1851,7 +1942,8 @@ impl Scene {
             || self.doodles.animating()
             || self.jail.is_some()
             || self.sketch.stroke.is_some()
-            || self.rival.is_some();
+            || self.rival.is_some()
+            || self.flight.is_some();
         let zzz = self.zzz_frame();
         if let Some(shown) = &self.shown {
             if !effects
@@ -2340,6 +2432,8 @@ impl App {
             screen_recording: ocr_allowed,
             seed,
             os_tx: macos::os_actions(),
+            mover: macos::WindowMover::spawn(),
+            flight: None,
             force_catch_clicks: !self.click_through,
             pending_click: false,
             press: None,
@@ -2604,6 +2698,7 @@ mod tests {
             can_shove: false,
             tk_words_near: 0,
             music: false,
+            can_throw_window: false,
         };
         let count = |hold: bool| {
             let mut a = Agent::new(900.0, ground, FIGURE_SCALE, 11);

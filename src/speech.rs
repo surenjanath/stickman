@@ -54,6 +54,7 @@ pub enum Moment {
     MindWords,
     /// Hit by the rival.
     Struck,
+    MindWindow,
 }
 
 /// Words the bleep filter hides (whole words, any case).
@@ -140,6 +141,7 @@ impl Moment {
             Moment::MindCursor => &["Get over here, you damn arrow!", "With my damn mind!"],
             Moment::MindWords => &["Eat words, jerk!", "Incoming, dammit!"],
             Moment::Struck => &["Son of a—!", "You little sh—!", "Damn, that hurt!"],
+            Moment::MindWindow => &["Catch this damn window!", "Your window's going for a ride!"],
         }
     }
 
@@ -197,6 +199,10 @@ impl Moment {
             ),
             Moment::MindWords => (&["Words, rise!", "Behold!", "Incoming!"], 0.9),
             Moment::Struck => (&["Oof!", "Cheap shot!", "Is that all?", "Grr!"], 0.35),
+            Moment::MindWindow => (
+                &["Behold, your window!", "Up you go!", "Window, take flight!"],
+                1.0,
+            ),
         }
     }
 }

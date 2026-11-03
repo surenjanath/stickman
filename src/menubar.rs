@@ -501,6 +501,12 @@ impl MenuBar {
             Some(Command::TogglePowers),
             "",
         );
+        self.add(
+            menu,
+            "Telekinesis Can Throw My Windows",
+            Some(Command::ToggleThrowWindows),
+            "",
+        );
         self.add(menu, "Jail-Break Intro", Some(Command::ToggleJailIntro), "");
         Self::separator(menu);
         self.add(menu, "Show Figure", Some(Command::ToggleVisible), "h");

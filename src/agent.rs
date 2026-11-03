@@ -110,6 +110,8 @@ pub struct Senses {
     pub tk_words_near: usize,
     /// Music is playing: dance to it.
     pub music: bool,
+    /// May lift and throw the active window with telekinesis.
+    pub can_throw_window: bool,
 }
 
 /// What telekinesis is working on.
@@ -119,6 +121,8 @@ pub enum Mind {
     Cursor,
     /// Lift a group of words off the page and fire them at the cursor.
     Words,
+    /// Lift the active window and throw it (at the cursor, in combat).
+    Window,
 }
 
 /// A grabbable word on a text line.
@@ -266,6 +270,15 @@ pub enum Event {
     MindFireWords {
         target: V2,
     },
+    /// Telekinesis takes hold of the active window.
+    MindLiftWindow {
+        at: V2,
+    },
+    /// Throw the lifted window: at `target` (combat), or off to `side`.
+    MindThrowWindow {
+        target: Option<V2>,
+        side: f32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -377,6 +390,7 @@ impl Action {
             Action::Charge { .. } => 0.55,
             Action::Telekinesis { on: Mind::Cursor } => 1.5,
             Action::Telekinesis { on: Mind::Words } => 2.2,
+            Action::Telekinesis { on: Mind::Window } => 2.0,
             Action::Taunt => 1.6,
             Action::Think => 3.0,
             _ => return None,
@@ -1411,6 +1425,22 @@ impl Agent {
                 }
                 return;
             }
+            Action::Telekinesis { on: Mind::Window } => {
+                if !self.act_fired && self.t >= 0.25 {
+                    self.act_fired = true;
+                    events.push(Event::MindLiftWindow { at: self.center() });
+                }
+                if !self.act_fired2 && self.t >= 1.35 {
+                    self.act_fired2 = true;
+                    let target = (s.mode == Mode::Combat).then_some(s.cursor);
+                    events.push(Event::MindThrowWindow {
+                        target,
+                        side: self.facing,
+                    });
+                    self.frustration = (self.frustration - 30.0).max(0.0);
+                }
+                return;
+            }
             Action::Telekinesis { on: Mind::Words } => {
                 if !self.act_fired && self.t >= 0.25 {
                     self.act_fired = true;
@@ -1518,7 +1548,11 @@ impl Agent {
             return false;
         }
         let dist = (s.cursor - self.center()).length();
-        let on = if s.tk_words_near >= 2 && dist > self.reach() + 60.0 && dist < 1400.0 {
+        // Now and then the big one: the whole window.
+        let window_roll = self.random(0.0, 1.0);
+        let on = if s.can_throw_window && window_roll < 0.2 && dist > self.reach() + 60.0 {
+            Mind::Window
+        } else if s.tk_words_near >= 2 && dist > self.reach() + 60.0 && dist < 1400.0 {
             Mind::Words
         } else if s.can_grab_cursor
             && (self.reach() + 60.0..1000.0).contains(&dist)
@@ -1528,7 +1562,11 @@ impl Agent {
         } else {
             return false;
         };
-        let base = if on == Mind::Words { 0.5 } else { 0.35 };
+        let base = match on {
+            Mind::Words => 0.5,
+            Mind::Cursor => 0.35,
+            Mind::Window => 0.6,
+        };
         let chance = base * (0.5 + self.traits.aggression);
         if self.random(0.0, 1.0) >= chance {
             self.tk_cooldown = 2.0; // not this time
@@ -1717,6 +1755,20 @@ impl Agent {
     }
 
     fn sabotage(&mut self, s: &Senses, world: &World) {
+        // Mischief with powers: pick up the user's window and toss it aside.
+        if self.traits.powers
+            && s.can_throw_window
+            && self.tk_cooldown <= 0.0
+            && !self.holding
+            && self.decide_left <= 0.0
+        {
+            if self.random(0.0, 1.0) < 0.25 {
+                self.tk_cooldown = 15.0;
+                self.set_action(Action::Telekinesis { on: Mind::Window });
+                return;
+            }
+            self.tk_cooldown = 3.0;
+        }
         // Steal words from the page and fling them away.
         if self.holding {
             if self.decide_left <= 0.0 {
@@ -2114,6 +2166,7 @@ mod tests {
             can_shove: false,
             tk_words_near: 0,
             music: false,
+            can_throw_window: false,
         }
     }
 
@@ -2889,6 +2942,41 @@ mod tests {
             "not faster: {fast} vs {}",
             b.pos.x - x1
         );
+    }
+
+    #[test]
+    fn telekinesis_throws_whole_windows_at_the_cursor() {
+        let w = world(vec![]);
+        let mut a = agent();
+        let mut s = senses(Mode::Combat);
+        s.can_throw_window = true;
+        s.cursor = v2(1500.0, GROUND_Y - 400.0);
+        let mut ev = vec![];
+        run(&mut a, &w, &s, 40.0, &mut ev);
+        let lift = ev
+            .iter()
+            .position(|e| matches!(e, Event::MindLiftWindow { .. }));
+        let throw = ev.iter().position(|e| {
+            matches!(
+                e,
+                Event::MindThrowWindow {
+                    target: Some(_),
+                    ..
+                }
+            )
+        });
+        assert!(
+            lift.is_some() && throw > lift,
+            "lift {lift:?} throw {throw:?}"
+        );
+        // Not allowed: never.
+        let mut b = agent();
+        s.can_throw_window = false;
+        let mut ev2 = vec![];
+        run(&mut b, &w, &s, 40.0, &mut ev2);
+        assert!(!ev2
+            .iter()
+            .any(|e| matches!(e, Event::MindLiftWindow { .. })));
     }
 
     #[test]

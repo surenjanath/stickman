@@ -310,6 +310,10 @@ impl SettingsWindow {
                 .collect(),
         );
         let powers = self.check("Super jump & telekinesis", Command::TogglePowers);
+        let throw_win = self.check(
+            "Telekinesis can throw my windows",
+            Command::ToggleThrowWindows,
+        );
         let intro = self.check("Jail-break intro at launch", Command::ToggleJailIntro);
         let rival = self.check(
             "A rival drops in to duel now and then",
@@ -327,6 +331,7 @@ impl SettingsWindow {
             ("", words),
             ("Thrown words stay:", stay),
             ("Powers:", powers),
+            ("", throw_win),
             ("Intro:", intro),
             ("Rival:", rival),
         ])

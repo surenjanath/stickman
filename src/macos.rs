@@ -12,8 +12,9 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 
 use accessibility_sys::{
-    kAXErrorSuccess, kAXFocusedWindowAttribute, kAXPositionAttribute, kAXTrustedCheckOptionPrompt,
-    kAXValueTypeCGPoint, AXIsProcessTrusted, AXIsProcessTrustedWithOptions,
+    kAXChildrenAttribute, kAXErrorSuccess, kAXFocusedWindowAttribute, kAXPositionAttribute,
+    kAXRoleAttribute, kAXSizeAttribute, kAXTitleAttribute, kAXTrustedCheckOptionPrompt,
+    kAXValueTypeCGPoint, kAXValueTypeCGSize, AXIsProcessTrusted, AXIsProcessTrustedWithOptions,
     AXUIElementCopyAttributeValue, AXUIElementCreateApplication, AXUIElementRef,
     AXUIElementSetAttributeValue, AXUIElementSetMessagingTimeout, AXValueCreate, AXValueGetValue,
     AXValueRef,
@@ -23,7 +24,7 @@ use core_foundation::base::{CFType, CFTypeRef, TCFType};
 use core_foundation::boolean::CFBoolean;
 use core_foundation::dictionary::CFDictionary;
 use core_foundation::string::CFString;
-use core_graphics::geometry::CGPoint;
+use core_graphics::geometry::{CGPoint, CGSize};
 use objc::runtime::{Object, BOOL, NO, YES};
 use objc::{class, msg_send, sel, sel_impl, Encode, Encoding};
 use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -385,6 +386,224 @@ fn slide(pid: i64, dx: f64) -> bool {
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
     ok
+}
+
+// --- Reading the UI of other apps (Accessibility) ------------------------------
+
+fn element_size(el: &AxElement) -> Option<CGSize> {
+    let v = copy_attr(el, kAXSizeAttribute)?;
+    let mut s = CGSize::new(0.0, 0.0);
+    // SAFETY: AXSize is an AXValue of type CGSize; `s` is a valid out-param.
+    let ok = unsafe {
+        AXValueGetValue(
+            v.as_CFTypeRef() as AXValueRef,
+            kAXValueTypeCGSize,
+            &mut s as *mut CGSize as *mut c_void,
+        )
+    };
+    ok.then_some(s)
+}
+
+/// An element's frame in global CoreGraphics points.
+fn element_frame(el: &AxElement) -> Option<Rect> {
+    let p = window_position(el)?;
+    let s = element_size(el)?;
+    Some(Rect {
+        x: p.x,
+        y: p.y,
+        width: s.width,
+        height: s.height,
+    })
+}
+
+fn string_attr(el: &AxElement, attr: &str) -> Option<String> {
+    copy_attr(el, attr)?
+        .downcast::<CFString>()
+        .map(|s| s.to_string())
+}
+
+fn children(el: &AxElement) -> Vec<AxElement> {
+    let Some(v) = copy_attr(el, kAXChildrenAttribute) else {
+        return Vec::new();
+    };
+    let Some(arr) = v.downcast::<core_foundation::array::CFArray>() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter(|item| !item.is_null())
+        // SAFETY: AXChildren is an array of AXUIElements; retaining each one
+        // gives the AxElement wrapper its own reference to release.
+        .map(|item| AxElement(unsafe { core_foundation::base::CFRetain(*item) } as AXUIElementRef))
+        .collect()
+}
+
+fn app_element(pid: i64) -> AxElement {
+    // SAFETY: creates an owned element for any pid (no IPC yet).
+    let app = AxElement(unsafe { AXUIElementCreateApplication(pid as i32) });
+    // Never let an unresponsive app block us for long.
+    // SAFETY: valid element.
+    unsafe { AXUIElementSetMessagingTimeout(app.0, 0.25) };
+    app
+}
+
+fn focused_window(pid: i64) -> Option<AxElement> {
+    let app = app_element(pid);
+    let win = copy_attr(&app, kAXFocusedWindowAttribute)?;
+    // SAFETY: `win` is an AXUIElement; retain it for AxElement's release.
+    Some(AxElement(
+        unsafe { core_foundation::base::CFRetain(win.as_CFTypeRef()) } as AXUIElementRef,
+    ))
+}
+
+/// The process id of the Dock. Main thread only.
+pub fn dock_pid() -> Option<i64> {
+    // SAFETY: documented NSRunningApplication API on the main thread; the
+    // returned array and application are autoreleased.
+    unsafe {
+        let id = std::ffi::CString::new("com.apple.dock").unwrap_or_default();
+        let s: *mut Object = msg_send![class!(NSString), stringWithUTF8String: id.as_ptr()];
+        let apps: *mut Object =
+            msg_send![class!(NSRunningApplication), runningApplicationsWithBundleIdentifier: s];
+        if apps.is_null() {
+            return None;
+        }
+        let first: *mut Object = msg_send![apps, firstObject];
+        if first.is_null() {
+            return None;
+        }
+        let pid: i32 = msg_send![first, processIdentifier];
+        Some(i64::from(pid))
+    }
+}
+
+/// A Dock item: its frame (global points) and name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DockIcon {
+    pub rect: Rect,
+    pub title: String,
+}
+
+/// The Dock's icons (apps, folders, the Trash), via Accessibility.
+pub fn dock_icons(dock_pid: i64) -> Vec<DockIcon> {
+    let app = app_element(dock_pid);
+    children(&app)
+        .into_iter()
+        .filter(|c| string_attr(c, kAXRoleAttribute).as_deref() == Some("AXList"))
+        .flat_map(|list| children(&list))
+        .filter_map(|item| {
+            let rect = element_frame(&item)?;
+            let title = string_attr(&item, kAXTitleAttribute).unwrap_or_default();
+            // Separators are thin; icons are square-ish.
+            (rect.width >= 20.0 && rect.height >= 20.0).then_some(DockIcon { rect, title })
+        })
+        .collect()
+}
+
+/// The biggest scrollbar in `pid`'s focused window (a sword!), if any.
+/// Breadth-first, visiting at most 600 elements so a huge UI can't stall us.
+pub fn find_scrollbar(pid: i64) -> Option<Rect> {
+    let win = focused_window(pid)?;
+    let mut queue = std::collections::VecDeque::from([win]);
+    let mut best: Option<Rect> = None;
+    let mut visited = 0;
+    while let Some(el) = queue.pop_front() {
+        visited += 1;
+        if visited > 600 {
+            break;
+        }
+        if string_attr(&el, kAXRoleAttribute).as_deref() == Some("AXScrollBar") {
+            if let Some(r) = element_frame(&el) {
+                let long = r.width.max(r.height);
+                let short = r.width.min(r.height);
+                if long >= 80.0 && short >= 6.0 && best.is_none_or(|b| long > b.width.max(b.height))
+                {
+                    best = Some(r);
+                }
+            }
+            continue;
+        }
+        queue.extend(children(&el));
+    }
+    best
+}
+
+/// Moves a window to the latest requested position on its own thread, so a
+/// slow app never backs up the frames (only the newest target matters).
+pub struct WindowMover {
+    target: Arc<std::sync::Mutex<Option<(i64, CGPoint)>>>,
+}
+
+impl WindowMover {
+    pub fn spawn() -> WindowMover {
+        let target: Arc<std::sync::Mutex<Option<(i64, CGPoint)>>> = Arc::default();
+        let shared = target.clone();
+        let spawned = std::thread::Builder::new()
+            .name("stickman-mover".into())
+            .spawn(move || {
+                let mut cached: Option<(i64, AxElement)> = None;
+                loop {
+                    let next = shared.lock().ok().and_then(|mut t| t.take());
+                    if let Some((pid, p)) = next {
+                        if cached.as_ref().is_none_or(|(c, _)| *c != pid) {
+                            cached = focused_window(pid).map(|w| (pid, w));
+                        }
+                        if let Some((_, w)) = &cached {
+                            if !set_window_position(w, p) {
+                                cached = None;
+                            }
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(15));
+                }
+            });
+        if spawned.is_err() {
+            log::warn!("window mover thread failed to start");
+        }
+        WindowMover { target }
+    }
+
+    /// Put the focused window of `pid` with its top-left at (`x`, `y`).
+    pub fn move_to(&self, pid: i64, x: f64, y: f64) {
+        if let Ok(mut t) = self.target.lock() {
+            *t = Some((pid, CGPoint::new(x, y)));
+        }
+    }
+}
+
+/// Accessibility lookups done off the main thread.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AxQuery {
+    DockIcons { dock_pid: i64 },
+    Scrollbar { pid: i64 },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AxAnswer {
+    DockIcons(Vec<DockIcon>),
+    Scrollbar(Option<Rect>),
+}
+
+/// Worker thread answering [`AxQuery`]s.
+pub fn spawn_ax_queries() -> (Sender<AxQuery>, Receiver<AxAnswer>) {
+    let (qtx, qrx) = std::sync::mpsc::channel::<AxQuery>();
+    let (atx, arx) = std::sync::mpsc::channel();
+    let spawned = std::thread::Builder::new()
+        .name("stickman-ax".into())
+        .spawn(move || {
+            while let Ok(q) = qrx.recv() {
+                let a = match q {
+                    AxQuery::DockIcons { dock_pid } => AxAnswer::DockIcons(dock_icons(dock_pid)),
+                    AxQuery::Scrollbar { pid } => AxAnswer::Scrollbar(find_scrollbar(pid)),
+                };
+                if atx.send(a).is_err() {
+                    return;
+                }
+            }
+        });
+    if spawned.is_err() {
+        log::warn!("accessibility query thread failed to start");
+    }
+    (qtx, arx)
 }
 
 /// Worker thread for [`OsAction`]s (Accessibility IPC can block).

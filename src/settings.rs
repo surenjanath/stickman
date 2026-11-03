@@ -255,6 +255,8 @@ pub struct Settings {
     pub jail_intro: bool,
     /// A rival drops in now and then to duel.
     pub rival_visits: bool,
+    /// Telekinesis may pick up and throw the active window (Accessibility).
+    pub throw_windows: bool,
     pub visible: bool,
     pub paused: bool,
 }
@@ -286,6 +288,7 @@ impl Default for Settings {
             powers: true,
             jail_intro: true,
             rival_visits: true,
+            throw_windows: true,
             visible: true,
             paused: false,
         }
@@ -323,6 +326,7 @@ pub enum Command {
     ResetStats,
     SummonRival,
     ToggleRivalVisits,
+    ToggleThrowWindows,
     ToggleVisible,
     TogglePaused,
     Respawn,
@@ -364,6 +368,7 @@ impl Command {
             Command::ResetStats => 404,
             Command::SummonRival => 405,
             Command::ToggleRivalVisits => 319,
+            Command::ToggleThrowWindows => 320,
             Command::SetLanguage(l) => {
                 700 + Language::ALL.iter().position(|x| *x == l).unwrap_or(0) as isize
             }
@@ -407,6 +412,7 @@ impl Command {
             404 => Command::ResetStats,
             405 => Command::SummonRival,
             319 => Command::ToggleRivalVisits,
+            320 => Command::ToggleThrowWindows,
             700..=702 => Command::SetLanguage(Language::ALL[(tag - 700) as usize]),
             800..=806 => Command::SetColor(FigureColor::ALL[(tag - 800) as usize]),
             600..=604 => Command::SetWordStay(WordStay::ALL[(tag - 600) as usize]),
@@ -443,6 +449,7 @@ impl Settings {
             Command::TogglePowers => self.powers = !self.powers,
             Command::ToggleJailIntro => self.jail_intro = !self.jail_intro,
             Command::ToggleRivalVisits => self.rival_visits = !self.rival_visits,
+            Command::ToggleThrowWindows => self.throw_windows = !self.throw_windows,
             Command::SetLanguage(l) => self.language = l,
             Command::ToggleBleep => self.bleep = !self.bleep,
             Command::SetColor(c) => self.color = c,
@@ -477,6 +484,7 @@ impl Settings {
             Command::TogglePowers => self.powers,
             Command::ToggleJailIntro => self.jail_intro,
             Command::ToggleRivalVisits => self.rival_visits,
+            Command::ToggleThrowWindows => self.throw_windows,
             Command::ToggleBleep => self.bleep,
             Command::ToggleVisible => self.visible,
             Command::TogglePaused => self.paused,
@@ -575,6 +583,7 @@ mod tests {
             Command::ResetStats,
             Command::SummonRival,
             Command::ToggleRivalVisits,
+            Command::ToggleThrowWindows,
             Command::ToggleVisible,
             Command::TogglePaused,
             Command::Respawn,

@@ -27,4 +27,5 @@ pub mod stats;
 pub mod stickman;
 pub mod text;
 pub mod windows;
+pub mod winfly;
 pub mod words;
