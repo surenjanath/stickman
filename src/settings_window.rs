@@ -259,6 +259,9 @@ impl SettingsWindow {
                 .map(|c| (c.label(), Command::SetColor(*c)))
                 .collect(),
         );
+        let forgive: *mut Object = msg_send![class!(NSButton),
+            buttonWithTitle: ns_string("Forgive & Reset Level") target: action_target() action: sel!(menuAction:)];
+        let _: () = msg_send![forgive, setTag: Command::ResetStats.tag()];
         let size = self.popup(
             Size::ALL
                 .iter()
@@ -283,6 +286,8 @@ impl SettingsWindow {
             ("Behaviour:", behaviour),
             ("Colour:", color),
             ("Size:", size),
+            ("Record:", forgive),
+            ("", Self::hint("Wipes its experience, level and grudge.")),
         ])
     }
 

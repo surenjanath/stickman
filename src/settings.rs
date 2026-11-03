@@ -316,6 +316,8 @@ pub enum Command {
     /// Enter or leave draw mode (sketch platforms with the mouse).
     ToggleDrawMode,
     ClearDrawings,
+    /// Forget experience and grudges.
+    ResetStats,
     ToggleVisible,
     TogglePaused,
     Respawn,
@@ -354,6 +356,7 @@ impl Command {
             Command::OpenSettings => 401,
             Command::ToggleDrawMode => 402,
             Command::ClearDrawings => 403,
+            Command::ResetStats => 404,
             Command::SetLanguage(l) => {
                 700 + Language::ALL.iter().position(|x| *x == l).unwrap_or(0) as isize
             }
@@ -394,6 +397,7 @@ impl Command {
             401 => Command::OpenSettings,
             402 => Command::ToggleDrawMode,
             403 => Command::ClearDrawings,
+            404 => Command::ResetStats,
             700..=702 => Command::SetLanguage(Language::ALL[(tag - 700) as usize]),
             800..=806 => Command::SetColor(FigureColor::ALL[(tag - 800) as usize]),
             600..=604 => Command::SetWordStay(WordStay::ALL[(tag - 600) as usize]),
@@ -557,6 +561,7 @@ mod tests {
             Command::OpenSettings,
             Command::ToggleDrawMode,
             Command::ClearDrawings,
+            Command::ResetStats,
             Command::ToggleVisible,
             Command::TogglePaused,
             Command::Respawn,

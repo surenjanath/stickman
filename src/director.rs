@@ -41,6 +41,12 @@ pub struct Observation {
     pub aggression: u8,
     #[serde(skip)]
     pub language: Language,
+    /// How much it resents the user, 0..100.
+    #[serde(skip)]
+    pub grudge: u8,
+    /// Its rank, e.g. "level 4 Brawler".
+    #[serde(skip)]
+    pub rank: String,
 }
 
 impl Default for Observation {
@@ -59,6 +65,8 @@ impl Default for Observation {
             name: "Stick".into(),
             aggression: 50,
             language: Language::Cheeky,
+            grudge: 0,
+            rank: String::new(),
         }
     }
 }
@@ -145,7 +153,20 @@ pub fn persona(obs: &Observation) -> String {
     } else {
         obs.name.trim()
     };
-    format!("The figure is called {name}. Its temperament is {temper}. {talk}\n")
+    let grudge = match obs.grudge {
+        0..=19 => String::new(),
+        20..=59 => format!(" It holds a grudge against the user ({}/100).", obs.grudge),
+        _ => format!(
+            " It holds a serious grudge against the user ({}/100) and wants payback.",
+            obs.grudge
+        ),
+    };
+    let rank = if obs.rank.is_empty() {
+        String::new()
+    } else {
+        format!(" It is a {}.", obs.rank)
+    };
+    format!("The figure is called {name}. Its temperament is {temper}.{rank}{grudge} {talk}\n")
 }
 
 pub fn situation(obs: &Observation) -> String {

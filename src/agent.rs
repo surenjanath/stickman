@@ -417,6 +417,10 @@ pub struct Traits {
     pub powers: bool,
     /// 0 (gentle) .. 1 (fierce).
     pub aggression: f32,
+    /// Health it heals up to (grows with level).
+    pub max_health: f32,
+    /// Walking speed multiplier (grows with level).
+    pub speed: f32,
 }
 
 impl Default for Traits {
@@ -428,6 +432,8 @@ impl Default for Traits {
             sitting: true,
             powers: true,
             aggression: 0.5,
+            max_health: 100.0,
+            speed: 1.0,
         }
     }
 }
@@ -616,11 +622,18 @@ impl Agent {
         self.since_hit
     }
 
+    /// Stride time; quicker at higher levels (same stride, so feet stay planted).
+    fn gait_period(&self, run: bool) -> f32 {
+        let base = if run { RUN_PERIOD } else { GAIT_PERIOD };
+        base / self.traits.speed.max(0.5)
+    }
+
     fn walk_speed(&self, run: bool) -> f32 {
+        let period = self.gait_period(run);
         if run {
-            crate::stickman::RUN.speed(RUN_PERIOD) * self.scale
+            crate::stickman::RUN.speed(period) * self.scale
         } else {
-            gait_speed_for(GAIT_PERIOD) * self.scale
+            gait_speed_for(period) * self.scale
         }
     }
 
@@ -968,7 +981,7 @@ impl Agent {
         self.decide_left -= dt;
         self.since_hit += dt;
         if self.action != Action::Ko && self.since_hit > 3.0 {
-            self.health = (self.health + 4.0 * dt).min(100.0);
+            self.health = (self.health + 4.0 * dt).min(self.traits.max_health);
         }
         self.frustration = (self.frustration - 1.5 * dt).max(0.0);
 
@@ -1130,7 +1143,7 @@ impl Agent {
             self.pet = 0.0;
             self.pet_cooldown = 3.0;
             self.frustration = (self.frustration - 40.0).max(0.0);
-            self.health = (self.health + 15.0).min(100.0);
+            self.health = (self.health + 15.0).min(self.traits.max_health);
             self.face((s.cursor.x - self.pos.x).signum());
             self.set_action(Action::Cheer);
             events.push(Event::Petted { at: self.head() });
@@ -1880,7 +1893,7 @@ impl Agent {
                 } else {
                     1.0
                 };
-                let period = if run { RUN_PERIOD } else { GAIT_PERIOD };
+                let period = self.gait_period(run);
                 self.gait_phase = (self.gait_phase + dt / period * ramp).rem_euclid(1.0);
                 self.pos.x += self.facing * self.walk_speed(run) * ramp * dt;
                 if self.pos.x <= s.min_x || self.pos.x >= s.max_x {
@@ -2785,6 +2798,46 @@ mod tests {
             .count();
         assert!(boings >= 3, "{boings} bounces");
         assert!(a.ground.is_some(), "never stopped bouncing");
+    }
+
+    #[test]
+    fn higher_levels_walk_faster_without_sliding() {
+        let w = world(vec![]);
+        let mut a = agent();
+        a.traits.speed = 1.3;
+        a.walk_to(1700.0, false);
+        let s = senses(Mode::Idle);
+        let mut ev = vec![];
+        run(&mut a, &w, &s, 0.5, &mut ev);
+        let x0 = a.pos.x;
+        let mut worst = 0.0f32;
+        let mut prev = a.segments();
+        let mut prev_phase = a.gait_phase;
+        for _ in 0..60 {
+            a.update(&s, &w, &mut ev);
+            let now = a.segments();
+            for side in 0..2 {
+                let q0 = (prev_phase + side as f32 * 0.5).rem_euclid(1.0);
+                let q1 = (a.gait_phase + side as f32 * 0.5).rem_euclid(1.0);
+                if q0 < crate::stickman::DUTY && q1 < crate::stickman::DUTY && q1 > q0 {
+                    worst = worst.max((prev[SHIN[side]].end[0] - now[SHIN[side]].end[0]).abs());
+                }
+            }
+            prev = now;
+            prev_phase = a.gait_phase;
+        }
+        assert!(worst < 0.05, "planted foot slid {worst} pt per tick");
+        let fast = a.pos.x - x0;
+        let mut b = agent();
+        b.walk_to(1700.0, false);
+        run(&mut b, &w, &s, 0.5, &mut ev);
+        let x1 = b.pos.x;
+        run(&mut b, &w, &s, 1.0, &mut ev);
+        assert!(
+            fast > (b.pos.x - x1) * 1.2,
+            "not faster: {fast} vs {}",
+            b.pos.x - x1
+        );
     }
 
     #[test]

@@ -22,6 +22,7 @@ pub mod settings;
 pub mod settings_window;
 pub mod sound;
 pub mod speech;
+pub mod stats;
 pub mod stickman;
 pub mod text;
 pub mod windows;

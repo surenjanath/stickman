@@ -48,6 +48,7 @@ use stickman::settings::{Behaviour, Command, Settings};
 use stickman::settings_window::SettingsWindow;
 use stickman::sound::{Sfx, Sound};
 use stickman::speech::{Moment, Priority, Speech};
+use stickman::stats::{Feat, Stats};
 use stickman::stickman::{Segment, BONES};
 use stickman::windows::{self, Snapshot};
 use stickman::words::{WordEvent, WordPlay};
@@ -293,6 +294,9 @@ struct Scene {
     // Settings and the menu bar.
     settings: Settings,
     settings_path: Option<PathBuf>,
+    /// Experience, level and grudge (kept between launches).
+    stats: Stats,
+    stats_saved: Instant,
     menubar: MenuBar,
     menubar_logged: bool,
     /// Built the first time it's opened.
@@ -526,6 +530,8 @@ impl Scene {
             name: self.settings.name.clone(),
             aggression: self.settings.aggression,
             language: self.settings.language,
+            grudge: self.stats.grudge.round() as u8,
+            rank: format!("level {} {}", self.stats.level(), self.stats.title()),
         });
     }
 
@@ -657,6 +663,12 @@ impl Scene {
         for cue in cues {
             match *cue {
                 Cue::Say(line) => {
+                    // Back for more, holding a grudge.
+                    let line = if line.starts_with("Now…") && self.stats.grudge > 40.0 {
+                        "Remember me? I remember YOU."
+                    } else {
+                        line
+                    };
                     let lines = self.speech.say(line, Priority::Event);
                     self.speak(lines);
                 }
@@ -849,6 +861,7 @@ impl Scene {
                         self.cursor.push(dir * CURSOR_PUSH, area);
                     }
                     log::info!("event: a thrown word hit the cursor");
+                    self.earn(Feat::WordHit);
                 }
                 WordEvent::Landed { at } => {
                     self.particles.dust(at, 0.25);
@@ -867,6 +880,7 @@ impl Scene {
             match *e {
                 Event::Knockback { at, dir } => {
                     self.particles.explosion(at, -dir);
+                    self.stats.hurt(false);
                     self.sfx(Sfx::Boom, 0.9, at);
                     self.hits.push_back(Instant::now());
                     log::info!("event: knockback (health {:.0})", self.agent.health);
@@ -882,6 +896,7 @@ impl Scene {
                         self.cursor.push(dir * CURSOR_PUSH, area);
                     }
                     log::info!("event: struck cursor");
+                    self.earn(Feat::HitCursor);
                     self.quip(Moment::StruckCursor);
                 }
                 Event::Dust { at, strength } => {
@@ -945,6 +960,7 @@ impl Scene {
                             t: 0.0,
                         };
                         log::info!("event: threw the cursor");
+                        self.earn(Feat::ThrewCursor);
                         self.sfx(Sfx::Whoosh, 0.6, from);
                         self.quip(Moment::ThrewCursor);
                     }
@@ -984,6 +1000,7 @@ impl Scene {
                             t: 0.0,
                         };
                         log::info!("event: flung the cursor with telekinesis");
+                        self.earn(Feat::ThrewCursor);
                         self.sfx(Sfx::Whoosh, 0.7, at);
                     }
                 }
@@ -1020,6 +1037,7 @@ impl Scene {
                 }
                 Event::Petted { at } => {
                     log::info!("event: petted");
+                    self.earn(Feat::Petted);
                     self.particles.hearts(at - v2(0.0, 20.0));
                     self.sfx(Sfx::Pop, 0.35, at);
                     self.quip(Moment::Petted);
@@ -1073,6 +1091,7 @@ impl Scene {
                 Event::KnockedOut { .. } => {
                     self.particles.stars(self.agent.head());
                     log::info!("event: knocked out");
+                    self.stats.knockouts += 1;
                     self.quip(Moment::KnockedOut);
                     self.sfx(Sfx::Ko, 0.6, self.agent.head());
                 }
@@ -1085,7 +1104,19 @@ impl Scene {
         for cmd in self.menubar.drain_commands() {
             log::info!("menu: {cmd:?}");
             match cmd {
-                Command::Quit => return false,
+                Command::Quit => {
+                    self.save_stats();
+                    return false;
+                }
+                Command::ResetStats => {
+                    self.stats = Stats::default();
+                    self.save_stats();
+                    log::info!("stats reset");
+                    let lines = self
+                        .speech
+                        .say("Fresh start? Fine. Truce.", Priority::Event);
+                    self.speak(lines);
+                }
                 Command::Respawn => {
                     self.respawn();
                 }
@@ -1203,6 +1234,36 @@ impl Scene {
         }
     }
 
+    fn save_stats(&mut self) {
+        self.stats_saved = Instant::now();
+        if let Some(path) = &self.settings_path {
+            if let Err(e) = self.stats.save(&Stats::path_next_to(path)) {
+                log::warn!("stats: could not save: {e:#}");
+            }
+        }
+    }
+
+    /// Experience for a feat; celebrate a level-up.
+    fn earn(&mut self, f: Feat) {
+        if let Some(level) = self.stats.gain(f) {
+            let title = self.stats.title();
+            log::info!("event: level up to {level} ({title})");
+            self.agent.traits.max_health = self.stats.max_health();
+            self.agent.health = self.stats.max_health();
+            let head = self.agent.head();
+            self.particles.shockwave(self.agent.pos);
+            self.particles.stars(head);
+            self.sfx(Sfx::Boom, 0.35, head);
+            self.sfx(Sfx::Pop, 0.7, head);
+            let lines = self.speech.say(
+                &format!("Level {level}! I'm a {title} now!"),
+                Priority::Event,
+            );
+            self.speak(lines);
+            self.save_stats();
+        }
+    }
+
     fn save_settings(&self) {
         if let Some(path) = &self.settings_path {
             if let Err(e) = self.settings.save(path) {
@@ -1262,10 +1323,19 @@ impl Scene {
                 None => format!("{} — starting…", self.director_model),
             }
         };
+        let grudge = match self.stats.grudge as u32 {
+            0..=9 => String::new(),
+            g => format!(" · grudge {g}"),
+        };
         let status = Status {
             mode: self.mode,
             reason: self.last_reason.clone(),
             health: self.agent.health.max(0.0).round(),
+            rank: format!(
+                "Level {} {}{grudge}",
+                self.stats.level(),
+                self.stats.title()
+            ),
             director,
             accessibility: self.accessibility,
             screen_recording: self.screen_recording,
@@ -1342,8 +1412,20 @@ impl Scene {
             sitting: self.settings.sitting,
             powers: self.settings.powers,
             aggression: f32::from(self.settings.aggression) / 100.0,
+            max_health: self.stats.max_health(),
+            speed: self.stats.speed(),
         };
-        let a = f32::from(self.settings.aggression) / 100.0;
+        // A grudge makes it fiercer.
+        let a = (f32::from(self.settings.aggression) / 100.0 + self.stats.grudge / 100.0 * 0.35)
+            .min(1.0);
+        self.agent.traits.aggression = a;
+        self.agent.traits.max_health = self.stats.max_health();
+        self.agent.traits.speed = self.stats.speed();
+        self.stats
+            .fade(self.last_tick.elapsed().as_secs_f32().min(0.1));
+        if self.stats_saved.elapsed() > Duration::from_secs(30) {
+            self.save_stats();
+        }
         self.agent.snatch_chance = if env_flag("STICKMAN_DEBUG_GRAB") {
             1.0
         } else {
@@ -1673,7 +1755,7 @@ impl Scene {
         let head = self.agent.head();
         let (w, y) = (44.0, head.y - 26.0);
         let left = v2(head.x - w / 2.0, y);
-        let frac = (self.agent.health / 100.0).clamp(0.0, 1.0);
+        let frac = (self.agent.health / self.agent.traits.max_health.max(1.0)).clamp(0.0, 1.0);
         let color = if frac > 0.5 {
             [0.3, 0.85, 0.4, alpha]
         } else if frac > 0.25 {
@@ -1848,6 +1930,17 @@ impl App {
             Sound::silent()
         };
         settings.paused = false;
+        let stats = settings_path
+            .as_deref()
+            .map(|p| Stats::load(&Stats::path_next_to(p)))
+            .unwrap_or_default();
+        log::info!(
+            "stats: level {} {} ({} xp), grudge {:.0}",
+            stats.level(),
+            stats.title(),
+            stats.xp,
+            stats.grudge
+        );
         let mut agent = Agent::new(
             (d.x + d.width / 2.0) as f32,
             Platform {
@@ -1979,6 +2072,8 @@ impl App {
             director_online: None,
             settings,
             settings_path,
+            stats,
+            stats_saved: now,
             menubar,
             menubar_logged: false,
             settings_window: None,

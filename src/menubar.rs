@@ -296,6 +296,8 @@ pub struct Status {
     pub mode: Mode,
     pub reason: String,
     pub health: f32,
+    /// "Level 3 Scrapper · grudge 40".
+    pub rank: String,
     /// "llama3.2:1b — online", "offline (built-in director)", …
     pub director: String,
     pub accessibility: bool,
@@ -579,7 +581,7 @@ impl MenuBar {
         Self::set_title(self.mood, &mood);
         Self::set_title(
             self.health,
-            &format!("Health: {:.0}%", status.health.clamp(0.0, 100.0)),
+            &format!("Health: {:.0} · {}", status.health.max(0.0), status.rank),
         );
         Self::set_title(self.director, &format!("AI: {}", status.director));
         let tags: Vec<isize> = self.items.keys().copied().collect();
