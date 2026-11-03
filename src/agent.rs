@@ -140,6 +140,14 @@ pub enum Event {
     Jumped {
         at: V2,
     },
+    /// Started a punch or kick (a whoosh).
+    Swing {
+        at: V2,
+    },
+    /// Hopped out of the way of a fast swipe.
+    Dodged {
+        at: V2,
+    },
     KnockedOut {
         at: V2,
     },
@@ -624,6 +632,9 @@ impl Agent {
             if s.mode == Mode::Combat && (s.cursor - self.shoulder()).length() < self.reach() * 1.4
             {
                 self.attack(s.cursor);
+                events.push(Event::Swing {
+                    at: self.shoulder(),
+                });
             } else {
                 let away = to_us.x.signum();
                 self.face(-away);
@@ -631,6 +642,7 @@ impl Agent {
                 self.ground = None;
                 self.frustration = (self.frustration + 4.0).min(100.0);
                 self.set_action(Action::Dodge);
+                events.push(Event::Dodged { at: self.center() });
             }
         }
     }
@@ -758,7 +770,7 @@ impl Agent {
         self.set_action(Action::Crouch { vel: v2(vx, vy) });
     }
 
-    fn behave(&mut self, s: &Senses, world: &World, _events: &mut Vec<Event>) {
+    fn behave(&mut self, s: &Senses, world: &World, events: &mut Vec<Event>) {
         let dx = s.cursor.x - self.pos.x;
         match s.mode {
             Mode::Combat => {
@@ -781,6 +793,9 @@ impl Agent {
                 if (s.cursor - self.shoulder()).length() < self.reach() + 25.0 {
                     if self.attack_cooldown <= 0.0 {
                         self.attack(s.cursor);
+                        events.push(Event::Swing {
+                            at: self.shoulder(),
+                        });
                     }
                 } else if s.cursor.y < self.shoulder().y - 140.0
                     && dx.abs() < 260.0

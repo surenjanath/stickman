@@ -49,6 +49,8 @@ core-graphics = "0.25"
 core-foundation = "0.10"
 # Raw pointers to CoreGraphics objects (CGImage → Vision).
 foreign-types = "0.5"
+# Sound effects output (CoreAudio); effects are synthesised in code.
+cpal = "0.16"
 # AXUIElement access for active-window frame polling (PRD 3.2).
 accessibility-sys = "0.2"
 # OCR (PRD 3.2) — needs `brew install tesseract leptonica` before enabling,

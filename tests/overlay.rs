@@ -57,6 +57,7 @@ impl Overlay {
             .env("STICKMAN_NO_PROMPTS", "1")
             .env("STICKMAN_NO_CURSOR_PUSH", "1")
             .env("STICKMAN_NO_WINDOW_SHAKE", "1")
+            .env("STICKMAN_NO_SOUND", "1")
             .env("STICKMAN_MODE", "IDLE")
             // Never read or write the user's real settings file.
             .env(

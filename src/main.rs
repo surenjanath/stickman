@@ -15,6 +15,7 @@
 //! - `STICKMAN_NO_CURSOR_PUSH=1`, `STICKMAN_NO_WINDOW_SHAKE=1`, `STICKMAN_NO_OCR=1`: disable
 //!   the effects that touch the user's cursor, windows or screen contents.
 //! - `STICKMAN_NO_PROMPTS=1`: don't show macOS permission dialogs.
+//! - `STICKMAN_NO_SOUND=1`: no sound effects.
 //! - `STICKMAN_OLLAMA_URL`, `STICKMAN_OLLAMA_MODEL`, `STICKMAN_DIRECTOR_INTERVAL_S`: director.
 
 use std::collections::VecDeque;
@@ -38,6 +39,7 @@ use stickman::particles::Particles;
 use stickman::physics::{window_platforms, Platform, World};
 use stickman::render::{DrawList, Renderer};
 use stickman::settings::{Behaviour, Command, Settings};
+use stickman::sound::{Sfx, Sound};
 use stickman::speech::{Moment, Priority, Speech};
 use stickman::stickman::{Segment, BONES, WALKER_RGB};
 use stickman::windows::{self, Snapshot};
@@ -188,6 +190,7 @@ struct Scene {
     words: WordPlay,
     speech: Speech,
     last_director_line: Instant,
+    sound: Sound,
     ocr_target: Option<ocr::Request>,
     ocr_candidate: Option<ocr::Request>,
     ocr_candidate_since: Instant,
@@ -432,6 +435,15 @@ impl Scene {
         {
             self.speech.attach(id, v2(img.size_pt.0, img.size_pt.1));
             self.shown = None;
+            self.sfx(Sfx::Babble, 0.22, self.agent.head());
+        }
+    }
+
+    /// Play a sound effect panned to where it happens.
+    fn sfx(&mut self, sfx: Sfx, gain: f32, at: V2) {
+        if self.settings.sound {
+            let pan = (at.x / self.display.width as f32) * 2.0 - 1.0;
+            self.sound.play(sfx, gain, pan * 0.8);
         }
     }
 
@@ -465,6 +477,7 @@ impl Scene {
             log::info!("event: ripped a word off the screen");
             self.shown = None;
             self.quip(Moment::GrabbedWord);
+            self.sfx(Sfx::Pop, 0.6, self.agent.hands());
         } else {
             log::debug!("grab fizzled (busy background or capture failed)");
             if let Some(id) = sprite {
@@ -480,12 +493,16 @@ impl Scene {
             match *e {
                 WordEvent::HitCursor { at, dir } => {
                     self.particles.sparks(at, dir, 22);
+                    self.sfx(Sfx::Punch, 0.7, at);
                     if self.settings.cursor_push {
                         self.cursor.push(dir * CURSOR_PUSH, size);
                     }
                     log::info!("event: a thrown word hit the cursor");
                 }
-                WordEvent::Landed { at } => self.particles.dust(at, 0.25),
+                WordEvent::Landed { at } => {
+                    self.particles.dust(at, 0.25);
+                    self.sfx(Sfx::Thud, 0.2, at);
+                }
             }
         }
         for id in freed {
@@ -499,6 +516,7 @@ impl Scene {
             match *e {
                 Event::Knockback { at, dir } => {
                     self.particles.explosion(at, -dir);
+                    self.sfx(Sfx::Boom, 0.9, at);
                     self.hits.push_back(Instant::now());
                     log::info!("event: knockback (health {:.0})", self.agent.health);
                     if self.agent.health > 0.0 {
@@ -507,16 +525,32 @@ impl Scene {
                 }
                 Event::StruckCursor { at, dir } => {
                     self.particles.sparks(at, dir, 18);
+                    let kick = matches!(self.agent.action, stickman::agent::Action::Kick { .. });
+                    self.sfx(if kick { Sfx::Kick } else { Sfx::Punch }, 0.8, at);
                     if self.settings.cursor_push {
                         self.cursor.push(dir * CURSOR_PUSH, size);
                     }
                     log::info!("event: struck cursor");
                     self.quip(Moment::StruckCursor);
                 }
-                Event::Dust { at, strength } => self.particles.dust(at, strength),
-                Event::Jumped { at } => self.particles.dust(at, 0.2),
+                Event::Dust { at, strength } => {
+                    self.particles.dust(at, strength);
+                    if strength >= 0.3 {
+                        self.sfx(Sfx::Thud, strength.min(1.0) * 0.7, at);
+                    }
+                }
+                Event::Jumped { at } => {
+                    self.particles.dust(at, 0.2);
+                    self.sfx(Sfx::Whoosh, 0.2, at);
+                }
+                Event::Swing { at } => self.sfx(Sfx::Whoosh, 0.3, at),
+                Event::Dodged { at } => {
+                    self.sfx(Sfx::Whoosh, 0.4, at);
+                    self.quip(Moment::Dodged);
+                }
                 Event::Stomp { at, window } => {
                     self.particles.dust(at, 0.5);
+                    self.sfx(Sfx::Stomp, 0.8, at);
                     if self.settings.window_shake && self.accessibility {
                         if let Some(w) = self.snapshot.windows.iter().find(|w| w.id == window) {
                             let dx = if self.frames % 2 == 0 { 9.0 } else { -9.0 };
@@ -549,6 +583,7 @@ impl Scene {
                 },
                 Event::Threw { from, vel } => {
                     self.words.threw(from, vel);
+                    self.sfx(Sfx::Whoosh, 0.45, from);
                     self.quip(Moment::ThrewWord);
                 }
                 Event::Dropped { at } => self.words.dropped(at),
@@ -556,6 +591,7 @@ impl Scene {
                     self.particles.stars(self.agent.head());
                     log::info!("event: knocked out");
                     self.quip(Moment::KnockedOut);
+                    self.sfx(Sfx::Ko, 0.6, self.agent.head());
                 }
             }
         }
@@ -585,6 +621,13 @@ impl Scene {
             }
             if self.settings.apply(cmd) {
                 self.agent.scale = self.settings.size.scale();
+                if cmd == Command::ToggleSound {
+                    self.sound = if self.settings.sound {
+                        Sound::start()
+                    } else {
+                        Sound::silent()
+                    };
+                }
                 if matches!(cmd, Command::SetBehaviour(Behaviour::Auto)) {
                     // Let the director's next decision apply immediately.
                     self.mode_since = Instant::now() - MIN_MODE_DWELL;
@@ -932,6 +975,14 @@ impl App {
         if env_flag("STICKMAN_NO_OCR") {
             settings.walk_on_text = false;
         }
+        if env_flag("STICKMAN_NO_SOUND") {
+            settings.sound = false;
+        }
+        let sound = if settings.sound {
+            Sound::start()
+        } else {
+            Sound::silent()
+        };
         settings.paused = false;
         let mut agent = Agent::new((d.width / 2.0) as f32, ground, settings.size.scale(), seed);
         agent.hold_still = env_flag("STICKMAN_HOLD_IDLE");
@@ -1022,6 +1073,7 @@ impl App {
             words: WordPlay::new(seed ^ 0x5157),
             speech: Speech::new(seed ^ 0x7A11),
             last_director_line: now,
+            sound,
             ocr_target: None,
             ocr_candidate: None,
             ocr_candidate_since: now,

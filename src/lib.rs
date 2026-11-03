@@ -14,6 +14,7 @@ pub mod physics;
 pub mod poses;
 pub mod render;
 pub mod settings;
+pub mod sound;
 pub mod speech;
 pub mod stickman;
 pub mod text;
