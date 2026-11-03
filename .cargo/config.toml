@@ -1,0 +1,6 @@
+# Apple Silicon only (PRD §2). Builds land in target/aarch64-apple-darwin/.
+[build]
+target = "aarch64-apple-darwin"
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "target-cpu=apple-m1"]

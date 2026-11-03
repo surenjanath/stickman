@@ -1,0 +1,73 @@
+[package]
+name = "stykanimate-overlay"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Transparent, click-through macOS desktop overlay hosting an autonomous StykAnimate stickman"
+publish = false
+
+# -----------------------------------------------------------------------------
+# Cross-platform core
+# -----------------------------------------------------------------------------
+[dependencies]
+# Windowing / event loop. 0.30 is the latest stable line (ApplicationHandler API).
+winit = "0.30"
+# GPU rendering (Metal backend on Apple Silicon). Phase 2 wires the surface.
+wgpu = "30"
+# Blocks on wgpu's async adapter/device requests from the main thread.
+pollster = "1"
+# Plain-old-data casting for vertex / instance / uniform buffers.
+bytemuck = { version = "1", features = ["derive"] }
+
+# 2D rigid-body physics (gravity, window-edge colliders, knockback impulses).
+rapier2d = "0.36"
+
+# Async runtime for the AI Director, window polling and OCR workers.
+# Runs on background threads only — the main thread belongs to winit/AppKit.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+# HTTP client for the local Ollama API (http://localhost:11434). Plain HTTP only,
+# so TLS is left out to keep the build lean.
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Errors & logging (see claude.md: anyhow for app code, thiserror for libraries).
+anyhow = "1"
+thiserror = "2"
+log = "0.4"
+env_logger = "0.11"
+
+# -----------------------------------------------------------------------------
+# macOS-only OS integration
+# -----------------------------------------------------------------------------
+[target.'cfg(target_os = "macos")'.dependencies]
+# Objective-C message passing for NSWindow configuration.
+objc = "0.2"
+# Display geometry (CGMainDisplayID / CGDisplayBounds), later: global cursor
+# position, CGWindowList and screen capture for OCR.
+core-graphics = "0.25"
+core-foundation = "0.10"
+# AXUIElement access for active-window frame polling (PRD 3.2).
+accessibility-sys = "0.2"
+# OCR (PRD 3.2) — needs `brew install tesseract leptonica` before enabling,
+# otherwise the build fails at link time. Enable in the OCR phase.
+# tesseract-sys = "0.6"
+
+[profile.dev]
+# Physics and wgpu are painfully slow fully unoptimised; optimise dependencies
+# even in debug builds while keeping our own crate fast to compile.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+
+# Launches the real overlay and inspects it via the window server / AppKit.
+# Custom harness: AppKit queries need the main thread and tests must not overlap.
+[[test]]
+name = "overlay"
+harness = false
