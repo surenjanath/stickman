@@ -1,5 +1,7 @@
 # Stickman
 
+![Stickman breaking out of jail, fighting the cursor and tearing words off the screen](docs/demo.gif)
+
 A native macOS desktop companion: a stick figure that lives on top of your desktop.
 It walks along the Dock, climbs onto your windows, stands on lines of text, dodges
 your mouse, fights your cursor (and sometimes grabs it and throws it across the
