@@ -1945,7 +1945,12 @@ impl Scene {
             let was_held = matches!(self.captive, Captive::Held { .. });
             self.captive = Captive::Free;
             self.agent.holding_cursor = false;
-            if was_held && yanked {
+            if was_held && yanked && self.settings.cursor_cling && self.mode == Mode::Combat {
+                // Pulled away? It doesn't let go: it hangs on to the arrow.
+                let mut ev = Vec::new();
+                self.agent.cling(self.cursor.pos, &mut ev);
+                self.handle(&ev);
+            } else if was_held && yanked {
                 log::info!("event: the cursor escaped");
                 self.remember(Memory::CursorEscaped);
                 self.quip(Moment::CursorEscaped);
@@ -2029,6 +2034,7 @@ impl Scene {
         use stickman::dodge::{Input, Threat};
         let on = self.settings.cursor_dodges
             && self.cursor_fx()
+            && !self.agent.clinging()
             && self.mode == Mode::Combat
             && self.rival.is_none()
             && self.jail.is_none()
@@ -2215,7 +2221,8 @@ impl Scene {
                     self.particles.sparks(at, dir, 18);
                     let kick = matches!(self.agent.action, stickman::agent::Action::Kick { .. });
                     self.sfx(if kick { Sfx::Kick } else { Sfx::Punch }, 0.8, at);
-                    if self.cursor_fx() {
+                    // Hanging off it, it pounds the arrow without shoving it.
+                    if self.cursor_fx() && !self.agent.clinging() {
                         self.cursor.push(dir * CURSOR_PUSH, area);
                     }
                     log::info!("event: struck cursor");
@@ -2452,6 +2459,47 @@ impl Scene {
                 }
                 Event::Dreaded { at, dread } => self.dreaded(at, dread),
                 Event::Hid { at, hidden } => self.hid(at, hidden),
+                Event::Clung { at } => {
+                    log::info!("event: grabbed the cursor and won't let go");
+                    self.sfx(Sfx::Pop, 0.7, at);
+                    self.remember(Memory::Clung);
+                    self.say_one(
+                        &[
+                            "Gotcha! You're not getting away!",
+                            "Mine now!",
+                            "Where do you think YOU'RE going?",
+                            "I'm not letting go. Ever.",
+                        ],
+                        Priority::Event,
+                    );
+                }
+                Event::Shaken { at } => {
+                    log::info!("event: shaken while hanging on");
+                    self.sfx(Sfx::Whoosh, 0.4, at);
+                    self.mind.seethe(1.5);
+                    self.say_one(
+                        &[
+                            "You can't shake me!",
+                            "NOT. LETTING. GO.",
+                            "Wheee— still here!",
+                            "Is that all you've got?",
+                            "Shake harder, I dare you!",
+                        ],
+                        Priority::Quip,
+                    );
+                }
+                Event::LetGo { at } => {
+                    log::info!("event: let go of the cursor");
+                    self.particles.dust(at, 0.3);
+                    self.say_one(
+                        &[
+                            "Fine. I'm bored.",
+                            "Had enough? Me too.",
+                            "That's what you get.",
+                        ],
+                        Priority::Quip,
+                    );
+                }
                 Event::Shunned { at, window } => self.shunned(at, window),
                 Event::ShoveWindow { at, window, dx } => {
                     self.sfx(Sfx::Stomp, 0.9, at);
@@ -2714,6 +2762,16 @@ impl Scene {
         let i = ((self.seed >> 23) as usize + self.frames as usize) % lines.len();
         let text = lines[i].replace("{}", &app);
         let said = self.speech.say(&text, Priority::Event);
+        self.speak(said);
+    }
+
+    /// Say one of `lines` (picked at random), if speech is on.
+    fn say_one(&mut self, lines: &[&str], priority: Priority) {
+        if !self.settings.speech || lines.is_empty() {
+            return;
+        }
+        let i = ((self.seed >> 25) as usize + self.frames as usize) % lines.len();
+        let said = self.speech.say(lines[i], priority);
         self.speak(said);
     }
 
@@ -3242,7 +3300,10 @@ impl Scene {
                 return;
             }
             let mut ev = Vec::new();
-            if self.agent.perform(&what, &mut ev) {
+            if what.trim() == "cling" {
+                self.agent.cling(self.cursor.pos, &mut ev);
+                self.handle(&ev);
+            } else if self.agent.perform(&what, &mut ev) {
                 self.handle(&ev);
             } else {
                 log::warn!("STICKMAN_DEBUG_DO: unknown action {what:?}");
@@ -3617,6 +3678,7 @@ impl Scene {
                     && self.flight.is_none()
                     && self.snapshot.active().is_some(),
                 can_shove: self.settings.window_shoves && self.window_fx() && self.accessibility,
+                can_cling: self.settings.cursor_cling && !self.on_call,
                 dread,
                 dread_level,
                 dock: self.dock(),
@@ -4854,6 +4916,7 @@ mod tests {
             held: false,
             user_idle: 0.0,
             can_shove: false,
+            can_cling: false,
             tk_words_near: 0,
             music: false,
             can_throw_window: false,

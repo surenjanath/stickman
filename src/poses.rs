@@ -369,6 +369,25 @@ pub fn dangle(t: f32) -> Pose {
     p
 }
 
+/// Hanging from the cursor by both hands, arms straight up, legs swinging.
+/// `shake` (0..1) is how hard it's being shaken: the legs kick wildly.
+pub fn cling(t: f32, shake: f32) -> Pose {
+    let mut p = [0.0; BONES];
+    p[TORSO] = -H + 0.04 * (t * 3.0).sin();
+    p[HEAD] = p[TORSO] + 0.12; // tucked between the arms, looking at the cursor
+                               // Both hands meet on the pointer overhead.
+    arm(&mut p, A, -H + 0.16, -H + 0.04);
+    arm(&mut p, B, -H - 0.16, -H - 0.04);
+    let speed = 1.1 + 4.0 * shake;
+    let amp = 0.18 + 0.55 * shake;
+    let kick = (t * TAU * speed).sin();
+    p[THIGH[A]] = H + 0.1 + amp * kick;
+    p[SHIN[A]] = H + 0.25 + amp * 1.3 * kick;
+    p[THIGH[B]] = H - 0.1 - amp * kick;
+    p[SHIN[B]] = H + 0.05 - amp * 1.3 * kick;
+    p
+}
+
 /// Asleep on its back, head toward +x, one knee up, arms along its sides.
 /// Absolute angles of a figure lying down (the lowest point rests on the
 /// ground). `t`: seconds, for breathing.

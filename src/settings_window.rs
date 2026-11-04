@@ -755,6 +755,10 @@ impl SettingsWindow {
             "Punches push my cursor; grabs throw it",
             Command::ToggleCursorPush,
         );
+        let cling = self.check(
+            "Grabs my cursor and hangs on (it won't let go)",
+            Command::ToggleCursorCling,
+        );
         let dodges = self.check(
             "My cursor dodges back when I leave the mouse alone",
             Command::ToggleCursorDodges,
@@ -812,6 +816,7 @@ impl SettingsWindow {
         Self::page(vec![
             Row::Section("Your cursor"),
             Row::Under(push),
+            Row::Under(cling),
             Row::Under(dodges),
             Row::Under(Self::hint(
                 "After the mouse has been still for a moment, your pointer sidesteps its \

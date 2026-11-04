@@ -219,6 +219,7 @@ mod tests {
             held: false,
             user_idle: 0.0,
             can_shove: false,
+            can_cling: false,
             tk_words_near: 0,
             music: false,
             can_throw_window: false,

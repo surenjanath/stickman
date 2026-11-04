@@ -53,6 +53,7 @@ Written in Rust for Apple Silicon:
 | **Hobbies** | Now and then, while idle, it sits on the edge of a window or text line with its legs dangling, breaks into a little dance, or draws a doodle in the air with a marker (heart, smiley, star, house, sun, spiral) that fades after 30 s. |
 | **Flying kick** | In combat, when your cursor hovers above it, the figure leaps and kicks it in mid-air. |
 | **Grab & throw the cursor** | In combat, a slow cursor within reach is sometimes snatched with both hands, hoisted overhead and lobbed across the screen: your real pointer is pinned to its hands, then flies along the arc. Yank the mouse away or click the figure to escape; a hold never lasts more than 3 s. Only while *Punches Push My Cursor* is on. |
+| **Won't let go** | In a fight it sometimes leaps up and grabs the arrow with both hands instead of kicking it, and if you yank the pointer out of its grip it hangs on. It dangles from your cursor, swinging like a pendulum as you move and kicking its legs when you shake it ("You can't shake me!"), and pounds on the arrow. Shaking, clicking and dragging don't get it off: it lets go when it's had its fun (8–16 s). Your pointer is never held back and your clicks go through to your apps while it hangs there. Switch off with *Grabs my cursor and hangs on* (Abilities). |
 | **Speech bubbles** | The AI director gives the figure a short line when its mood changes ("That's it. It's on!"), and it quips when hit, knocked out, dodging, grabbing or throwing. |
 | **Sound** | Punches, kicks, whooshes, knockback booms, landing thuds, pops, stomps, a talking babble and a knockout wah-wah, all synthesised in code (no audio files) and panned by where they happen. Volume slider in Fun & Sound. |
 | **Multiple displays** | One overlay per screen. Each screen has its own floor (the Dock top, or the screen bottom), and windows on every screen are platforms. The figure wanders across a shared screen edge, dropping down when the next screen's floor is lower; an edge that would be a step up is a wall. Plugging in or rearranging displays is picked up within 2 s. |
@@ -289,7 +290,7 @@ launching terminal.
 | `STICKMAN_CLICK_THROUGH=0` | Debug: the overlay catches every click (blocks the screen). |
 | `STICKMAN_DEBUG_OPEN_MENU=1` | Debug: pop the menu bar menu open once at startup. |
 | `STICKMAN_DEBUG_SAY="…"` | Debug: say this line at startup. |
-| `STICKMAN_DEBUG_DO=sleep\|dance\|cheer\|doodle\|superjump\|mindwords\|throwwindow\|rival\|draw\|sketch\|note\|reflect\|rage\|diary\|boss\|minions\|quit\|copydiary` | Debug: do that 3 s after launch. |
+| `STICKMAN_DEBUG_DO=sleep\|dance\|cheer\|doodle\|superjump\|cling\|mindwords\|throwwindow\|rival\|draw\|sketch\|note\|reflect\|rage\|diary\|boss\|minions\|quit\|copydiary` | Debug: do that 3 s after launch. |
 | `STICKMAN_DEBUG_OPEN_SETTINGS=1` | Debug: open the Settings window at launch (or `=Mind`, `=Abilities`, … for that tab). |
 | `STICKMAN_DEBUG_HAT=Crown` | Debug: wear that hat even if it's locked (`Bandana`, `TopHat`, `Pirate`, `Party`, `Wizard`, `Horns`, `Viking`). |
 | `STICKMAN_DEBUG_GRAB=1` | Debug: in combat, always grab a slow cursor in reach (instead of 30% of the time). |

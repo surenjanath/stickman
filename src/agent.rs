@@ -186,6 +186,9 @@ pub struct Senses {
     pub user_idle: f32,
     /// May shove the active window around (Accessibility granted, allowed).
     pub can_shove: bool,
+    /// May leap up, grab the cursor and hang on to it (it never moves the
+    /// pointer: the user keeps control, the figure comes along).
+    pub can_cling: bool,
     /// Words telekinesis could lift right now (near the figure).
     pub tk_words_near: usize,
     /// Music is playing: dance to it.
@@ -264,6 +267,18 @@ pub enum Event {
     StruckCursor {
         at: V2,
         dir: V2,
+    },
+    /// Grabbed the cursor and is hanging on to it.
+    Clung {
+        at: V2,
+    },
+    /// The user is shaking it hard, trying to get it off.
+    Shaken {
+        at: V2,
+    },
+    /// Let go of the cursor (its choice).
+    LetGo {
+        at: V2,
     },
     /// Hard landing or bounce.
     Dust {
@@ -454,6 +469,8 @@ pub enum Action {
     },
     /// Hanging from the user's pointer.
     Dangled,
+    /// Hanging on to the cursor by both hands and refusing to let go.
+    Cling,
     /// Kick in mid-air (after leaping at a cursor overhead).
     FlyingKick {
         aim: f32,
@@ -566,6 +583,7 @@ impl Action {
                 | Action::Dodge
                 | Action::Tumble
                 | Action::Dangled
+                | Action::Cling
                 | Action::FlyingKick { .. }
         )
     }
@@ -698,6 +716,16 @@ pub struct Agent {
     /// How far behind the Dock it is, 0..1, and the Dock's top edge.
     duck: f32,
     duck_line: f32,
+    /// Hanging on to the cursor: seconds until it chooses to let go, its
+    /// swing (angle rate), the cursor's last velocity, the next punch, and
+    /// when it may next complain about being shaken.
+    cling_left: f32,
+    swing_rate: f32,
+    last_cursor_vel: V2,
+    cling_punch: f32,
+    shaken_cooldown: f32,
+    /// How hard it's being shaken (0..1), smoothed.
+    shake: f32,
 }
 
 impl Agent {
@@ -762,6 +790,93 @@ impl Agent {
             hidden: false,
             duck: 0.0,
             duck_line: 0.0,
+            cling_left: 0.0,
+            swing_rate: 0.0,
+            last_cursor_vel: V2::ZERO,
+            cling_punch: 0.0,
+            shaken_cooldown: 0.0,
+            shake: 0.0,
+        }
+    }
+
+    /// Hanging on to the cursor.
+    pub fn clinging(&self) -> bool {
+        self.action == Action::Cling
+    }
+
+    /// Grab the cursor and hang on: nothing the user does shakes it off; it
+    /// lets go when it has had its fun (8–16 s).
+    pub fn cling(&mut self, cursor: V2, events: &mut Vec<Event>) {
+        if self.clinging() {
+            return;
+        }
+        if self.holding {
+            self.holding = false;
+            events.push(Event::Dropped { at: self.hands() });
+        }
+        self.holding_cursor = false;
+        self.air_attack = false;
+        self.ground = None;
+        self.swing = 0.0;
+        self.swing_rate = 0.0;
+        self.last_cursor_vel = V2::ZERO;
+        self.cling_left = self.random(8.0, 16.0);
+        self.cling_punch = self.random(0.6, 1.2);
+        self.shaken_cooldown = 1.0;
+        self.shake = 0.0;
+        self.set_action(Action::Cling);
+        self.hang_from(cursor);
+        events.push(Event::Clung { at: cursor });
+    }
+
+    /// Put the figure so its hands are on `cursor`.
+    fn hang_from(&mut self, cursor: V2) {
+        self.pos += cursor - self.hands();
+    }
+
+    /// One tick of hanging on: swing like a pendulum under the pointer, kick
+    /// when shaken, punch the cursor now and then, let go when it's done.
+    fn hang_on(&mut self, s: &Senses, events: &mut Vec<Event>) {
+        let dt = FIXED_DT;
+        // Pendulum about the hands: gravity pulls it under, the pointer's
+        // sideways acceleration throws it the other way, air drag settles it.
+        let accel = (s.cursor_vel - self.last_cursor_vel) / dt;
+        self.last_cursor_vel = s.cursor_vel;
+        let len = 170.0 * self.scale;
+        let a = -(GRAVITY / len) * self.swing.sin()
+            - 2.2 * self.swing_rate
+            - (accel.x / len).clamp(-400.0, 400.0) * self.swing.cos() * 0.35;
+        self.swing_rate += a * dt;
+        self.swing = (self.swing + self.swing_rate * dt).clamp(-1.5, 1.5);
+        let shaking = (accel.length() / 25_000.0).min(1.0);
+        self.shake += (shaking - self.shake) * (1.0 - (-dt / 0.3).exp());
+        self.hang_from(s.cursor);
+        self.vel = s.cursor_vel;
+        self.frustration = (self.frustration + 2.0 * dt).min(100.0);
+
+        self.shaken_cooldown -= dt;
+        if self.shake > 0.45 && self.shaken_cooldown <= 0.0 {
+            self.shaken_cooldown = 2.5;
+            events.push(Event::Shaken { at: self.head() });
+        }
+        // Pound on the arrow it's hanging from.
+        self.cling_punch -= dt;
+        if self.cling_punch <= 0.0 {
+            self.cling_punch = self.random(0.7, 1.4);
+            events.push(Event::StruckCursor {
+                at: s.cursor,
+                dir: v2(0.0, -1.0),
+            });
+        }
+        self.cling_left -= dt;
+        if self.cling_left <= 0.0 {
+            // Done with it: drop off, keeping some of the pointer's speed.
+            self.vel = s.cursor_vel.clamp_length_max(900.0) * 0.5;
+            self.spin = 0.0;
+            self.swing = 0.0;
+            self.ground = None;
+            self.set_action(Action::Fall);
+            events.push(Event::LetGo { at: s.cursor });
         }
     }
 
@@ -951,6 +1066,7 @@ impl Agent {
             Action::Kick { aim } => poses::kick(k(self.action), aim),
             Action::Dodge => poses::dodge(),
             Action::Dangled => poses::dangle(self.clock),
+            Action::Cling => poses::cling(self.clock, self.shake),
             Action::LieDown => poses::lie_down(k(self.action)),
             Action::Sleep => poses::sleep(self.clock),
             Action::Dance => poses::dance(t),
@@ -1000,7 +1116,7 @@ impl Agent {
         let spin = match self.action {
             Action::Tumble => self.spin,
             Action::Ko => self.spin,
-            Action::Dangled => self.swing,
+            Action::Dangled | Action::Cling => self.swing,
             Action::GetUp => self.spin_from * (1.0 - smoothstep(t / 0.45)),
             _ => 0.0,
         };
@@ -1169,6 +1285,11 @@ impl Agent {
     }
 
     pub fn hit_test(&self, p: V2) -> bool {
+        // Hanging off the cursor, it's always under it: let every click
+        // through to the user's apps.
+        if self.clinging() {
+            return false;
+        }
         // Behind the Dock only its head shows: clicks on the Dock miss it.
         if self.clip_line().is_some_and(|y| p.y > y) {
             return false;
@@ -1250,7 +1371,10 @@ impl Agent {
         let before_root = self.root_y(&self.rotated_pose(), self.anchored) + self.root_correction;
         let before_pos = self.pos.y;
 
-        if s.held {
+        if self.action == Action::Cling {
+            // Nothing the user does gets it off: not dragging, not clicking.
+            self.hang_on(s, events);
+        } else if s.held {
             self.dangle(s, events);
         } else {
             if self.action == Action::Dangled {
@@ -1279,6 +1403,10 @@ impl Agent {
         self.root_correction *= (-dt / self.settle).exp();
         if self.root_correction.abs() < 0.01 {
             self.root_correction = 0.0;
+        }
+        if self.action == Action::Cling {
+            // Last, with this tick's pose settled: hands exactly on the arrow.
+            self.hang_from(s.cursor);
         }
     }
 
@@ -1361,6 +1489,10 @@ impl Agent {
             && (s.cursor - self.center()).length() < self.reach() * 1.7
         {
             self.air_attack = false;
+            // Now and then it catches the arrow and hangs on instead.
+            if s.can_cling && self.random(0.0, 1.0) < 0.45 {
+                return self.cling(s.cursor, events);
+            }
             let aim = self.aim_at(s.cursor, -0.6, 0.8);
             self.face((s.cursor.x - self.pos.x).signum());
             self.set_action(Action::FlyingKick { aim });
@@ -2676,6 +2808,7 @@ mod tests {
             held: false,
             user_idle: 0.0,
             can_shove: false,
+            can_cling: false,
             tk_words_near: 0,
             music: false,
             can_throw_window: false,
@@ -3088,6 +3221,75 @@ mod tests {
         a.update(&s, &w, &mut ev);
         assert_eq!(a.action, Action::Fall);
         assert_eq!(a.health, 100.0);
+    }
+
+    #[test]
+    fn once_it_grabs_the_cursor_nothing_shakes_it_off_until_it_chooses() {
+        let w = world(vec![]);
+        let mut a = agent();
+        let mut s = senses(Mode::Combat);
+        s.cursor = v2(900.0, 500.0);
+        let mut ev = vec![];
+        a.cling(s.cursor, &mut ev);
+        assert!(a.clinging());
+        assert!(ev.iter().any(|e| matches!(e, Event::Clung { .. })));
+        // Hands on the arrow from the start.
+        assert!((a.hands() - s.cursor).length() < 1.0);
+        // Shake it hard for 5 s: whip the pointer back and forth, click it,
+        // try to drag it. It stays on, hands on the arrow.
+        let mut t = 0.0f32;
+        let mut prev = s.cursor;
+        for k in 0..(5.0 / FIXED_DT) as usize {
+            t += FIXED_DT;
+            let p = v2(
+                900.0 + 400.0 * (t * 9.0).sin(),
+                500.0 + 150.0 * (t * 7.0).cos(),
+            );
+            s.cursor_vel = (p - prev) / FIXED_DT;
+            prev = p;
+            s.cursor = p;
+            s.clicked = k % 20 == 0;
+            s.held = k % 50 < 10;
+            a.update(&s, &w, &mut ev);
+            assert!(a.clinging(), "shaken off after {t:.2}s");
+            assert!(
+                (a.hands() - s.cursor).length() < 2.0,
+                "lost its grip at {t:.2}s"
+            );
+            assert!(!a.hit_test(s.cursor), "it must let clicks through");
+        }
+        assert!(
+            ev.iter().any(|e| matches!(e, Event::Shaken { .. })),
+            "never noticed the shaking"
+        );
+        assert!(
+            ev.iter().any(|e| matches!(e, Event::StruckCursor { .. })),
+            "never punched the arrow"
+        );
+        // Then, its own time, it lets go and drops.
+        s.clicked = false;
+        s.held = false;
+        s.cursor_vel = V2::ZERO;
+        run(&mut a, &w, &s, 14.0, &mut ev);
+        assert!(ev.iter().any(|e| matches!(e, Event::LetGo { .. })));
+        assert!(!a.clinging());
+    }
+
+    #[test]
+    fn leaping_at_a_cursor_overhead_it_sometimes_grabs_on() {
+        let w = world(vec![]);
+        let clung = (1..30)
+            .filter(|seed| {
+                let mut a = Agent::new(900.0, Platform::ground(1800.0, GROUND_Y), SCALE, *seed);
+                let mut s = senses(Mode::Combat);
+                s.cursor = v2(930.0, GROUND_Y - 300.0);
+                s.can_cling = true;
+                let mut ev = vec![];
+                run(&mut a, &w, &s, 4.0, &mut ev);
+                ev.iter().any(|e| matches!(e, Event::Clung { .. }))
+            })
+            .count();
+        assert!((3..29).contains(&clung), "grabbed on {clung}/29 times");
     }
 
     #[test]
