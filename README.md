@@ -180,6 +180,18 @@ standing (idle), hand on chin (observing), knee up (sabotage), fists up
 | Grant … | Shortcuts to System Settings, shown only while a permission is missing. |
 | Quit (⌘Q) | Quit the app. The figure gets its last words out ("I'LL BE BACK!" if it's angry, "Goodbye, friend…" if it likes you), catches fire, chars black and crumbles to ash, then the app closes (about 4 s). Quit again to skip. |
 
+## Download
+
+Grab **Stickman.app** from the [latest release](https://github.com/surenjanath/stickman/releases/latest)
+(Apple Silicon, macOS 13+). Unzip it, move it to Applications and open it. It
+isn't signed with an Apple Developer ID, so the first launch is blocked: click
+**Open Anyway** in System Settings → Privacy & Security, or run
+`xattr -dr com.apple.quarantine /Applications/Stickman.app`.
+
+Releases are built by GitHub Actions (`.github/workflows/release.yml`) whenever a
+`v*` tag is pushed. To build the app yourself: `sh packaging/bundle.sh 0.1.0`
+(writes `dist/Stickman.app` and a zip).
+
 ## Requirements
 
 - macOS on Apple Silicon (`aarch64-apple-darwin`). Developed on an M1 Max.
@@ -421,6 +433,10 @@ Engineering rules (from `claude.md`):
 
 - The stick-figure rig (segment lengths, rest angles, thicknesses, colour) comes
   from [StykAnimate](https://github.com/filippocalippo/StykAnimate-App) (`src/demo.mjs`,
-  `defaultFigure()`) by Filippo Calippo, licensed GPL-3.0. Keep that in mind when
-  choosing a license for redistribution.
+  `defaultFigure()`) by Filippo Calippo, licensed GPL-3.0, which is why Stickman
+  is GPL-3.0 too (see `LICENSE`).
 - All animation, behaviour, rendering and OS integration here is original.
+
+## License
+
+GPL-3.0 (see `LICENSE`).

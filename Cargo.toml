@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Transparent, click-through macOS desktop overlay hosting an autonomous stickman"
+license = "GPL-3.0-only"
+repository = "https://github.com/surenjanath/stickman"
 publish = false
 
 # -----------------------------------------------------------------------------

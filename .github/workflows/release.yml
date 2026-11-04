@@ -1,0 +1,54 @@
+# Push a version tag (git tag v0.1.0 && git push origin v0.1.0) and this builds
+# Stickman.app on an Apple Silicon runner and publishes it as a GitHub release.
+# It can also be run by hand from the Actions tab (it then only uploads the zip
+# as a build artifact, without a release).
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14 # Apple Silicon
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Version
+        id: version
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)-dev" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Unit tests
+        run: cargo test --release --lib
+
+      - name: Build Stickman.app
+        run: sh packaging/bundle.sh "${{ steps.version.outputs.version }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Stickman-${{ steps.version.outputs.version }}-macos-arm64
+          path: dist/Stickman-*.zip
+
+      - name: Publish release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/Stickman-*.zip \
+            --title "Stickman $GITHUB_REF_NAME" \
+            --notes-file packaging/release-notes.md
