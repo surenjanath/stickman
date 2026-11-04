@@ -16,6 +16,7 @@ use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use crate::doodle::{self, Shape};
 use crate::geom::{clamp_between, v2, Rect, V2};
+use crate::lasso::{self, Lasso};
 use crate::physics::{Platform, PlatformKind, World};
 use crate::poses;
 use crate::stickman::{
@@ -176,6 +177,9 @@ impl Gadget {
     }
 }
 
+/// How long a lasso throw takes (wind-up to release at 40%).
+const LASSO_THROW: f32 = 0.5;
+
 /// Length of the eraser as a melee weapon (points).
 const ERASER_LEN: f32 = 44.0;
 
@@ -224,6 +228,8 @@ pub struct Senses {
     /// May leap up, grab the cursor and hang on to it (it never moves the
     /// pointer: the user keeps control, the figure comes along).
     pub can_cling: bool,
+    /// May lasso the cursor and haul it in (moves the real pointer).
+    pub can_lasso: bool,
     /// May pull out tools (eraser, paint, a drawn cannon) in a fight.
     pub can_gadget: bool,
     /// May saw the toolbar off the window it stands on.
@@ -317,6 +323,39 @@ pub enum Event {
     },
     /// Let go of the cursor (its choice).
     LetGo {
+        at: V2,
+    },
+    /// Started twirling a lasso overhead.
+    LassoSpin {
+        at: V2,
+    },
+    /// Threw the loop.
+    LassoThrown {
+        at: V2,
+    },
+    /// The loop is round the cursor: the app now pulls the pointer to
+    /// [`Agent::lasso_holds`].
+    Lassoed {
+        at: V2,
+    },
+    /// The user is pulling against the rope.
+    LassoTugged {
+        at: V2,
+    },
+    /// Missed the cursor.
+    LassoMissed {
+        at: V2,
+    },
+    /// The user yanked so hard the rope snapped.
+    LassoSnapped {
+        at: V2,
+    },
+    /// The loop slipped off after a long haul.
+    LassoSlipped {
+        at: V2,
+    },
+    /// Reeled all the way in: the cursor is in its hands (`holding_cursor`).
+    ReeledIn {
         at: V2,
     },
     /// Reached for a tool: the app picks one ([`Agent::arm`] or
@@ -539,6 +578,12 @@ pub enum Action {
     Dangled,
     /// Hanging on to the cursor by both hands and refusing to let go.
     Cling,
+    /// Twirling a lasso overhead, about to throw it.
+    LassoSpin,
+    /// Throwing the lasso; the loop is in the air.
+    LassoThrow,
+    /// Hauling in a lassoed cursor, hand over hand, leaning back.
+    LassoPull,
     /// Pulling a tool out of thin air.
     Rummage,
     /// Throwing paint or firing the cannon at `target`.
@@ -805,6 +850,11 @@ pub struct Agent {
     shaken_cooldown: f32,
     /// How hard it's being shaken (0..1), smoothed.
     shake: f32,
+    /// The lasso, while it's out, and when it may throw one again.
+    lasso: Option<Lasso>,
+    lasso_cooldown: f32,
+    /// When it may next shout about the user pulling on the rope.
+    tug_cooldown: f32,
     /// The tool in hand, and what's left of it.
     pub gadget: Option<Gadget>,
     gadget_uses: u32,
@@ -884,6 +934,9 @@ impl Agent {
             cling_punch: 0.0,
             shaken_cooldown: 0.0,
             shake: 0.0,
+            lasso: None,
+            lasso_cooldown: 0.0,
+            tug_cooldown: 0.0,
             gadget: None,
             gadget_uses: 0,
             gadget_cooldown: 3.0,
@@ -944,6 +997,153 @@ impl Agent {
     /// Squashed or stretched out of shape right now.
     pub fn squashed(&self) -> bool {
         (self.squash - 1.0).abs() > 0.01 || self.squash_rate.abs() > 0.05
+    }
+
+    /// Twirl a lasso overhead, throw it at the cursor and haul it in.
+    pub fn lasso(&mut self, events: &mut Vec<Event>) {
+        if self.lasso.is_some() || self.ground.is_none() || self.holding_cursor {
+            return;
+        }
+        if self.holding {
+            self.holding = false;
+            events.push(Event::Dropped { at: self.hands() });
+        }
+        self.lasso_cooldown = 10.0;
+        self.set_action(Action::LassoSpin);
+        self.lasso = Some(Lasso::new());
+        events.push(Event::LassoSpin { at: self.head() });
+    }
+
+    /// Where the lassoed pointer is held: the app puts it there.
+    pub fn lasso_holds(&self) -> Option<V2> {
+        self.lasso.as_ref()?.holds()
+    }
+
+    /// The app can't move the pointer any more: let the rope go.
+    pub fn drop_lasso(&mut self) {
+        if self.lasso.take().is_some() {
+            self.set_action(Action::Stand);
+        }
+    }
+
+    /// The lasso and the hand on the rope, for drawing.
+    pub fn lasso_view(&self) -> Option<(Lasso, V2)> {
+        let l = self.lasso?;
+        let hand = if self.action == Action::LassoPull {
+            self.hands()
+        } else {
+            self.lead_hand()
+        };
+        Some((l, hand))
+    }
+
+    fn lead_hand(&self) -> V2 {
+        let e = self.segments()[FOREARM[0]].end;
+        v2(e[0], e[1])
+    }
+
+    /// One tick of the lasso: twirl, throw, then haul the cursor in while the
+    /// user fights it (pulling drags the figure along; a yank snaps the rope).
+    fn lasso_tick(&mut self, s: &Senses, events: &mut Vec<Event>) {
+        self.lasso_cooldown -= FIXED_DT;
+        self.tug_cooldown -= FIXED_DT;
+        let out = matches!(
+            self.action,
+            Action::LassoSpin | Action::LassoThrow | Action::LassoPull
+        );
+        let Some(mut l) = self.lasso.filter(|_| out) else {
+            // Knocked out of it (hit, fell): the rope's gone.
+            self.lasso = None;
+            if out {
+                self.set_action(Action::Stand);
+            }
+            return;
+        };
+        let dx = s.cursor.x - self.pos.x;
+        if dx.abs() > 20.0 && self.action != Action::LassoThrow {
+            self.face(dx.signum());
+        }
+        if self.action == Action::LassoSpin && self.t >= lasso::SPIN_TIME {
+            self.face(dx.signum());
+            self.set_action(Action::LassoThrow);
+        }
+        let hand = if self.action == Action::LassoPull {
+            self.hands()
+        } else {
+            self.lead_hand()
+        };
+        if self.action == Action::LassoThrow && l.spinning() {
+            if self.t >= LASSO_THROW * 0.4 {
+                // Lead the pointer a little: the loop takes a moment to get there.
+                l.throw(hand, s.cursor + s.cursor_vel * 0.25);
+                events.push(Event::LassoThrown { at: hand });
+            }
+            self.lasso = Some(l);
+            return;
+        }
+        let step = if l.spinning() {
+            lasso::Step::Nothing
+        } else {
+            l.step(FIXED_DT, hand, s.cursor)
+        };
+        self.lasso = Some(l);
+        match step {
+            lasso::Step::Nothing => {}
+            lasso::Step::Caught { at } => {
+                self.set_action(Action::LassoPull);
+                events.push(Event::Lassoed { at });
+            }
+            lasso::Step::Missed => events.push(Event::LassoMissed {
+                at: l.loop_pos(hand),
+            }),
+            lasso::Step::Done => {
+                self.lasso = None;
+                self.set_action(Action::Stand);
+            }
+            lasso::Step::Tugged { by, dir } => {
+                // Like a horse on a rope: it drags the figure, heels skidding.
+                if self.ground.is_some() {
+                    let to = self.pos.x + dir.x * by * 0.35;
+                    self.pos.x = clamp_between(to, s.min_x, s.max_x);
+                }
+                if by > 6.0 {
+                    events.push(Event::Dust {
+                        at: self.pos,
+                        strength: 0.15,
+                    });
+                }
+                self.frustration = (self.frustration + 0.05 * by).min(100.0);
+                if self.tug_cooldown <= 0.0 && l.tension() > 0.35 {
+                    self.tug_cooldown = 3.0;
+                    events.push(Event::LassoTugged { at: self.head() });
+                }
+            }
+            lasso::Step::Snapped { dir } => {
+                // Yanked off its feet as the rope parts.
+                self.lasso = None;
+                self.ground = None;
+                self.vel = v2(dir.x.signum() * 380.0, -320.0);
+                self.spin = 0.0;
+                self.spin_rate = 7.0 * dir.x.signum() * self.facing;
+                self.frustration = (self.frustration + 15.0).min(100.0);
+                self.set_action(Action::Tumble);
+                events.push(Event::LassoSnapped { at: hand });
+            }
+            lasso::Step::Slipped => {
+                self.lasso = None;
+                self.set_action(Action::Stand);
+                events.push(Event::LassoSlipped { at: hand });
+            }
+            lasso::Step::ReeledIn { at } => {
+                // Got it: into its hands, and up over its head for the throw.
+                self.lasso = None;
+                self.holding_cursor = true;
+                self.attack_cooldown = 1.0;
+                self.set_action(Action::HoldCursor);
+                self.frustration = (self.frustration - 15.0).max(0.0);
+                events.push(Event::ReeledIn { at });
+            }
+        }
     }
 
     /// Hanging on to the cursor.
@@ -1214,6 +1414,19 @@ impl Agent {
             Action::Dodge => poses::dodge(),
             Action::Dangled => poses::dangle(self.clock),
             Action::Cling => poses::cling(self.clock, self.shake),
+            Action::LassoSpin => poses::lasso_spin(self.clock),
+            Action::LassoThrow => {
+                // Wind up and let fly, then hold the arm out after the loop.
+                poses::throw(
+                    (t / LASSO_THROW).min(0.6),
+                    self.aim_at(self.tk_aim, -0.9, 0.6),
+                )
+            }
+            Action::LassoPull => {
+                let to = self.lasso_holds().unwrap_or(self.tk_aim);
+                let tension = self.lasso.map_or(0.0, |l| l.tension());
+                poses::lasso_pull(self.clock, self.aim_at(to, -0.9, 0.9), tension)
+            }
             Action::Rummage => poses::grab(k(self.action)),
             Action::Fire { target } => {
                 let aim = self.aim_at(target, -0.9, 0.9);
@@ -1694,6 +1907,7 @@ impl Agent {
             self.set_action(Action::Stand);
         }
         self.finish_actions(events);
+        self.lasso_tick(s, events);
         self.attack_contacts(s, events);
         self.notice_dread(s, events);
         if self.ground.is_some()
@@ -2497,6 +2711,26 @@ impl Agent {
                         return;
                     }
                 }
+                // Out of reach but not far: lasso it and haul it in.
+                let dist = (s.cursor - self.shoulder()).length();
+                if s.can_lasso
+                    && matches!(t, Tactic::Any | Tactic::Grab)
+                    && self.lasso_cooldown <= 0.0
+                    && !self.holding
+                    && !self.holding_cursor
+                    && self.weapon.is_none()
+                    && self.gadget.is_none()
+                    && (self.reach() + 80.0..lasso::RANGE * 0.85).contains(&dist)
+                    && s.cursor_vel.length() < 700.0
+                {
+                    // Not this time: think about it again in a moment (a throw
+                    // sets a longer wait).
+                    self.lasso_cooldown = if t == Tactic::Grab { 1.0 } else { 2.5 };
+                    let chance = if t == Tactic::Grab { 0.7 } else { 0.35 };
+                    if self.random(0.0, 1.0) < chance {
+                        return self.lasso(events);
+                    }
+                }
                 if self.holding {
                     // Pelt the cursor, leading it a little.
                     if self.attack_cooldown <= 0.0 && (s.cursor - self.pos).length() < 1500.0 {
@@ -3118,6 +3352,7 @@ mod tests {
             user_idle: 0.0,
             can_shove: false,
             can_cling: false,
+            can_lasso: false,
             can_gadget: false,
             can_saw: false,
             tk_words_near: 0,
@@ -3734,6 +3969,116 @@ mod tests {
         run(&mut a, &w, &senses(Mode::Idle), 3.0, &mut ev);
         assert!(!a.squashed());
         assert!((tall(&a) - normal).abs() < 3.0);
+    }
+
+    /// Run `a` for `secs`, putting the pointer where the lasso holds it (as
+    /// the app does), and offsetting it by `pull` per tick while it's held.
+    fn run_lassoed(
+        a: &mut Agent,
+        w: &World,
+        s: &mut Senses,
+        secs: f32,
+        pull: V2,
+        ev: &mut Vec<Event>,
+    ) {
+        for _ in 0..(secs / FIXED_DT) as usize {
+            a.update(s, w, ev);
+            if let Some(at) = a.lasso_holds() {
+                s.cursor = at + pull;
+            }
+        }
+    }
+
+    #[test]
+    fn lassoes_a_cursor_out_of_reach_and_reels_it_into_its_hands() {
+        let w = world(vec![]);
+        let mut a = agent();
+        let mut s = senses(Mode::Combat);
+        s.cursor = a.pos + v2(420.0, -160.0);
+        let mut ev = vec![];
+        a.lasso(&mut ev);
+        assert!(ev.iter().any(|e| matches!(e, Event::LassoSpin { .. })));
+        run_lassoed(&mut a, &w, &mut s, 1.6, V2::ZERO, &mut ev);
+        assert!(
+            ev.iter().any(|e| matches!(e, Event::Lassoed { .. })),
+            "never caught it"
+        );
+        let start = (s.cursor - a.hands()).length();
+        run_lassoed(&mut a, &w, &mut s, 1.0, V2::ZERO, &mut ev);
+        assert!(
+            (s.cursor - a.hands()).length() < start - 150.0,
+            "not hauling it in"
+        );
+        assert_eq!(a.action, Action::LassoPull);
+        run_lassoed(&mut a, &w, &mut s, 3.0, V2::ZERO, &mut ev);
+        assert!(
+            ev.iter().any(|e| matches!(e, Event::ReeledIn { .. })),
+            "never reeled it in"
+        );
+        assert!(a.lasso_holds().is_none());
+        assert!(
+            a.holding_cursor || ev.iter().any(|e| matches!(e, Event::ThrewCursor { .. })),
+            "reeled in but not in its hands"
+        );
+    }
+
+    #[test]
+    fn pulling_against_the_lasso_drags_it_and_a_yank_snaps_the_rope() {
+        let w = world(vec![]);
+        let mut a = agent();
+        let mut s = senses(Mode::Combat);
+        s.cursor = a.pos + v2(420.0, -160.0);
+        let mut ev = vec![];
+        a.lasso(&mut ev);
+        run_lassoed(&mut a, &w, &mut s, 1.6, V2::ZERO, &mut ev);
+        assert_eq!(a.action, Action::LassoPull);
+        // A steady pull away drags the figure along the floor.
+        let x0 = a.pos.x;
+        run_lassoed(&mut a, &w, &mut s, 1.0, v2(2.5, 0.0), &mut ev);
+        assert!(
+            a.pos.x > x0 + 20.0,
+            "it wasn't dragged ({:.0})",
+            a.pos.x - x0
+        );
+        assert_eq!(a.action, Action::LassoPull, "a steady pull snapped it");
+        // A hard yank snaps it, and it goes flying.
+        run_lassoed(&mut a, &w, &mut s, 0.5, v2(70.0, 0.0), &mut ev);
+        assert!(ev.iter().any(|e| matches!(e, Event::LassoSnapped { .. })));
+        assert!(a.lasso_holds().is_none());
+        assert_ne!(a.action, Action::LassoPull);
+    }
+
+    #[test]
+    fn a_blow_knocks_the_lasso_out_of_its_hands() {
+        let w = world(vec![]);
+        let mut a = agent();
+        let mut s = senses(Mode::Combat);
+        s.cursor = a.pos + v2(420.0, -160.0);
+        let mut ev = vec![];
+        a.lasso(&mut ev);
+        run_lassoed(&mut a, &w, &mut s, 1.6, V2::ZERO, &mut ev);
+        assert!(a.lasso_holds().is_some());
+        a.set_action(Action::Tumble);
+        a.update(&s, &w, &mut ev);
+        assert!(a.lasso_holds().is_none());
+        assert!(a.lasso_view().is_none());
+    }
+
+    #[test]
+    fn in_a_fight_it_sometimes_lassoes_a_cursor_out_of_reach() {
+        let w = world(vec![]);
+        let roped = (1..30)
+            .filter(|seed| {
+                let mut a = Agent::new(900.0, Platform::ground(1800.0, GROUND_Y), SCALE, *seed);
+                let mut s = senses(Mode::Combat);
+                s.cursor = v2(1300.0, GROUND_Y - 200.0);
+                s.can_lasso = true;
+                let mut ev = vec![];
+                run(&mut a, &w, &s, 8.0, &mut ev);
+                ev.iter().any(|e| matches!(e, Event::LassoSpin { .. }))
+            })
+            .count();
+        assert!((3..30).contains(&roped), "lassoed {roped}/29 times");
     }
 
     #[test]

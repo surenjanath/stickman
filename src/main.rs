@@ -228,6 +228,10 @@ enum Captive {
         at: V2,
         t: f32,
     },
+    /// Lassoed: pulled along the rope to where the figure has it.
+    Lassoed {
+        at: V2,
+    },
     /// Thrown: flying along a ballistic arc.
     Flying {
         pos: V2,
@@ -244,6 +248,7 @@ impl Captive {
             Captive::Free => None,
             Captive::Held { at, .. }
             | Captive::Levitating { at, .. }
+            | Captive::Lassoed { at }
             | Captive::Flying { at, .. } => Some(at),
         }
     }
@@ -1986,6 +1991,15 @@ impl Scene {
         let Some(at) = self.captive.pinned_at() else {
             return;
         };
+        if matches!(self.captive, Captive::Lassoed { .. }) {
+            // The rope decides (it snaps on a hard yank); only switching
+            // cursor effects off frees it here.
+            if !self.cursor_fx() {
+                self.captive = Captive::Free;
+                self.agent.drop_lasso();
+            }
+            return;
+        }
         let held_too_long =
             matches!(self.captive, Captive::Held { since, .. } if since.elapsed() > MAX_HOLD);
         let yanked = (self.cursor.pos - at).length() > ESCAPE_PT;
@@ -2050,6 +2064,14 @@ impl Scene {
                 let rise = 45.0 * stickman::stickman::smoothstep(t / 0.8);
                 origin + v2(4.0 * (t * 17.0).sin(), -rise + 3.0 * (t * 13.0).cos())
             }
+            Captive::Lassoed { .. } => match self.agent.lasso_holds() {
+                Some(at) => at,
+                None => {
+                    // Reeled in, snapped or knocked out of its hands.
+                    self.captive = Captive::Free;
+                    return;
+                }
+            },
             Captive::Flying { pos, .. } => pos,
         };
         let area = self.layout.screen_at(target).frame;
@@ -2058,6 +2080,7 @@ impl Scene {
         match &mut self.captive {
             Captive::Held { at, .. }
             | Captive::Levitating { at, .. }
+            | Captive::Lassoed { at }
             | Captive::Flying { at, .. } => *at = self.cursor.pos,
             Captive::Free => {}
         }
@@ -2559,6 +2582,86 @@ impl Scene {
                         ],
                         Priority::Quip,
                     );
+                }
+                Event::LassoSpin { at } => {
+                    log::info!("event: twirling a lasso");
+                    self.sfx(Sfx::Whoosh, 0.3, at);
+                    self.say_one(
+                        &[
+                            "Yee-haw!",
+                            "Git along, little cursor!",
+                            "Hold still, partner...",
+                        ],
+                        Priority::Quip,
+                    );
+                }
+                Event::LassoThrown { at } => self.sfx(Sfx::Whoosh, 0.6, at),
+                Event::Lassoed { at } => {
+                    if self.cursor_fx() {
+                        self.captive = Captive::Lassoed {
+                            at: self.cursor.pos,
+                        };
+                        log::info!("event: lassoed the cursor");
+                        self.sfx(Sfx::Pop, 0.7, at);
+                        self.remember(Memory::Lassoed);
+                        self.say_one(
+                            &[
+                                "Gotcha, little doggie!",
+                                "Whoa there! Come here, you.",
+                                "Roped and ready!",
+                                "Easy... eeeasy...",
+                            ],
+                            Priority::Event,
+                        );
+                    } else {
+                        self.agent.drop_lasso();
+                    }
+                }
+                Event::LassoTugged { at } => {
+                    self.sfx(Sfx::Whoosh, 0.25, at);
+                    self.say_one(
+                        &[
+                            "Whoa, whoa, WHOA!",
+                            "Quit buckin'!",
+                            "You ain't goin' nowhere!",
+                            "Strong one, ain't ya?",
+                        ],
+                        Priority::Quip,
+                    );
+                }
+                Event::LassoMissed { .. } => {
+                    self.say_one(&["Dang.", "Missed!", "Next time, varmint."], Priority::Quip);
+                }
+                Event::LassoSnapped { at } => {
+                    log::info!("event: the user snapped the lasso");
+                    self.captive = Captive::Free;
+                    self.particles.sparks(at, v2(0.0, -1.0), 10);
+                    self.sfx(Sfx::Clank, 0.6, at);
+                    self.remember(Memory::CursorEscaped);
+                    self.say_one(
+                        &["MY ROPE!", "It snapped?!", "That was my good rope!"],
+                        Priority::Event,
+                    );
+                }
+                Event::LassoSlipped { .. } => {
+                    self.captive = Captive::Free;
+                    self.say_one(&["It slipped off!", "Slippery critter."], Priority::Quip);
+                }
+                Event::ReeledIn { at } => {
+                    if self.cursor_fx() {
+                        self.captive = Captive::Held {
+                            at: self.cursor.pos,
+                            since: Instant::now(),
+                        };
+                        log::info!("event: reeled the cursor in");
+                        self.sfx(Sfx::Pop, 0.7, at);
+                        self.say_one(
+                            &["Hog-tied!", "Reeled ya in!", "Now you're mine."],
+                            Priority::Event,
+                        );
+                    } else {
+                        self.agent.holding_cursor = false;
+                    }
                 }
                 Event::Clung { at } => {
                     log::info!("event: grabbed the cursor and won't let go");
@@ -3641,7 +3744,10 @@ impl Scene {
             let tool = stickman::agent::Gadget::ALL
                 .into_iter()
                 .find(|g| format!("{g:?}").eq_ignore_ascii_case(what.trim()));
-            if what.trim() == "cling" {
+            if what.trim() == "lasso" {
+                self.agent.lasso(&mut ev);
+                self.handle(&ev);
+            } else if what.trim() == "cling" {
                 self.agent.cling(self.cursor.pos, &mut ev);
                 self.handle(&ev);
             } else if let Some(g) = tool {
@@ -4053,6 +4159,7 @@ impl Scene {
                     && self.snapshot.active().is_some(),
                 can_shove: self.settings.window_shoves && self.window_fx() && self.accessibility,
                 can_cling: self.settings.cursor_cling && !self.on_call,
+                can_lasso: self.settings.lasso && self.cursor_fx(),
                 can_gadget: self.settings.tools && !self.on_call,
                 can_saw: self.settings.saws && self.ocr_tx.is_some() && !self.on_call,
                 dread,
@@ -4080,6 +4187,7 @@ impl Scene {
                     top: rr.top,
                     active_window: None,
                     can_shove: false,
+                    can_lasso: false,
                     held: false,
                     dread: Dread::None,
                     tactic: Tactic::Any,
@@ -4105,6 +4213,7 @@ impl Scene {
                     min_x: r.min_x,
                     max_x: r.max_x,
                     top: r.top,
+                    can_lasso: false,
                     dread: Dread::None,
                     tactic: Tactic::Any,
                     retreat: false,
@@ -4412,6 +4521,10 @@ impl Scene {
         self.draw_sword();
         if let Some((g, grip, aim)) = self.agent.gadget_pose(self.cursor.pos) {
             stickman::arsenal::draw_held(&mut self.draw, g, grip, aim, self.paint);
+        }
+        if let Some((l, hand)) = self.agent.lasso_view() {
+            let clock = self.started.elapsed().as_secs_f32();
+            stickman::lasso::draw(&mut self.draw, &l, hand, self.agent.facing, clock);
         }
         if let Some(n) = &self.note {
             n.draw(&mut self.draw);
@@ -5338,6 +5451,7 @@ mod tests {
             user_idle: 0.0,
             can_shove: false,
             can_cling: false,
+            can_lasso: false,
             can_gadget: false,
             can_saw: false,
             tk_words_near: 0,

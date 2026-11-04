@@ -55,6 +55,8 @@ pub enum Kind {
     Dodged,
     /// It grabbed the cursor and hung on.
     Clung,
+    /// It lassoed the cursor and hauled it in.
+    Lassoed,
 }
 
 impl Kind {
@@ -72,6 +74,7 @@ impl Kind {
             Kind::Ignored => "the user ignored you for a long time",
             Kind::Dodged => "the cursor dodged your attack",
             Kind::Clung => "you grabbed the cursor and hung on no matter what",
+            Kind::Lassoed => "you lassoed the cursor and reeled it in like a horse",
         }
     }
 }
@@ -153,6 +156,7 @@ impl Feelings {
             }
             Kind::Dodged => n(&mut self.pride, -1.5),
             Kind::Clung => n(&mut self.pride, 4.0),
+            Kind::Lassoed => n(&mut self.pride, 4.0),
         }
     }
 

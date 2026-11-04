@@ -388,6 +388,35 @@ pub fn cling(t: f32, shake: f32) -> Pose {
     p
 }
 
+/// Twirling a lasso overhead with the lead hand, feet planted, the rear hand
+/// low holding the coil. `t`: seconds.
+pub fn lasso_spin(t: f32) -> Pose {
+    let ph = t * 14.0;
+    let mut p = [0.0; BONES];
+    plant(&mut p, 0.86 * LEG_LEN, 34.0, 0.0, -30.0, 0.0);
+    p[TORSO] = -H + 0.06 + 0.02 * ph.sin();
+    p[HEAD] = -H - 0.04;
+    // Lead arm up, the wrist circling.
+    arm(&mut p, A, -0.45 + 0.08 * ph.sin(), -1.25 + 0.3 * ph.cos());
+    arm(&mut p, B, 0.9, 0.35);
+    p
+}
+
+/// Hauling on a rope toward `aim`: leaning back, lead heel dug in, both hands
+/// on the rope, pulling hand over hand. `tension` (0..1) leans it back harder.
+pub fn lasso_pull(t: f32, aim: f32, tension: f32) -> Pose {
+    let aim = aim.clamp(-0.9, 0.9);
+    let haul = (t * 7.0).sin();
+    let lean = 0.3 + 0.25 * tension;
+    let mut p = [0.0; BONES];
+    plant(&mut p, 0.8 * LEG_LEN, 46.0, 0.0, -38.0, 0.0);
+    p[TORSO] = -H - lean + 0.03 * haul;
+    p[HEAD] = -H - 0.5 * lean;
+    arm(&mut p, A, aim + 0.1 + 0.25 * haul, aim - 0.05 + 0.2 * haul);
+    arm(&mut p, B, aim + 0.25 - 0.25 * haul, aim + 0.1 - 0.2 * haul);
+    p
+}
+
 /// Asleep on its back, head toward +x, one knee up, arms along its sides.
 /// Absolute angles of a figure lying down (the lowest point rests on the
 /// ground). `t`: seconds, for breathing.

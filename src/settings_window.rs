@@ -764,6 +764,10 @@ impl SettingsWindow {
             "Grabs my cursor and hangs on (it won't let go)",
             Command::ToggleCursorCling,
         );
+        let lasso = self.check(
+            "Lassos my cursor and reels it in (pull hard to snap the rope)",
+            Command::ToggleLasso,
+        );
         let dodges = self.check(
             "My cursor dodges back when I leave the mouse alone",
             Command::ToggleCursorDodges,
@@ -854,6 +858,7 @@ impl SettingsWindow {
             Row::Section("Your cursor"),
             Row::Under(push),
             Row::Under(cling),
+            Row::Under(lasso),
             Row::Under(squish),
             Row::Under(dodges),
             Row::Under(Self::hint(

@@ -13,6 +13,7 @@ pub mod geom;
 pub mod hats;
 pub mod input;
 pub mod jail;
+pub mod lasso;
 pub mod macos;
 pub mod menubar;
 pub mod mind;
