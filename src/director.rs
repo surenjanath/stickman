@@ -109,12 +109,16 @@ pub fn wake_reason(prev: &Observation, now: &Observation) -> Option<&'static str
 }
 
 /// How often the model may be asked: at least `gap` apart, and at least once
-/// per `heartbeat` even when nothing happens. Gentler when saving power.
-pub fn pacing(saving_power: bool) -> (Duration, Duration) {
+/// per `heartbeat` even when nothing happens. Normally there's no gap (it's
+/// asked the moment something happens; calls still go one at a time) and the
+/// heartbeat is the director `interval`, so the model makes every decision.
+/// Saving power, it's 8 s apart with a 2-minute heartbeat and the built-in
+/// rules decide in between.
+pub fn pacing(saving_power: bool, interval: Duration) -> (Duration, Duration) {
     if saving_power {
         (Duration::from_secs(8), Duration::from_secs(120))
     } else {
-        (Duration::from_secs(3), Duration::from_secs(45))
+        (Duration::ZERO, interval)
     }
 }
 
@@ -538,7 +542,7 @@ pub fn spawn(
             }
         };
         log::info!(
-            "director: model {} at {}, asked on events (rules every {:?} in between)",
+            "director: model {} at {}, asked on events and every {:?} (rules only when saving power or offline)",
             cfg.model,
             cfg.url,
             cfg.interval
@@ -560,7 +564,7 @@ pub fn spawn(
                 continue;
             }
             let saving = saving.load(std::sync::atomic::Ordering::Relaxed);
-            let (gap, heartbeat) = pacing(saving);
+            let (gap, heartbeat) = pacing(saving, cfg.interval);
             let o = obs.borrow().clone();
             if let Some(p) = &prev {
                 pending = pending.or(wake_reason(p, &o));
@@ -577,6 +581,8 @@ pub fn spawn(
             let d = if let Some(why) = pending.filter(|_| since_ask >= gap) {
                 pending = None;
                 last_ask = Some(std::time::Instant::now());
+                // The model just decided: the rules wait their turn.
+                last_rules = std::time::Instant::now();
                 calls += 1;
                 let started = std::time::Instant::now();
                 // One retry: small models occasionally emit malformed JSON.
@@ -800,10 +806,12 @@ mod tests {
         };
         assert_eq!(wake_reason(&fast, &fast), None);
         // Gentler on battery.
-        let (gap, beat) = pacing(false);
-        let (bgap, bbeat) = pacing(true);
+        let every = Duration::from_secs(4);
+        let (gap, beat) = pacing(false, every);
+        let (bgap, bbeat) = pacing(true, every);
         assert!(bgap > gap && bbeat > beat);
-        assert!(gap >= Duration::from_secs(3), "CLAUDE.md: debounce 3–5 s");
+        // Normally: asked on every event, and every 4 s when nothing happens.
+        assert_eq!((gap, beat), (Duration::ZERO, every));
     }
 
     #[test]
