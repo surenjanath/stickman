@@ -302,6 +302,9 @@ pub struct Settings {
     pub minions: bool,
     /// It challenges the cursor to boss fights now and then.
     pub boss_fights: bool,
+    /// The cursor dodges its attacks while the user leaves the mouse alone
+    /// (needs `cursor_push`).
+    pub cursor_dodges: bool,
     /// Telekinesis may pick up and throw the active window (Accessibility).
     pub throw_windows: bool,
     /// Rip app icons up off the Dock and throw them (Accessibility).
@@ -357,6 +360,7 @@ impl Default for Settings {
             piles: true,
             minions: true,
             boss_fights: true,
+            cursor_dodges: true,
             throw_windows: true,
             pelt_icons: true,
             weapons: true,
@@ -408,6 +412,7 @@ pub enum Command {
     TogglePiles,
     ToggleMinions,
     ToggleBossFights,
+    ToggleCursorDodges,
     /// Start a boss fight now.
     StartBoss,
     /// Call the minions now.
@@ -474,6 +479,7 @@ impl Command {
             Command::TogglePiles => 329,
             Command::ToggleMinions => 330,
             Command::ToggleBossFights => 331,
+            Command::ToggleCursorDodges => 332,
             Command::StartBoss => 410,
             Command::CallMinions => 411,
             Command::ToggleThrowWindows => 320,
@@ -545,6 +551,7 @@ impl Command {
             329 => Command::TogglePiles,
             330 => Command::ToggleMinions,
             331 => Command::ToggleBossFights,
+            332 => Command::ToggleCursorDodges,
             410 => Command::StartBoss,
             411 => Command::CallMinions,
             320 => Command::ToggleThrowWindows,
@@ -603,6 +610,7 @@ impl Settings {
             Command::TogglePiles => self.piles = !self.piles,
             Command::ToggleMinions => self.minions = !self.minions,
             Command::ToggleBossFights => self.boss_fights = !self.boss_fights,
+            Command::ToggleCursorDodges => self.cursor_dodges = !self.cursor_dodges,
             Command::ToggleThrowWindows => self.throw_windows = !self.throw_windows,
             Command::TogglePeltIcons => self.pelt_icons = !self.pelt_icons,
             Command::ToggleWeapons => self.weapons = !self.weapons,
@@ -653,6 +661,7 @@ impl Settings {
             Command::TogglePiles => self.piles,
             Command::ToggleMinions => self.minions,
             Command::ToggleBossFights => self.boss_fights,
+            Command::ToggleCursorDodges => self.cursor_dodges && self.cursor_push,
             Command::ToggleThrowWindows => self.throw_windows,
             Command::TogglePeltIcons => self.pelt_icons,
             Command::ToggleWeapons => self.weapons,
@@ -763,6 +772,7 @@ mod tests {
             Command::TogglePiles,
             Command::ToggleMinions,
             Command::ToggleBossFights,
+            Command::ToggleCursorDodges,
             Command::StartBoss,
             Command::CallMinions,
             Command::ToggleThrowWindows,

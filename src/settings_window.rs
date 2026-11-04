@@ -589,6 +589,10 @@ impl SettingsWindow {
             "Punches push my cursor; grabs throw it",
             Command::ToggleCursorPush,
         );
+        let dodges = self.check(
+            "My cursor dodges back when I leave the mouse alone",
+            Command::ToggleCursorDodges,
+        );
         let shake = self.check("Stomps shake my windows", Command::ToggleWindowShake);
         let shove = self.check("Kicks slide my windows around", Command::ToggleWindowShoves);
         let throw_win = self.check(
@@ -642,6 +646,12 @@ impl SettingsWindow {
         Self::page(vec![
             Row::Section("Your cursor"),
             Row::Under(push),
+            Row::Under(dodges),
+            Row::Under(Self::hint(
+                "After the mouse has been still for a moment, your pointer sidesteps its \
+                 punches, slips out of its grip and backs away when it charges. Touch the \
+                 mouse and it's yours again. Every dodge makes it angrier.",
+            )),
             Row::Section("Your windows"),
             Row::Under(shake),
             Row::Under(shove),

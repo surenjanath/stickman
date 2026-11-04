@@ -5,6 +5,7 @@
 pub mod agent;
 pub mod boss;
 pub mod director;
+pub mod dodge;
 pub mod doodle;
 pub mod draw;
 pub mod geom;

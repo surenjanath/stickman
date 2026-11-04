@@ -852,6 +852,11 @@ impl Agent {
     }
 
     /// Seconds since the figure was last hit (for the health bar).
+    /// Seconds into the current action.
+    pub fn action_time(&self) -> f32 {
+        self.t
+    }
+
     pub fn since_hit(&self) -> f32 {
         self.since_hit
     }

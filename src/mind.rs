@@ -51,6 +51,8 @@ pub enum Kind {
     LostDuel,
     /// The user left it alone for a long while.
     Ignored,
+    /// The cursor dodged its attack.
+    Dodged,
 }
 
 impl Kind {
@@ -66,6 +68,7 @@ impl Kind {
             Kind::WonDuel => "you beat the rival",
             Kind::LostDuel => "the rival beat you",
             Kind::Ignored => "the user ignored you for a long time",
+            Kind::Dodged => "the cursor dodged your attack",
         }
     }
 }
@@ -145,6 +148,7 @@ impl Feelings {
                 n(&mut self.affection, -3.0);
                 n(&mut self.resentment, 1.0);
             }
+            Kind::Dodged => n(&mut self.pride, -1.5),
         }
     }
 
@@ -374,6 +378,12 @@ impl Mind {
 
     pub fn fade(&mut self, dt: f32) {
         self.feelings.fade(dt);
+    }
+
+    /// Something made it angrier by `amount` (e.g. the cursor dodging it
+    /// again and again).
+    pub fn seethe(&mut self, amount: f32) {
+        Feelings::nudge(&mut self.feelings.resentment, amount);
     }
 
     fn total(&self, k: Kind) -> u32 {

@@ -425,6 +425,10 @@ struct Scene {
     /// The user is dragging the figure around.
     dragging: bool,
     captive: Captive,
+    /// The cursor's own moves: dodging attacks while the mouse is left alone.
+    dodger: stickman::dodge::Dodger,
+    /// When the cursor last got away from it (dodges and slips), for its fury.
+    dodges: std::collections::VecDeque<Instant>,
     /// App to give focus back to after a click on the figure activated us.
     focus_restore: Option<(i64, Instant)>,
     intent: ClickIntent,
@@ -1965,6 +1969,107 @@ impl Scene {
         }
     }
 
+    /// While the user leaves the mouse alone, the real pointer fights back:
+    /// it sidesteps strikes, dodges grabs, backs off from a charge and
+    /// sometimes wriggles out of the figure's hands.
+    fn cursor_fights_back(&mut self) {
+        use stickman::agent::Action;
+        use stickman::dodge::{Input, Threat};
+        let on = self.settings.cursor_dodges
+            && self.cursor_fx()
+            && self.mode == Mode::Combat
+            && self.rival.is_none()
+            && self.jail.is_none()
+            && !self.dragging;
+        let held_for = match self.captive {
+            Captive::Free => None,
+            Captive::Held { since, .. } => Some(since.elapsed().as_secs_f32()),
+            // Levitating or flying: the figure has it, nothing to do.
+            _ => {
+                self.dodger.reset();
+                return;
+            }
+        };
+        if !on {
+            self.dodger.reset();
+            return;
+        }
+        let a = &self.agent;
+        let toward = (self.cursor.pos.x - a.pos.x) * a.facing > 0.0;
+        let threat = match a.action {
+            Action::Punch { .. }
+            | Action::Kick { .. }
+            | Action::FlyingKick { .. }
+            | Action::Slash { .. } => Some(Threat::Strike),
+            Action::SnatchCursor { .. } => Some(Threat::Grab),
+            Action::Walk { run: true, .. } if toward => Some(Threat::Charge),
+            _ => None,
+        };
+        let input = Input {
+            cursor: self.cursor.pos,
+            idle: self.last_mouse_move.elapsed().as_secs_f32(),
+            figure: a.center(),
+            threat,
+            action_t: a.action_time(),
+            held_for,
+            area: self.layout.screen_at(self.cursor.pos).frame,
+        };
+        let step = self.dodger.step(&input, FIXED_DT);
+        if step.slipped {
+            self.captive = Captive::Free;
+            self.agent.holding_cursor = false;
+            log::info!("event: the cursor wriggled free");
+            self.remember(Memory::CursorEscaped);
+        }
+        if let Some(to) = step.to {
+            let from = self.cursor.pos;
+            self.cursor.warp_to(to, input.area);
+            // Our move, not the user's: it doesn't count as them touching it.
+            self.last_cursor = self.cursor.pos;
+            if step.dodged || step.slipped {
+                self.particles.dust(from, 0.3);
+                self.sfx(Sfx::Whoosh, 0.3, from);
+            }
+        }
+        if step.dodged || step.slipped {
+            self.cursor_got_away();
+        }
+    }
+
+    /// The cursor got away again: annoyed, then cursing, then berserk (its
+    /// resentment spikes until it loses its temper).
+    fn cursor_got_away(&mut self) {
+        let now = Instant::now();
+        self.dodges.push_back(now);
+        while self
+            .dodges
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > Duration::from_secs(30))
+        {
+            self.dodges.pop_front();
+        }
+        let streak = self.dodges.len();
+        let (lines, fury) = stickman::dodge::taunt_lines(streak);
+        self.remember(Memory::Dodged);
+        self.mind.seethe(fury.resentment());
+        log::info!(
+            "event: the cursor dodged ({streak} in 30 s, {fury:?}, resentment {:.0})",
+            self.mind.feelings.resentment
+        );
+        let roll = ((self.seed >> 21) % 1000) as f32 / 1000.0;
+        if !self.settings.speech || (fury == stickman::dodge::Fury::Annoyed && roll > 0.5) {
+            return;
+        }
+        let i = ((self.seed >> 27) as usize + self.frames as usize) % lines.len();
+        let priority = match fury {
+            stickman::dodge::Fury::Annoyed => Priority::Quip,
+            stickman::dodge::Fury::Cursing => Priority::Director,
+            stickman::dodge::Fury::Berserk => Priority::Event,
+        };
+        let said = self.speech.say(lines[i], priority);
+        self.speak(said);
+    }
+
     fn quip(&mut self, m: Moment) {
         if self.settings.speech {
             let lines = self.speech.quip(m);
@@ -3449,6 +3554,7 @@ impl Scene {
             let dueling = self.rival.as_ref().is_some_and(|r| r.fighting());
             if !dueling {
                 self.agent.update(&senses, &self.world, &mut events);
+                self.cursor_fights_back();
             }
             if let Some(r) = &mut self.rival {
                 let rr = self.layout.walk_range(r.agent.pos, EDGE_MARGIN);
@@ -4379,6 +4485,8 @@ impl App {
             press: None,
             dragging: false,
             captive: Captive::Free,
+            dodger: stickman::dodge::Dodger::new(now.elapsed().as_nanos() as u64 ^ 0x5eed),
+            dodges: std::collections::VecDeque::new(),
             focus_restore: None,
             intent: ClickIntent::default(),
             hits: VecDeque::new(),
