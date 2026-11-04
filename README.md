@@ -30,7 +30,7 @@ Written in Rust for Apple Silicon:
 | **Word throwing** | In combat the figure jumps onto lines of text in your active window (any app, web pages included), rips a whole word right off the screen and lobs it at your cursor. The word flies as the real pixels, spinning, knocks the pointer and falls to the Dock. Where it was taken from, the page looks blank: the overlay paints the exact on-screen background colour over it. Nothing in the real app changes, and the gap heals when the window scrolls, moves or loses focus, or after 45 s. In sabotage mode it steals words and flings them away. |
 | **Jail-break intro** | It starts locked in a steel cell: rattles the bars ("Let me out!"), grumbles, kicks the door off in an explosion of flying bars, then comes for your cursor. Click it while it's locked up to blast the cell open early. Plays again on Respawn. |
 | **Super powers** | **Super jump:** a glowing power-up crouch, then a leap of up to ~1000 pt with a trail and a shockwave, to reach a cursor up high, a far-off window or a word. **Telekinesis:** hand out, purple aura: it lifts your pointer, wobbles it in the air and flings it; or raises a group of up to 6 words off the page, keeps them orbiting overhead, then fires them at your cursor one after another. |
-| **A mind of its own** | It remembers what you do to it (and in which app), and it develops feelings toward you: resentment, fear, affection, pride. Every couple of minutes it reflects on its memories with the local AI and rewrites its own beliefs ("The user hits me most in Safari"), a scheme ("Operation Pointer Doom: …") and the next note it wants to leave you. All of that feeds back into how it decides what to do: a small, local take on self-improving agent harnesses like Google's Harness². Kept in `mind.json`; see it, or wipe it, in Settings → Mind. |
+| **A mind of its own** | It remembers what you do to it (and in which app), and it develops feelings toward you: resentment, fear, affection, pride. Every couple of minutes it reflects on its memories with the local AI and rewrites its own beliefs ("The user hits me most in Safari"), a scheme ("Operation Pointer Doom: …") and the next note it wants to leave you. All of that feeds back into how it decides what to do. The idea is borrowed from self-improving agent harnesses like Google's Harness² (not a port; see [How it learns and remembers](#how-it-learns-and-remembers)). Kept in `mind.json`; see it, or wipe it, in Settings → Mind. |
 | **Losing its temper** | Push its resentment past 75 and it snaps ("THAT'S IT! F*** YOU!"): it flushes red, steams from the head, swears whatever its language (bleeped unless you turn bleeping off; never slurs), spells "F*** YOU" in torn-off letters, and attacks relentlessly until its resentment drops below 55 (petting helps). Switch off with "Loses its temper". |
 | **A diary** | Every day it tallies what happened; when the date changes, the local AI writes a short, dramatic "Dear diary" entry about yesterday (or a rule-based one when Ollama is off). It reads the opening aloud when you're back, and keeps 60 days of entries on the Mind tab. **Write Diary Now** writes today's so far. |
 | **Achievements & hats** | 17 achievements (First Blood, Pickpocket, Icon Thief, Window Wrecker, Swordsman, Duelist, Desk Champion, Beloved, Seething, Pen Pal, Philosopher, Veteran, …), each celebrated with a trophy bubble and sparks. Levels and achievements unlock 8 hats it can wear (ninja bandana, top hat, crown, pirate hat, party hat, wizard hat, devil horns, viking helmet); pick one in Personality, where locked ones say how to earn them. |
@@ -142,6 +142,45 @@ harnesses.
    - Each day ends with a diary entry about what you did to it. **Copy Latest
      Diary Entry** (menu bar, or Settings → Mind) copies it, ready to share.
    - Achievements, levels and unlocked moves track its history with you.
+
+### The loop at a glance
+
+```
+ what you do ──► memories ──► feelings ──┐
+ (hits, pets,    (mind.json,   (resentment,│
+  throws, app)    last 300)     fear, …)   ▼
+      ▲                           ┌── summary in words ──┐
+      │                           ▼                      ▼
+      │                AI director picks a mood   war: picks a tactic,
+      │                (on events)                dread: hides or attacks
+      │                           │                      │
+      └──────── what it does ◄────┴──────────────────────┘
+                     ▲
+   every 2.5 min ────┘  reflection: the local AI reads the memories and
+                        rewrites its beliefs, scheme, next note and thought,
+                        which go into every later decision
+```
+
+Everything lives in `mind.json` next to the settings, so it survives restarts.
+The model is never retrained; what improves is the text and records it carries.
+
+### Is this Google's Harness²?
+
+No, it isn't a port. [Harness²](https://www.kdnuggets.com/google-open-sources-harness-self-improving-ai-agents-without-retraining)
+(Google Research, open source) improves an agent without retraining it: an
+*editor* proposes changes to the agent's harness (its prompts, tools, memory and
+skills), the agent re-runs the same task with each changed version, and a
+*composer* compares the runs and keeps the changes that helped. Stickman borrows
+the core idea, a frozen model with a harness that improves itself, in a much
+smaller form, written from scratch in Rust:
+
+| | Harness² | Stickman |
+|---|---|---|
+| The model | Any; never retrained | `llama3.2:1b` in Ollama; never retrained |
+| What gets improved | Prompts, tools, memory, skills, orchestration | Beliefs, scheme, next note and thought (text in its prompts), plus its record of which fighting tactics work |
+| Who proposes changes | An editor model suggests several edits | One reflection call rewrites them (or simple rules when Ollama is off) |
+| Checking a change helped | Re-run the task with each edit; a composer keeps the winners | Beliefs and schemes: not checked, they're simply replaced. Fighting tactics: yes, each is tried for 20 s, scored by damage dealt minus hits taken, and the ones that work get picked more (the closest thing to Harness²'s compare-and-keep step) |
+| Needs right answers to learn from | No | No |
 
 **Watch it think** in Settings → Mind: live feeling bars (yellow, then red),
 its current thought, beliefs, scheme, next note, a log of memories and

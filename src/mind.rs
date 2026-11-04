@@ -2,8 +2,8 @@
 //! what it believes and schemes — kept between launches and rewritten by its
 //! own reflections.
 //!
-//! This is a small, local take on the "self-improving harness" idea (Google
-//! Research's Harness²): the model's weights never change, but every couple of
+//! This borrows the "self-improving harness" idea from Google Research's
+//! Harness² (not a port of its code): the model's weights never change, but every couple of
 //! minutes the figure reflects on its memories with the local LLM and rewrites
 //! the beliefs, scheme and note it carries into its next decisions. Feelings
 //! move with every event and fade slowly; everything can be wiped from the
