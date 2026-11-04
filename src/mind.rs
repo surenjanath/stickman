@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent::Mode;
+use crate::agent::{Dread, Mode};
 
 /// How many memories it keeps (oldest forgotten first).
 const MAX_MEMORIES: usize = 300;
@@ -202,6 +202,9 @@ pub struct DiaryEntry {
     pub text: String,
 }
 
+/// Hits in one app before it starts to dread that app.
+pub const DREAD_HITS: u32 = 3;
+
 /// Diary entries kept (oldest dropped first).
 const MAX_DIARY: usize = 60;
 
@@ -372,6 +375,41 @@ impl Mind {
             .iter()
             .max_by_key(|(_, n)| **n)
             .map(|(a, n)| (a.as_str(), *n))
+    }
+
+    /// How it feels about `app`, if that's where the user hits it most (at
+    /// least `DREAD_HITS` times). The beatings leave a scar that lasts after
+    /// the feelings fade, so a much-abused app stays scary; affection heals it.
+    /// Rage, or resentment that outweighs the fear, makes it vengeful instead.
+    pub fn dread(&self, app: &str) -> Dread {
+        let n = match self.worst_app() {
+            Some((worst, n)) if !app.is_empty() && worst == app && n >= DREAD_HITS => n,
+            _ => return Dread::None,
+        };
+        let f = &self.feelings;
+        let scar = (n as f32 * 3.0).min(45.0) * (1.0 - f.affection / 100.0).max(0.0);
+        let fear = f.fear + scar;
+        if self.enraged || (f.resentment >= 40.0 && f.resentment >= fear) {
+            Dread::Vengeful
+        } else if fear >= 35.0 {
+            Dread::Scared
+        } else {
+            Dread::None
+        }
+    }
+
+    /// A note about the app it dreads ("NO MORE CHROME"), or `None`.
+    pub fn dread_note(&self, app: &str, roll: f32) -> Option<String> {
+        let name = app.split_whitespace().last()?.to_uppercase();
+        let pick = |opts: &[&str]| {
+            let i = ((roll * 7.3).fract() * opts.len() as f32) as usize % opts.len();
+            opts[i].replace("{}", &name)
+        };
+        match self.dread(app) {
+            Dread::None => None,
+            Dread::Scared => Some(pick(&["NO MORE {}", "NOT {}", "{} HURTS"])),
+            Dread::Vengeful => Some(pick(&["I HATE {}", "{} MUST GO", "CLOSE {}"])),
+        }
     }
 
     /// Extra aggression from how it feels (resentment up, fear down).
@@ -761,6 +799,42 @@ mod tests {
         assert!(m.feelings.resentment < before);
         assert!(m.summary().contains("hit you 10 times"));
         assert!(m.summary().contains("Safari"));
+    }
+
+    #[test]
+    fn it_dreads_the_app_where_it_gets_beaten() {
+        let mut m = Mind::default();
+        // Two hits is nothing to dread yet.
+        m.record(Kind::Hit, "Google Chrome");
+        m.record(Kind::Hit, "Google Chrome");
+        assert_eq!(m.dread("Google Chrome"), Dread::None);
+        // A proper beating, then it calms down: still scared of Chrome
+        // (the scar outlasts the feelings), but not of anywhere else.
+        for _ in 0..10 {
+            m.record(Kind::Hit, "Google Chrome");
+        }
+        m.enraged = false;
+        m.feelings.resentment = 10.0;
+        m.feelings.fear = 5.0;
+        m.feelings.affection = 0.0;
+        assert_eq!(m.dread("Google Chrome"), Dread::Scared);
+        assert_eq!(m.dread("Safari"), Dread::None);
+        assert_eq!(m.dread(""), Dread::None);
+        assert!(m
+            .dread_note("Google Chrome", 0.3)
+            .unwrap()
+            .contains("CHROME"));
+        assert_eq!(m.dread_note("Safari", 0.3), None);
+        // Angry more than afraid: it wants revenge on Chrome instead.
+        m.feelings.resentment = 90.0;
+        assert_eq!(m.dread("Google Chrome"), Dread::Vengeful);
+        m.feelings.resentment = 10.0;
+        m.enraged = true;
+        assert_eq!(m.dread("Google Chrome"), Dread::Vengeful);
+        // Lots of affection heals the scar.
+        m.enraged = false;
+        m.feelings.affection = 100.0;
+        assert_eq!(m.dread("Google Chrome"), Dread::None);
     }
 
     #[test]

@@ -80,6 +80,18 @@ impl Mode {
     }
 }
 
+/// How it feels about the app in front: the one where the user hits it most.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Dread {
+    /// Nothing special about this app.
+    #[default]
+    None,
+    /// Afraid of it: keeps to the far side of the screen from its window.
+    Scared,
+    /// Furious with it: goes after its window.
+    Vengeful,
+}
+
 /// What the figure perceives this tick.
 #[derive(Debug, Clone, Copy)]
 pub struct Senses {
@@ -114,6 +126,8 @@ pub struct Senses {
     pub can_throw_window: bool,
     /// May rip a weapon (a scrollbar) off the active window.
     pub weapon_available: bool,
+    /// How it feels about the active app (where it has been beaten before).
+    pub dread: Dread,
 }
 
 /// What telekinesis is working on.
@@ -235,6 +249,11 @@ pub enum Event {
         shape: Shape,
         origin: V2,
         size: f32,
+    },
+    /// The user switched to (or away from) the app it dreads.
+    Dreaded {
+        at: V2,
+        dread: Dread,
     },
     /// Kicked the window it stands on sideways by `dx` points.
     ShoveWindow {
@@ -579,6 +598,8 @@ pub struct Agent {
     shown: (Pose, f32),
     /// Current action's target pose, angle-unwrapped to stay continuous.
     target: (Pose, f32),
+    /// How it felt about the active app last tick (to notice a switch).
+    dread: Dread,
 }
 
 impl Agent {
@@ -636,6 +657,7 @@ impl Agent {
             settle: 0.08,
             shown: (idle_pose(0.0), 0.0),
             target: (idle_pose(0.0), 0.0),
+            dread: Dread::None,
         }
     }
 
@@ -1217,6 +1239,7 @@ impl Agent {
         }
         self.finish_actions(events);
         self.attack_contacts(s, events);
+        self.notice_dread(s, events);
         if self.ground.is_some()
             && self.action.interruptible()
             && !self.hold_still
@@ -1225,6 +1248,60 @@ impl Agent {
             self.behave(s, world, events);
         }
         self.integrate(s, world, events);
+    }
+
+    /// The user just switched to the app it dreads: say so, and if it's scared,
+    /// flinch back from that window.
+    fn notice_dread(&mut self, s: &Senses, events: &mut Vec<Event>) {
+        if s.dread == self.dread {
+            return;
+        }
+        self.dread = s.dread;
+        if s.dread == Dread::None || self.scripted || self.hold_still {
+            return;
+        }
+        events.push(Event::Dreaded {
+            at: self.head(),
+            dread: s.dread,
+        });
+        let calm = self.ground.is_some() && self.action.interruptible();
+        if s.dread == Dread::Scared && calm {
+            if let Some((_, win)) = s.active_window {
+                let mid = (win.x + win.width / 2.0) as f32;
+                let away = if self.pos.x < mid { -1.0 } else { 1.0 };
+                self.face(-away); // eyes on the window, hopping back from it
+                self.vel = v2(away * 260.0, -360.0);
+                self.ground = None;
+                self.set_action(Action::Dodge);
+            }
+        }
+    }
+
+    /// Scared of the active window: get to the far side of the screen from it
+    /// (off it first, if standing on it), then watch it warily.
+    fn keep_away(&mut self, s: &Senses, id: u32, win: Rect) {
+        let (wx0, wx1) = (win.x as f32, (win.x + win.width) as f32);
+        let ground = self.ground.unwrap_or(Platform::ground(0.0, self.pos.y));
+        let left = (wx0 - s.min_x) >= (s.max_x - wx1);
+        let to = if ground.kind == PlatformKind::Window && ground.owner == id {
+            // Get off it: run past the nearer edge and drop.
+            if self.pos.x - ground.x0 < ground.x1 - self.pos.x {
+                ground.x0 - 40.0
+            } else {
+                ground.x1 + 40.0
+            }
+        } else if left {
+            s.min_x + 60.0
+        } else {
+            s.max_x - 60.0
+        };
+        let to = clamp_between(to, s.min_x, s.max_x);
+        if (to - self.pos.x).abs() > 30.0 {
+            self.walk_to(to, true); // scurry
+        } else if !matches!(self.action, Action::Think) {
+            self.face(if left { 1.0 } else { -1.0 });
+            self.set_action(Action::Think);
+        }
     }
 
     /// Slow strokes of the cursor over the figure (outside combat) make it happy.
@@ -1717,6 +1794,17 @@ impl Agent {
             self.set_action(Action::LieDown);
             events.push(Event::Yawned { at: self.head() });
             return;
+        }
+        // The app where it gets beaten: steer clear, or go after it (a fight
+        // still comes first: cornered, it hits back).
+        if let Some((id, win)) = s.active_window.filter(|_| s.mode != Mode::Combat) {
+            match s.dread {
+                Dread::Scared if !self.holding => return self.keep_away(s, id, win),
+                Dread::Vengeful if !(s.music && self.traits.dancing) => {
+                    return self.sabotage(s, world)
+                }
+                _ => {}
+            }
         }
         match s.mode {
             Mode::Combat => {
@@ -2312,6 +2400,7 @@ mod tests {
             music: false,
             can_throw_window: false,
             weapon_available: false,
+            dread: crate::agent::Dread::None,
         }
     }
 
@@ -3446,6 +3535,101 @@ mod tests {
                 .any(|e| matches!(e, Event::Stomp { window: 42, .. })),
             "no stomps"
         );
+    }
+
+    fn chrome() -> (Rect, Platform) {
+        let win = Rect {
+            x: 700.0,
+            y: 850.0,
+            width: 600.0,
+            height: 400.0,
+        };
+        let top = Platform {
+            x0: 700.0,
+            x1: 1300.0,
+            y: 850.0,
+            kind: PlatformKind::Window,
+            owner: 42,
+        };
+        (win, top)
+    }
+
+    #[test]
+    fn scared_of_an_app_it_flinches_then_keeps_away_from_its_window() {
+        let (win, top) = chrome();
+        let w = world(vec![top]);
+        // Standing on the window it dreads, even though it was told to sabotage.
+        let mut a = Agent::new(1000.0, top, SCALE, 5);
+        let mut s = senses(Mode::Sabotage);
+        s.can_shove = true;
+        s.active_window = Some((42, win));
+        s.dread = Dread::Scared;
+        let mut ev = vec![];
+        run(&mut a, &w, &s, 12.0, &mut ev);
+        assert!(ev.iter().any(|e| matches!(
+            e,
+            Event::Dreaded {
+                dread: Dread::Scared,
+                ..
+            }
+        )));
+        assert_ne!(a.ground.map(|g| g.owner), Some(42), "still on the window");
+        // More room on the left of this window: it hides in that corner.
+        assert!(a.pos.x < 200.0, "not hiding: {:?} at {:?}", a.action, a.pos);
+        assert!(
+            !ev.iter()
+                .any(|e| matches!(e, Event::Stomp { .. } | Event::ShoveWindow { .. })),
+            "too scared to touch it"
+        );
+        // Switching away (no dread) doesn't announce anything.
+        let quiet = ev.len();
+        s.dread = Dread::None;
+        s.active_window = None;
+        a.update(&s, &w, &mut ev);
+        assert!(!ev[quiet..]
+            .iter()
+            .any(|e| matches!(e, Event::Dreaded { .. })));
+    }
+
+    #[test]
+    fn vengeful_about_an_app_it_attacks_its_window_even_when_idle() {
+        let (win, top) = chrome();
+        let w = world(vec![top]);
+        let mut a = agent();
+        a.pos.x = 400.0;
+        let mut s = senses(Mode::Idle);
+        s.active_window = Some((42, win));
+        s.dread = Dread::Vengeful;
+        let mut ev = vec![];
+        run(&mut a, &w, &s, 12.0, &mut ev);
+        assert!(ev.iter().any(|e| matches!(
+            e,
+            Event::Dreaded {
+                dread: Dread::Vengeful,
+                ..
+            }
+        )));
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, Event::Stomp { window: 42, .. })),
+            "never went after the window: {:?} at {:?}",
+            a.action,
+            a.pos
+        );
+    }
+
+    #[test]
+    fn a_fight_comes_before_dread() {
+        let (win, top) = chrome();
+        let w = world(vec![top]);
+        let mut a = agent();
+        let mut s = senses(Mode::Combat);
+        s.cursor = v2(960.0, GROUND_Y - 100.0);
+        s.active_window = Some((42, win));
+        s.dread = Dread::Scared;
+        let mut ev = vec![];
+        run(&mut a, &w, &s, 4.0, &mut ev);
+        assert!(ev.iter().any(|e| matches!(e, Event::Swing { .. })));
     }
 
     #[test]

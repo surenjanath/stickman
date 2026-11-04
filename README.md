@@ -89,6 +89,15 @@ harnesses.
    affection calm it down. The bias is added to its temper slider.
    Resentment over 75 and it **loses its temper** (red, steaming, swearing,
    all-out attack) until resentment falls below 55.
+   **It remembers where it got hurt.** Once you've hit it 3+ times in one app
+   (the app where you hit it most), switching to that app sets it off. If fear
+   wins, it flinches back, says "Oh no. Not Google Chrome again…", gets off
+   that window and hides at the far side of the screen; it won't sabotage that
+   window. If resentment wins (or it's enraged), it goes after the window
+   instead: climbs it, stomps it, shoves it, and leaves notes like
+   "I HATE CHROME". The beatings leave a scar, so a much-abused app stays
+   scary after its feelings have calmed down; petting it heals that. In a
+   fight it still hits back.
 4. **It reflects and draws conclusions.** About every 2½ minutes, it hands
    the local AI a summary of its memories and feelings and asks what it now
    believes. The answer rewrites:

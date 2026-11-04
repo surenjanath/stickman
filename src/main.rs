@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use stickman::agent::{Agent, Event, Mind, Mode, Senses, FIXED_DT};
+use stickman::agent::{Agent, Dread, Event, Mind, Mode, Senses, FIXED_DT};
 use stickman::boss::{Blow, Boss, Outcome};
 use stickman::director::{self, Directive, Observation};
 use stickman::doodle::Doodles;
@@ -1396,7 +1396,16 @@ impl Scene {
             || matches!(self.agent.action, stickman::agent::Action::Walk { .. });
         if around && free && self.rival.is_none() && self.jail.is_none() {
             let roll = ((self.seed >> 29) % 1000) as f32 / 1000.0;
-            let text = self.mind.note_for(self.mode, roll);
+            let app = self
+                .snapshot
+                .active()
+                .map(|w| w.owner.clone())
+                .unwrap_or_default();
+            let text = self
+                .mind
+                .dread_note(&app, roll)
+                .filter(|_| roll < 0.5)
+                .unwrap_or_else(|| self.mind.note_for(self.mode, roll));
             self.write_note(&text);
         }
     }
@@ -1959,6 +1968,7 @@ impl Scene {
                     self.doodles.start(shape, origin, size);
                     self.quip(Moment::Doodling);
                 }
+                Event::Dreaded { at, dread } => self.dreaded(at, dread),
                 Event::ShoveWindow { at, window, dx } => {
                     self.sfx(Sfx::Stomp, 0.9, at);
                     if self.settings.window_shoves && self.window_fx() && self.accessibility {
@@ -2168,6 +2178,41 @@ impl Scene {
     }
 
     /// The mind: remember the user's app with each memory.
+    /// The user switched to the app where it gets beaten: it says so.
+    fn dreaded(&mut self, at: V2, dread: Dread) {
+        let app = self
+            .snapshot
+            .active()
+            .map(|w| w.owner.clone())
+            .unwrap_or_default();
+        log::info!("event: dreads {app} ({dread:?})");
+        if dread == Dread::Scared {
+            self.sfx(Sfx::Whoosh, 0.3, at);
+        }
+        if !self.settings.speech || app.is_empty() {
+            return;
+        }
+        let lines: &[&str] = match dread {
+            Dread::None => return,
+            Dread::Scared => &[
+                "Oh no. Not {} again…",
+                "I know what happens in {}.",
+                "{}… please be nice this time.",
+                "Nope. I'll stay over here.",
+            ],
+            Dread::Vengeful => &[
+                "{}. You and me.",
+                "I remember what you did to me in {}.",
+                "Back in {}? Bad idea.",
+                "{} is going down.",
+            ],
+        };
+        let i = ((self.seed >> 23) as usize + self.frames as usize) % lines.len();
+        let text = lines[i].replace("{}", &app);
+        let said = self.speech.say(&text, Priority::Event);
+        self.speak(said);
+    }
+
     fn remember(&mut self, what: Memory) {
         let app = self
             .snapshot
@@ -2940,6 +2985,9 @@ impl Scene {
                     && self.flight.is_none()
                     && self.snapshot.active().is_some(),
                 can_shove: self.settings.window_shoves && self.window_fx() && self.accessibility,
+                dread: self
+                    .mind
+                    .dread(self.snapshot.active().map_or("", |w| w.owner.as_str())),
             };
             let dueling = self.rival.as_ref().is_some_and(|r| r.fighting());
             if !dueling {
@@ -2955,6 +3003,7 @@ impl Scene {
                     active_window: None,
                     can_shove: false,
                     held: false,
+                    dread: Dread::None,
                     ..senses
                 };
                 let cues = r.step(
@@ -2976,6 +3025,7 @@ impl Scene {
                     min_x: r.min_x,
                     max_x: r.max_x,
                     top: r.top,
+                    dread: Dread::None,
                     ..senses
                 };
                 minion_cues.extend(sq.step(&self.world, &base));
@@ -4059,6 +4109,7 @@ mod tests {
             music: false,
             can_throw_window: false,
             weapon_available: false,
+            dread: stickman::agent::Dread::None,
         };
         let count = |hold: bool| {
             let mut a = Agent::new(900.0, ground, FIGURE_SCALE, 11);
