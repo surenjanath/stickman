@@ -58,13 +58,21 @@ pub struct Instance {
     /// half stroke width / radius, kind (0 capsule, 1 ring, 2 disc)
     params: [f32; 2],
     color: [f32; 4],
+    /// x: nothing is drawn below this y (e.g. the figure hiding behind the
+    /// Dock); `NO_CLIP` for none. y: unused (keeps the layout in pairs).
+    clip: [f32; 2],
 }
+
+/// "No clip line": far below any screen.
+const NO_CLIP: f32 = 1.0e9;
 
 /// Primitives to draw this frame, back to front, in overlay points.
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct DrawList {
     items: Vec<Instance>,
     sprites: Vec<SpriteDraw>,
+    /// Clip line for primitives pushed now (see [`DrawList::figure_clipped`]).
+    clip_y: f32,
 }
 
 impl DrawList {
@@ -101,6 +109,14 @@ impl DrawList {
                 screen: [0.0; 2],
                 params: [half, kind],
                 color,
+                clip: [
+                    if self.clip_y > 0.0 {
+                        self.clip_y
+                    } else {
+                        NO_CLIP
+                    },
+                    0.0,
+                ],
             });
         }
     }
@@ -119,6 +135,15 @@ impl DrawList {
     /// A filled circle.
     pub fn disc(&mut self, center: V2, radius: f32, color: [f32; 4]) {
         self.push(center, center, radius, KIND_DISC, color);
+    }
+
+    /// The stick figure, with nothing drawn below `clip_y` (points): it's
+    /// behind something there, like the Dock.
+    pub fn figure_clipped(&mut self, segments: &[Segment], rgb: [u8; 3], clip_y: f32) {
+        // 0 means "no clip" in `push`; keep a real line strictly positive.
+        self.clip_y = clip_y.max(f32::MIN_POSITIVE);
+        self.figure(segments, rgb);
+        self.clip_y = 0.0;
     }
 
     /// The stick figure: a light outline pass under a solid fill pass.
@@ -272,7 +297,8 @@ impl Renderer {
             immediate_size: 0,
         });
         let attributes = wgpu::vertex_attr_array![
-            0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4
+            0 => Float32x2, 1 => Float32x2, 2 => Float32x2, 3 => Float32x2, 4 => Float32x4,
+            5 => Float32x2
         ];
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("stickman-pipeline"),
@@ -599,12 +625,18 @@ impl Renderer {
                 } else {
                     px(i.b)
                 };
+                let clip = if i.clip[0] >= NO_CLIP {
+                    NO_CLIP
+                } else {
+                    (i.clip[0] - o.y) * scale
+                };
                 Instance {
                     a: px(i.a),
                     b,
                     screen,
                     params: [i.params[0] * scale, i.params[1]],
                     color: i.color,
+                    clip: [clip, 0.0],
                 }
             })
             .collect();

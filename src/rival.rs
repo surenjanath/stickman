@@ -224,6 +224,8 @@ mod tests {
             can_throw_window: false,
             weapon_available: false,
             dread: crate::agent::Dread::None,
+            dread_level: 0.0,
+            dock: None,
             tactic: crate::agent::Tactic::Any,
             retreat: false,
         }

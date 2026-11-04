@@ -21,6 +21,10 @@ use crate::war::War;
 const MAX_MEMORIES: usize = 300;
 /// How many thoughts it keeps.
 const MAX_THOUGHTS: usize = 40;
+/// Fear level (0..1, see [`Mind::dread_level`]) from which it hides behind
+/// the Dock rather than just keeping its distance.
+pub const HIDE_LEVEL: f32 = 0.5;
+
 /// Resentment at which it loses its temper, and below which it calms down.
 pub const RAGE_AT: f32 = 75.0;
 pub const CALM_AT: f32 = 55.0;
@@ -206,6 +210,10 @@ pub struct DiaryEntry {
 /// Hits in one app before it starts to dread that app.
 pub const DREAD_HITS: u32 = 3;
 
+/// The scar from beatings in an app halves every this many seconds after the
+/// last hit there, so the dread fades and it drifts back.
+const SCAR_HALF_LIFE_S: f32 = 30.0 * 60.0;
+
 /// Diary entries kept (oldest dropped first).
 const MAX_DIARY: usize = 60;
 
@@ -385,19 +393,82 @@ impl Mind {
     /// the feelings fade, so a much-abused app stays scary; affection heals it.
     /// Rage, or resentment that outweighs the fear, makes it vengeful instead.
     pub fn dread(&self, app: &str) -> Dread {
+        self.dread_level(app).0
+    }
+
+    /// How it feels about `app` (see [`Mind::dread`]) and how strongly, 0..1:
+    /// for fear, 0 is just wary (keeps a little way off its window), 1 is
+    /// terrified (hides behind the Dock). It falls as the fear fades and the
+    /// scar heals, so the figure drifts back.
+    pub fn dread_level(&self, app: &str) -> (Dread, f32) {
         let n = match self.worst_app() {
             Some((worst, n)) if !app.is_empty() && worst == app && n >= DREAD_HITS => n,
-            _ => return Dread::None,
+            _ => return (Dread::None, 0.0),
         };
         let f = &self.feelings;
-        let scar = (n as f32 * 3.0).min(45.0) * (1.0 - f.affection / 100.0).max(0.0);
-        let fear = f.fear + scar;
+        let fear = f.fear + self.scar(app, n);
         if self.enraged || (f.resentment >= 40.0 && f.resentment >= fear) {
-            Dread::Vengeful
+            let level = if self.enraged {
+                1.0
+            } else {
+                ((f.resentment - 40.0) / 50.0).clamp(0.0, 1.0)
+            };
+            (Dread::Vengeful, level)
         } else if fear >= 35.0 {
-            Dread::Scared
+            (Dread::Scared, ((fear - 35.0) / 50.0).clamp(0.0, 1.0))
         } else {
-            Dread::None
+            (Dread::None, 0.0)
+        }
+    }
+
+    /// Extra fear left by `n` beatings in `app`: up to 45, healed by
+    /// affection, and halving every half hour since the last hit there (a hit
+    /// it no longer remembers is old: a quarter is left).
+    fn scar(&self, app: &str, n: u32) -> f32 {
+        let last = self
+            .memories
+            .iter()
+            .rev()
+            .find(|m| m.what == Kind::Hit && m.app == app)
+            .map(|m| m.when);
+        let healed = match last {
+            Some(t) => {
+                let age = now_secs().saturating_sub(t) as f32;
+                0.5f32.powf(age / SCAR_HALF_LIFE_S)
+            }
+            None => 0.25,
+        };
+        (n as f32 * 3.0).min(45.0) * (1.0 - self.feelings.affection / 100.0).max(0.0) * healed
+    }
+
+    /// The app it's scared of (wherever it is on screen), if any: it won't
+    /// set foot on that app's windows.
+    pub fn shunned_app(&self) -> Option<&str> {
+        let (app, _) = self.worst_app()?;
+        (self.dread(app) == Dread::Scared).then_some(app)
+    }
+
+    /// One line for the Mind tab: which app it dreads and what that does.
+    pub fn dread_status(&self) -> String {
+        let Some((app, n)) = self.worst_app().filter(|(_, n)| *n >= DREAD_HITS) else {
+            return format!(
+                "Nothing yet. Hit it {DREAD_HITS}+ times in one app and it will remember."
+            );
+        };
+        match self.dread_level(app) {
+            (Dread::Scared, l) if l >= HIDE_LEVEL => format!(
+                "{app} ({n} hits), terrified ({:.0}%): won't touch its windows, hides behind the Dock when it's in front.",
+                l * 100.0
+            ),
+            (Dread::Scared, l) => format!(
+                "{app} ({n} hits), wary ({:.0}%): won't touch its windows, keeps its distance when it's in front. Creeping back as the fear fades.",
+                l * 100.0
+            ),
+            (Dread::Vengeful, l) => format!(
+                "{app} ({n} hits), vengeful ({:.0}%): goes after its windows when it's in front.",
+                l * 100.0
+            ),
+            (Dread::None, _) => format!("{app} ({n} hits), but it has calmed down about it."),
         }
     }
 
@@ -448,6 +519,15 @@ impl Mind {
             s.push(format!(
                 "The user hits you most while using {app} ({n} times)."
             ));
+            match self.dread(app) {
+                Dread::Scared => s.push(format!(
+                    "You are scared of {app}: you won't stand on its windows, and you hide when it comes to the front."
+                )),
+                Dread::Vengeful => s.push(format!(
+                    "You are out for revenge on {app}: you attack its windows."
+                )),
+                Dread::None => {}
+            }
         }
         let f = &self.feelings;
         s.push(format!(

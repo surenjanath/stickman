@@ -10,6 +10,8 @@ struct VsOut {
     // x: half stroke width / disc radius / corner radius (px), y: kind (0 capsule, 1 ring, 2 disc, 3 rect)
     @location(2) params: vec2<f32>,
     @location(3) color: vec4<f32>,
+    // x: nothing drawn below this y (px); far below the screen for none.
+    @location(4) clip: vec2<f32>,
 };
 
 @vertex
@@ -20,6 +22,7 @@ fn vs_main(
     @location(2) screen: vec2<f32>,
     @location(3) params: vec2<f32>,
     @location(4) color: vec4<f32>,
+    @location(5) clip: vec2<f32>,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0), vec2<f32>(1.0, 0.0), vec2<f32>(0.0, 1.0),
@@ -52,12 +55,16 @@ fn vs_main(
     out.b = b;
     out.params = params;
     out.color = color;
+    out.clip = clip;
     return out;
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let p = in.pos.xy; // pixel centre, framebuffer space (top-left origin)
+    if (p.y > in.clip.x) {
+        discard; // behind something (the Dock)
+    }
     var d: f32;
     if (in.params.y > 2.5) {
         let q = abs(p - in.a) - in.b + vec2<f32>(in.params.x, in.params.x);

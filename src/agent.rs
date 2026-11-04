@@ -144,6 +144,22 @@ pub enum Dread {
     Vengeful,
 }
 
+/// Fear level from which it hides behind the Dock (see `Mind::dread_level`).
+pub const HIDE_LEVEL: f32 = crate::mind::HIDE_LEVEL;
+
+/// A bottom Dock: from `x0` to `x1`, its top edge at `y` (the ground line).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DockSpan {
+    pub x0: f32,
+    pub x1: f32,
+    pub y: f32,
+}
+
+/// How far it sinks behind the Dock (unscaled points): the line ends up
+/// across its head, and a slow peek lifts it by up to `PEEK`.
+const DUCK_DEPTH: f32 = 216.0;
+const PEEK: f32 = 16.0;
+
 /// What the figure perceives this tick.
 #[derive(Debug, Clone, Copy)]
 pub struct Senses {
@@ -180,6 +196,11 @@ pub struct Senses {
     pub weapon_available: bool,
     /// How it feels about the active app (where it has been beaten before).
     pub dread: Dread,
+    /// How strongly, 0..1 (see `Mind::dread_level`): scared, it hides behind
+    /// the Dock from `HIDE_LEVEL` up and keeps a shrinking distance below.
+    pub dread_level: f32,
+    /// The Dock along the bottom of a screen, if there is one: somewhere to hide.
+    pub dock: Option<DockSpan>,
     /// Its plan for fighting the cursor.
     pub tactic: Tactic,
     /// Badly hurt: fall back and recover instead of pressing the attack.
@@ -310,6 +331,16 @@ pub enum Event {
     Dreaded {
         at: V2,
         dread: Dread,
+    },
+    /// Ducked behind the Dock (`hidden`), or came back out of hiding.
+    Hid {
+        at: V2,
+        hidden: bool,
+    },
+    /// Landed on a window of the app it's scared of, and is getting off it.
+    Shunned {
+        at: V2,
+        window: u32,
     },
     /// Kicked the window it stands on sideways by `dx` points.
     ShoveWindow {
@@ -656,6 +687,17 @@ pub struct Agent {
     target: (Pose, f32),
     /// How it felt about the active app last tick (to notice a switch).
     dread: Dread,
+    /// Windows of the app it's scared of: it won't step onto them.
+    shunned: Vec<u32>,
+    /// The shunned window it last fled (so it says so once).
+    fled_from: u32,
+    /// Wants to be behind the Dock this tick (set by `keep_away`).
+    hiding: bool,
+    /// Has announced being hidden.
+    hidden: bool,
+    /// How far behind the Dock it is, 0..1, and the Dock's top edge.
+    duck: f32,
+    duck_line: f32,
 }
 
 impl Agent {
@@ -714,7 +756,40 @@ impl Agent {
             shown: (idle_pose(0.0), 0.0),
             target: (idle_pose(0.0), 0.0),
             dread: Dread::None,
+            shunned: Vec::new(),
+            fled_from: 0,
+            hiding: false,
+            hidden: false,
+            duck: 0.0,
+            duck_line: 0.0,
         }
+    }
+
+    /// The windows (CGWindowIDs) of the app it's scared of: it won't set foot
+    /// on them, and gets off one if it lands there. Empty for none.
+    pub fn shun(&mut self, windows: impl IntoIterator<Item = u32>) {
+        self.shunned.clear();
+        self.shunned.extend(windows);
+    }
+
+    fn shuns(&self, p: &Platform) -> bool {
+        matches!(p.kind, PlatformKind::Window | PlatformKind::Text)
+            && p.owner != 0
+            && self.shunned.contains(&p.owner)
+    }
+
+    /// Behind the Dock: nothing of it shows below this line.
+    pub fn clip_line(&self) -> Option<f32> {
+        (self.duck > 0.001).then_some(self.duck_line)
+    }
+
+    /// How far it has sunk behind the Dock, in points (with a slow peek).
+    fn duck_offset(&self) -> f32 {
+        if self.duck <= 0.0 {
+            return 0.0;
+        }
+        let peek = 0.5 + 0.5 * (self.t * 0.9).sin();
+        smoothstep(self.duck) * (DUCK_DEPTH - PEEK * peek) * self.scale
     }
 
     fn random(&mut self, lo: f32, hi: f32) -> f32 {
@@ -1048,7 +1123,8 @@ impl Agent {
     /// The figure's bones in overlay points.
     pub fn segments(&self) -> [Segment; BONES] {
         let rotated = self.rotated_pose();
-        let root_y = self.root_y(&rotated, self.anchor()) + self.root_correction;
+        let root_y =
+            self.root_y(&rotated, self.anchor()) + self.root_correction + self.duck_offset();
         forward_kinematics(&rotated, [self.pos.x, root_y], self.scale, self.facing)
     }
 
@@ -1088,6 +1164,10 @@ impl Agent {
     }
 
     pub fn hit_test(&self, p: V2) -> bool {
+        // Behind the Dock only its head shows: clicks on the Dock miss it.
+        if self.clip_line().is_some_and(|y| p.y > y) {
+            return false;
+        }
         self.bounds(10.0).contains(p)
     }
 
@@ -1173,6 +1253,7 @@ impl Agent {
             }
             self.act(s, world, events);
         }
+        self.duck_behind_dock(s, events);
 
         // Keep the drawn body continuous when the anchoring rule flips.
         let anchor = self.anchor();
@@ -1306,6 +1387,34 @@ impl Agent {
         self.integrate(s, world, events);
     }
 
+    /// Sink behind the Dock while hiding there (thinking, on the Dock's line),
+    /// and pop back up otherwise. Says so when it goes in and comes out.
+    fn duck_behind_dock(&mut self, s: &Senses, events: &mut Vec<Event>) {
+        let on_dock = self.ground.zip(s.dock).is_some_and(|(g, d)| {
+            g.kind == PlatformKind::Ground
+                && (g.y - d.y).abs() < 4.0
+                && (d.x0..=d.x1).contains(&self.pos.x)
+        });
+        let want = self.hiding && on_dock && self.action == Action::Think && !s.held;
+        if want {
+            self.duck_line = self.pos.y;
+        }
+        // Slowly down, quickly up.
+        let step = FIXED_DT / if want { 0.7 } else { 0.25 };
+        self.duck = if want {
+            (self.duck + step).min(1.0)
+        } else {
+            (self.duck - step).max(0.0)
+        };
+        if want != self.hidden && (want || self.duck <= 0.0 || self.ground.is_none()) {
+            self.hidden = want;
+            events.push(Event::Hid {
+                at: self.head(),
+                hidden: want,
+            });
+        }
+    }
+
     /// The user just switched to the app it dreads: say so, and if it's scared,
     /// flinch back from that window.
     fn notice_dread(&mut self, s: &Senses, events: &mut Vec<Event>) {
@@ -1351,31 +1460,93 @@ impl Agent {
         }
     }
 
-    /// Scared of the active window: get to the far side of the screen from it
-    /// (off it first, if standing on it), then watch it warily.
+    /// Scared of the active window: get off it, then keep away. How far
+    /// depends on how scared: terrified (`HIDE_LEVEL` and up) it hides behind
+    /// the Dock as far from the window as it can (or, with no Dock, at the far
+    /// side of the screen); less so, it keeps a distance that shrinks as the
+    /// fear fades, so it creeps back. It watches the window warily.
     fn keep_away(&mut self, s: &Senses, id: u32, win: Rect) {
         let (wx0, wx1) = (win.x as f32, (win.x + win.width) as f32);
+        let mid = (wx0 + wx1) / 2.0;
         let ground = self.ground.unwrap_or(Platform::ground(0.0, self.pos.y));
-        let left = (wx0 - s.min_x) >= (s.max_x - wx1);
-        let to = if ground.kind == PlatformKind::Window && ground.owner == id {
+        let watch = |me: &mut Agent| {
+            me.face(if mid < me.pos.x { -1.0 } else { 1.0 });
+            if !matches!(me.action, Action::Think) {
+                me.set_action(Action::Think);
+            }
+        };
+        if ground.kind != PlatformKind::Ground && ground.owner == id {
             // Get off it: run past the nearer edge and drop.
-            if self.pos.x - ground.x0 < ground.x1 - self.pos.x {
+            let to = if self.pos.x - ground.x0 < ground.x1 - self.pos.x {
                 ground.x0 - 40.0
             } else {
                 ground.x1 + 40.0
-            }
-        } else if left {
-            s.min_x + 60.0
-        } else {
-            s.max_x - 60.0
-        };
-        let to = clamp_between(to, s.min_x, s.max_x);
-        if (to - self.pos.x).abs() > 30.0 {
-            self.walk_to(to, true); // scurry
-        } else if !matches!(self.action, Action::Think) {
-            self.face(if left { 1.0 } else { -1.0 });
-            self.set_action(Action::Think);
+            };
+            return self.walk_to(clamp_between(to, s.min_x, s.max_x), true);
         }
+        let level = s.dread_level.clamp(0.0, 1.0);
+        let dock = s
+            .dock
+            .filter(|d| level >= HIDE_LEVEL && d.x1 - d.x0 > 60.0)
+            .filter(|d| d.x0 >= s.min_x && d.x1 <= s.max_x);
+        if let Some(d) = dock {
+            // The end of the Dock farther from the window.
+            let (lo, hi) = (d.x0 + 24.0, d.x1 - 24.0);
+            let to = if (lo - mid).abs() > (hi - mid).abs() {
+                lo
+            } else {
+                hi
+            };
+            if ground.kind != PlatformKind::Ground {
+                // Up on something: drop off the end nearer the hiding place.
+                let edge = if to < self.pos.x {
+                    ground.x0 - 40.0
+                } else {
+                    ground.x1 + 40.0
+                };
+                return self.walk_to(clamp_between(edge, s.min_x, s.max_x), true);
+            }
+            if (to - self.pos.x).abs() > 24.0 {
+                return self.walk_to(to, true);
+            }
+            self.hiding = true;
+            return watch(self);
+        }
+        // Keep its distance on the roomier side of the window: the whole way
+        // to the screen edge when terrified, a few steps off when just wary.
+        let left = (wx0 - s.min_x) >= (s.max_x - wx1);
+        let room = if left { wx0 - s.min_x } else { s.max_x - wx1 }.max(0.0);
+        let gap = 70.0 + (room - 130.0).max(0.0) * (level / HIDE_LEVEL).min(1.0);
+        let to = if left { wx0 - gap } else { wx1 + gap };
+        let to = clamp_between(to, s.min_x + 60.0, s.max_x - 60.0);
+        if (to - self.pos.x).abs() > 30.0 {
+            // Scurry away; creep back.
+            let fleeing = (to - mid).abs() > (self.pos.x - mid).abs();
+            self.walk_to(to, fleeing);
+        } else {
+            watch(self);
+        }
+    }
+
+    /// Landed on a window of the app it's scared of: get off it.
+    fn flee_shunned(&mut self, s: &Senses, events: &mut Vec<Event>) -> bool {
+        let Some(g) = self.ground.filter(|g| self.shuns(g)) else {
+            return false;
+        };
+        if self.fled_from != g.owner {
+            self.fled_from = g.owner;
+            events.push(Event::Shunned {
+                at: self.head(),
+                window: g.owner,
+            });
+        }
+        let to = if self.pos.x - g.x0 < g.x1 - self.pos.x {
+            g.x0 - 40.0
+        } else {
+            g.x1 + 40.0
+        };
+        self.walk_to(clamp_between(to, s.min_x, s.max_x), true);
+        true
     }
 
     /// Slow strokes of the cursor over the figure (outside combat) make it happy.
@@ -1878,8 +2049,12 @@ impl Agent {
             events.push(Event::Yawned { at: self.head() });
             return;
         }
+        self.hiding = false;
         // The app where it gets beaten: steer clear, or go after it (a fight
         // still comes first: cornered, it hits back).
+        if s.mode != Mode::Combat && !self.holding && self.flee_shunned(s, events) {
+            return;
+        }
         if let Some((id, win)) = s.active_window.filter(|_| s.mode != Mode::Combat) {
             match s.dread {
                 Dread::Scared if !self.holding => return self.keep_away(s, id, win),
@@ -2210,11 +2385,12 @@ impl Agent {
         let roll = self.random(0.0, 1.0);
         if roll < 0.15 {
             // Explore: hop up onto something nearby.
-            if let Some(i) = world.platform_above(
+            if let Some(i) = world.platform_above_where(
                 self.pos,
                 MAX_JUMP_RISE,
                 self.pos.x - 220.0,
                 self.pos.x + 220.0,
+                |p| !self.shuns(p),
             ) {
                 let p = world.platforms()[i];
                 let x = clamp_between(self.pos.x, p.x0 + 30.0, p.x1 - 30.0);
@@ -2223,11 +2399,12 @@ impl Agent {
                 }
             } else if self.traits.powers && roll < 0.05 {
                 // Nothing in reach: show off with a super jump to somewhere high.
-                if let Some(i) = world.platform_above(
+                if let Some(i) = world.platform_above_where(
                     self.pos,
                     SUPER_RISE,
                     self.pos.x - 300.0,
                     self.pos.x + 300.0,
+                    |p| !self.shuns(p),
                 ) {
                     let p = world.platforms()[i];
                     let x = clamp_between(self.pos.x, p.x0 + 30.0, p.x1 - 30.0);
@@ -2495,6 +2672,8 @@ mod tests {
             can_throw_window: false,
             weapon_available: false,
             dread: crate::agent::Dread::None,
+            dread_level: 0.0,
+            dock: None,
             tactic: crate::agent::Tactic::Any,
             retreat: false,
         }
@@ -3710,6 +3889,7 @@ mod tests {
         s.can_shove = true;
         s.active_window = Some((42, win));
         s.dread = Dread::Scared;
+        s.dread_level = 1.0; // terrified, and no Dock to hide behind
         let mut ev = vec![];
         run(&mut a, &w, &s, 12.0, &mut ev);
         assert!(ev.iter().any(|e| matches!(
@@ -3762,6 +3942,101 @@ mod tests {
             a.action,
             a.pos
         );
+    }
+
+    #[test]
+    fn terrified_it_hides_behind_the_dock_with_only_its_head_showing() {
+        let (win, top) = chrome();
+        let w = world(vec![top]);
+        let mut a = agent();
+        a.pos.x = 1000.0;
+        let mut s = senses(Mode::Idle);
+        s.active_window = Some((42, win));
+        s.dread = Dread::Scared;
+        s.dread_level = 0.9;
+        s.dock = Some(DockSpan {
+            x0: 600.0,
+            x1: 1200.0,
+            y: GROUND_Y,
+        });
+        let mut ev = vec![];
+        run(&mut a, &w, &s, 8.0, &mut ev);
+        // The end of the Dock farther from the window's middle (x 1000).
+        assert!((a.pos.x - 624.0).abs() < 30.0, "hid at {:?}", a.pos);
+        assert_eq!(a.clip_line(), Some(GROUND_Y));
+        assert!(ev
+            .iter()
+            .any(|e| matches!(e, Event::Hid { hidden: true, .. })));
+        // Its head peeks over the Dock; its body is down behind it.
+        assert!(a.head().y < GROUND_Y, "head hidden: {:?}", a.head());
+        let hip = a.segments()[crate::stickman::TORSO].start[1];
+        assert!(hip > GROUND_Y + 20.0, "hip showing at {hip}");
+        // Clicks on the Dock under its head miss it.
+        assert!(!a.hit_test(v2(a.pos.x, GROUND_Y + 20.0)));
+        // The app goes away: it comes back out.
+        s.active_window = None;
+        s.dread = Dread::None;
+        s.dread_level = 0.0;
+        let n = ev.len();
+        run(&mut a, &w, &s, 1.0, &mut ev);
+        assert_eq!(a.clip_line(), None);
+        assert!(ev[n..]
+            .iter()
+            .any(|e| matches!(e, Event::Hid { hidden: false, .. })));
+    }
+
+    #[test]
+    fn as_its_fear_fades_it_creeps_back_toward_the_window() {
+        let (win, top) = chrome();
+        let w = world(vec![top]);
+        let settle = |level: f32| {
+            let mut a = agent();
+            a.pos.x = 300.0;
+            let mut s = senses(Mode::Idle);
+            s.active_window = Some((42, win));
+            s.dread = Dread::Scared;
+            s.dread_level = level;
+            let mut ev = vec![];
+            run(&mut a, &w, &s, 8.0, &mut ev);
+            assert_eq!(a.clip_line(), None, "no Dock: no hiding");
+            a.pos.x
+        };
+        // The window starts at x 700, with more room on its left.
+        let wary = settle(0.45);
+        let calmer = settle(0.1);
+        assert!(wary < 250.0, "wary stays far off: {wary}");
+        assert!(
+            calmer > wary + 200.0,
+            "didn't creep back: {calmer} vs {wary}"
+        );
+        assert!(calmer < 700.0, "walked onto the window: {calmer}");
+    }
+
+    #[test]
+    fn it_wont_set_foot_on_a_window_of_the_app_it_fears() {
+        let (_, top) = chrome();
+        let low = Platform {
+            y: GROUND_Y - 120.0,
+            ..top
+        };
+        let w = world(vec![low]);
+        let mut a = agent();
+        a.shun([42]);
+        let s = senses(Mode::Idle);
+        let mut ev = vec![];
+        for _ in 0..(60.0 / FIXED_DT) as usize {
+            a.update(&s, &w, &mut ev);
+            assert_ne!(a.ground.map(|g| g.owner), Some(42), "climbed onto it");
+        }
+        // Dropped onto it anyway: it says so and gets off.
+        let mut a = Agent::new(1000.0, low, SCALE, 5);
+        a.shun([42]);
+        let mut ev = vec![];
+        run(&mut a, &w, &s, 4.0, &mut ev);
+        assert!(ev
+            .iter()
+            .any(|e| matches!(e, Event::Shunned { window: 42, .. })));
+        assert_ne!(a.ground.map(|g| g.owner), Some(42), "still on it");
     }
 
     #[test]

@@ -149,9 +149,22 @@ impl World {
     /// Highest platform reachable by a jump of at most `max_rise` from `feet`, whose
     /// span overlaps `[x_lo, x_hi]` and which is above the feet. Used for climbing.
     pub fn platform_above(&self, feet: V2, max_rise: f32, x_lo: f32, x_hi: f32) -> Option<usize> {
+        self.platform_above_where(feet, max_rise, x_lo, x_hi, |_| true)
+    }
+
+    /// [`World::platform_above`], among the platforms `keep` accepts.
+    pub fn platform_above_where(
+        &self,
+        feet: V2,
+        max_rise: f32,
+        x_lo: f32,
+        x_hi: f32,
+        keep: impl Fn(&Platform) -> bool,
+    ) -> Option<usize> {
         self.platforms
             .iter()
             .enumerate()
+            .filter(|(_, p)| keep(p))
             .filter(|(_, p)| p.y < feet.y - 20.0 && feet.y - p.y <= max_rise)
             .filter(|(_, p)| p.x1 >= x_lo && p.x0 <= x_hi && p.width() >= 40.0)
             .min_by(|a, b| a.1.y.total_cmp(&b.1.y))

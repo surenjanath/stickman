@@ -402,6 +402,8 @@ struct Scene {
     ax_rx: Receiver<macos::AxAnswer>,
     dock_pid: Option<i64>,
     dock_polled: Instant,
+    /// The bottom Dock's extent, from its icons (a place to hide).
+    dock_span: Option<stickman::agent::DockSpan>,
     flight: Option<WindowFlight>,
     sword: Option<Sword>,
     /// Letters in the active window (for notes), the note being spelled, and
@@ -1505,6 +1507,13 @@ impl Scene {
                         near.push((i.rect, screen.ground_y));
                     }
                 }
+                // Where the Dock is (somewhere to hide), from its outermost icons.
+                self.dock_span = near.first().map(|&(_, y)| {
+                    let on = near.iter().filter(|(_, gy)| (gy - y).abs() < 1.0);
+                    let x0 = on.clone().map(|(r, _)| r.x as f32).fold(f32::MAX, f32::min);
+                    let x1 = on.map(|(r, _)| r.right() as f32).fold(f32::MIN, f32::max);
+                    stickman::agent::DockSpan { x0, x1, y }
+                });
                 if self.settings.pelt_icons {
                     self.words.set_icons(&near);
                 }
@@ -1512,6 +1521,9 @@ impl Scene {
         }
         if !self.settings.pelt_icons || !self.accessibility {
             self.words.set_icons(&[]);
+        }
+        if !self.accessibility {
+            self.dock_span = None;
             return;
         }
         if let Some(pid) = self.dock_pid {
@@ -2277,6 +2289,8 @@ impl Scene {
                     self.quip(Moment::Doodling);
                 }
                 Event::Dreaded { at, dread } => self.dreaded(at, dread),
+                Event::Hid { at, hidden } => self.hid(at, hidden),
+                Event::Shunned { at, window } => self.shunned(at, window),
                 Event::ShoveWindow { at, window, dx } => {
                     self.sfx(Sfx::Stomp, 0.9, at);
                     if self.settings.window_shoves && self.window_fx() && self.accessibility {
@@ -2525,6 +2539,99 @@ impl Scene {
         let text = lines[i].replace("{}", &app);
         let said = self.speech.say(&text, Priority::Event);
         self.speak(said);
+    }
+
+    /// Ducked behind the Dock from the app it fears, or came back out.
+    fn hid(&mut self, at: V2, hidden: bool) {
+        let app = self
+            .snapshot
+            .active()
+            .map(|w| w.owner.clone())
+            .unwrap_or_default();
+        log::info!(
+            "event: {} the Dock ({app})",
+            if hidden {
+                "hides behind"
+            } else {
+                "comes out from behind"
+            }
+        );
+        if hidden {
+            self.sfx(Sfx::Whoosh, 0.2, at);
+        }
+        if !self.settings.speech || self.agent.since_hit() < 2.0 {
+            return;
+        }
+        let still = self.mind.dread(&app) != Dread::None;
+        let lines: &[&str] = match (hidden, still) {
+            (true, _) => &[
+                "You can't see me.",
+                "Shh. I'm not here.",
+                "{} can't get me back here.",
+                "Wake me when {} is gone.",
+            ],
+            // Its fear faded with the app still in front: it creeps out.
+            (false, true) => &[
+                "Okay… maybe {} isn't so bad.",
+                "I'm coming out. Slowly.",
+                "Is it safe? …Fine.",
+            ],
+            (false, false) => &["Is it gone? Phew.", "Coast is clear."],
+        };
+        let i = ((self.seed >> 23) as usize + self.frames as usize) % lines.len();
+        let text = lines[i].replace("{}", &app);
+        let said = self.speech.say(&text, Priority::Quip);
+        self.speak(said);
+    }
+
+    /// Landed on a window of the app it fears: it's getting off.
+    fn shunned(&mut self, at: V2, window: u32) {
+        let app = self
+            .snapshot
+            .windows
+            .iter()
+            .find(|w| w.id == window)
+            .map(|w| w.owner.clone())
+            .unwrap_or_default();
+        log::info!("event: won't stand on {app}'s window");
+        self.sfx(Sfx::Whoosh, 0.2, at);
+        // In front, the "dreads" line has said it already.
+        if !self.settings.speech
+            || app.is_empty()
+            || self.snapshot.active().map(|w| w.id) == Some(window)
+        {
+            return;
+        }
+        let lines = [
+            "Not {}. Nope.",
+            "I'm not standing on {}.",
+            "{}? No thank you.",
+            "Bad memories up here.",
+        ];
+        let i = ((self.seed >> 23) as usize + self.frames as usize) % lines.len();
+        let text = lines[i].replace("{}", &app);
+        let said = self.speech.say(&text, Priority::Quip);
+        self.speak(said);
+    }
+
+    /// The bottom Dock: its icons' span when known (Accessibility), otherwise
+    /// the middle of a screen whose ground line sits above its bottom edge
+    /// (the Dock is always centred there).
+    fn dock(&self) -> Option<stickman::agent::DockSpan> {
+        self.dock_span.or_else(|| {
+            self.layout
+                .screens
+                .iter()
+                .find(|sc| (sc.ground_y as f64) < sc.frame.bottom() - 8.0)
+                .map(|sc| {
+                    let c = (sc.frame.x + sc.frame.width / 2.0) as f32;
+                    stickman::agent::DockSpan {
+                        x0: c - 60.0,
+                        x1: c + 60.0,
+                        y: sc.ground_y,
+                    }
+                })
+        })
     }
 
     fn remember(&mut self, what: Memory) {
@@ -3285,6 +3392,18 @@ impl Scene {
                 );
                 self.last_ammo = ammo.map(|a| a.id);
             }
+            let (dread, dread_level) = self
+                .mind
+                .dread_level(self.snapshot.active().map_or("", |w| w.owner.as_str()));
+            // The app it's scared of: it won't set foot on any of its windows.
+            let shunned = self.mind.shunned_app();
+            self.agent.shun(
+                self.snapshot
+                    .windows
+                    .iter()
+                    .filter(|w| Some(w.owner.as_str()) == shunned)
+                    .map(|w| w.id),
+            );
             let senses = Senses {
                 cursor: self.cursor.pos,
                 cursor_vel: self.cursor.velocity(),
@@ -3316,9 +3435,9 @@ impl Scene {
                     && self.flight.is_none()
                     && self.snapshot.active().is_some(),
                 can_shove: self.settings.window_shoves && self.window_fx() && self.accessibility,
-                dread: self
-                    .mind
-                    .dread(self.snapshot.active().map_or("", |w| w.owner.as_str())),
+                dread,
+                dread_level,
+                dock: self.dock(),
                 tactic: self.mind.war.tactic(),
                 retreat: self.retreating,
             };
@@ -3601,7 +3720,11 @@ impl Scene {
         };
         // Crumbled to ash: no figure, no hat.
         if !self.crumbled {
-            self.draw.figure(&segments, rgb);
+            match self.agent.clip_line() {
+                // Hiding behind the Dock: only its head shows over it.
+                Some(y) => self.draw.figure_clipped(&segments, rgb, y),
+                None => self.draw.figure(&segments, rgb),
+            }
         }
         // Its hat, once earned.
         // STICKMAN_DEBUG_HAT=Crown (etc.) wears one regardless (for screenshots).
@@ -4237,6 +4360,7 @@ impl App {
             ax_rx,
             dock_pid: if ax { macos::dock_pid() } else { None },
             dock_polled: now - Duration::from_secs(10),
+            dock_span: None,
             flight: None,
             sword: None,
             screen_letters: Vec::new(),
@@ -4518,6 +4642,8 @@ mod tests {
             can_throw_window: false,
             weapon_available: false,
             dread: stickman::agent::Dread::None,
+            dread_level: 0.0,
+            dock: None,
             tactic: stickman::agent::Tactic::Any,
             retreat: false,
         };
