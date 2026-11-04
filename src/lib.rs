@@ -3,6 +3,7 @@
 //! event loop.
 
 pub mod agent;
+pub mod arsenal;
 pub mod boss;
 pub mod director;
 pub mod dodge;

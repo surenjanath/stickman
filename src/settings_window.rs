@@ -788,6 +788,15 @@ impl SettingsWindow {
             "Rip scrollbars off windows as swords",
             Command::ToggleWeapons,
         );
+        let tools = self.check(
+            "Fights with tools: an eraser, paint, a cannon it draws",
+            Command::ToggleTools,
+        );
+        let saws = self.check(
+            "Saws toolbars off my windows (a copy dangles)",
+            Command::ToggleSaws,
+        );
+        let squish = self.check("Scrolling over it squashes it", Command::ToggleSquish);
         let powers = self.check("Super jump & telekinesis", Command::TogglePowers);
         let intro = self.check("Jail-break intro at launch", Command::ToggleJailIntro);
         let rival = self.check(
@@ -818,6 +827,7 @@ impl SettingsWindow {
             Row::Under(push),
             Row::Under(cling),
             Row::Under(dodges),
+            Row::Under(squish),
             Row::Under(Self::hint(
                 "After the mouse has been still for a moment, your pointer sidesteps its \
                  punches, slips out of its grip and backs away when it charges. Touch the \
@@ -836,6 +846,8 @@ impl SettingsWindow {
             Row::Field("Thrown words stay:", stay),
             Row::Under(icons),
             Row::Under(weapons),
+            Row::Under(tools),
+            Row::Under(saws),
             Row::Under(piles),
             Row::Under(Self::hint(
                 "Words, letters and icons are copies: nothing in your apps changes. Needs \

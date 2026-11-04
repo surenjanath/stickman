@@ -21,6 +21,8 @@ pub enum Shape {
     House,
     Sun,
     Spiral,
+    /// A cannon it draws to fight with (not one of its idle doodles).
+    Cannon,
 }
 
 impl Shape {
@@ -41,6 +43,7 @@ impl Shape {
             Shape::House => [0.2, 0.45, 0.85, 1.0],
             Shape::Sun => [1.0, 0.55, 0.1, 1.0],
             Shape::Spiral => [0.55, 0.3, 0.85, 1.0],
+            Shape::Cannon => [0.1, 0.1, 0.12, 1.0],
         }
     }
 
@@ -105,6 +108,21 @@ impl Shape {
                 }
                 s
             }
+            Shape::Cannon => vec![
+                // Barrel, pointing right.
+                vec![
+                    v2(-0.9, -0.35),
+                    v2(0.9, -0.5),
+                    v2(0.9, 0.05),
+                    v2(-0.9, 0.2),
+                    v2(-0.9, -0.35),
+                ],
+                // Muzzle ring and the wheel.
+                vec![v2(0.9, -0.62), v2(1.0, -0.22), v2(0.9, 0.17)],
+                circle(v2(-0.35, 0.55), 0.38, 16),
+                // A fuse.
+                vec![v2(-0.9, -0.1), v2(-1.0, -0.5), v2(-0.8, -0.75)],
+            ],
             Shape::Spiral => vec![(0..=60)
                 .map(|i| {
                     let k = i as f32 / 60.0;

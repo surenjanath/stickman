@@ -130,6 +130,8 @@ const INTRO_COMBAT: Duration = Duration::from_secs(15);
 
 /// Capture id for the weapon (words and icons count up from 1).
 const WEAPON_ID: u64 = u64::MAX - 1;
+/// Capture id for a toolbar it saws off a window.
+const SAW_ID: u64 = u64::MAX - 2;
 /// Capture ids for a note's torn-off letters: this plus the tile index.
 const NOTE_ID: u64 = u64::MAX - 1000;
 /// A sword is drawn this long, at most / at least (points).
@@ -429,6 +431,16 @@ struct Scene {
     dodger: stickman::dodge::Dodger,
     /// When the cursor last got away from it (dodges and slips), for its fury.
     dodges: std::collections::VecDeque<Instant>,
+    /// Its tools' shots, paint splats and sawn-off toolbars.
+    arsenal: stickman::arsenal::Arsenal,
+    /// This bucket's paint colour.
+    paint: [f32; 4],
+    /// A toolbar strip being captured: (strip, window, window frame).
+    saw_pending: Option<(Rect, u32, Rect)>,
+    /// Windows with a sawn-off strip dangling, and their frames then.
+    sawn: Vec<(u32, Rect)>,
+    /// Quit chosen: it leaps at the pointer first, then burns at this time.
+    quit_at: Option<Instant>,
     /// App to give focus back to after a click on the figure activated us.
     focus_restore: Option<(i64, Instant)>,
     intent: ClickIntent,
@@ -522,6 +534,20 @@ impl Scene {
             log::debug!("windows: ours cover {:?}", self.snapshot.covers);
         }
         self.words.covers.clone_from(&self.snapshot.covers);
+        if changed && !self.sawn.is_empty() {
+            // A window that moved or went away loses its dangling strip.
+            let snap = &self.snapshot;
+            let gone: Vec<u32> = self
+                .sawn
+                .iter()
+                .filter(|(id, r)| !snap.windows.iter().any(|w| w.id == *id && w.rect == *r))
+                .map(|(id, _)| *id)
+                .collect();
+            for id in gone {
+                self.arsenal.window_changed(id);
+                self.sawn.retain(|(w, _)| *w != id);
+            }
+        }
         let active = self.snapshot.active().map(|w| ocr::Request {
             id: w.id,
             rect: w.rect,
@@ -566,6 +592,7 @@ impl Scene {
                     }
                 }
                 ocr::Output::Grabbed(g) if g.id == WEAPON_ID => self.sword_captured(g),
+                ocr::Output::Grabbed(g) if g.id == SAW_ID => self.saw_captured(g),
                 ocr::Output::Grabbed(g) if g.id >= NOTE_ID => self.letter_captured(g),
                 ocr::Output::Grabbed(g) => self.word_captured(g),
             }
@@ -2459,6 +2486,59 @@ impl Scene {
                 }
                 Event::Dreaded { at, dread } => self.dreaded(at, dread),
                 Event::Hid { at, hidden } => self.hid(at, hidden),
+                Event::WantGadget { at } => self.pull_out_tool(at),
+                Event::CannonReady { at } => {
+                    log::info!("event: drew a cannon");
+                    self.doodles
+                        .list
+                        .retain(|d| d.shape != stickman::doodle::Shape::Cannon);
+                    self.sfx(Sfx::Clank, 0.6, at);
+                    self.say_one(
+                        &["Ha! Drew myself a cannon.", "Art is a weapon."],
+                        Priority::Quip,
+                    );
+                }
+                Event::Fired {
+                    from,
+                    target,
+                    gadget,
+                } => {
+                    let floor = self.layout.screen_at(from).ground_y;
+                    self.arsenal.fire(gadget, from, target, self.paint, floor);
+                    let s = if gadget == stickman::agent::Gadget::Cannon {
+                        Sfx::Boom
+                    } else {
+                        Sfx::Whoosh
+                    };
+                    self.sfx(s, 0.5, from);
+                    if gadget == stickman::agent::Gadget::Cannon {
+                        self.particles.dust(from, 0.4);
+                    }
+                }
+                Event::GadgetSpent { at, gadget } => {
+                    log::info!("event: the {} is used up", gadget.name());
+                    self.particles.dust(at, 0.4);
+                    let line: &[&str] = match gadget {
+                        stickman::agent::Gadget::Bucket => &["Out of paint!", "Empty. Huh."],
+                        _ => &["It broke! Cheap ink.", "Out of ammo!"],
+                    };
+                    self.say_one(line, Priority::Quip);
+                }
+                Event::Sawed { at, window } => self.saw_toolbar(at, window),
+                Event::Squished { at } => {
+                    log::info!("event: squished by the user");
+                    self.sfx(Sfx::Pop, 0.4, at);
+                    self.mind.seethe(2.0);
+                    self.say_one(
+                        &[
+                            "Hey! Put me back!",
+                            "Stop squishing me!",
+                            "I'm not a stress ball!",
+                            "Ow, my everything!",
+                        ],
+                        Priority::Quip,
+                    );
+                }
                 Event::Clung { at } => {
                     log::info!("event: grabbed the cursor and won't let go");
                     self.sfx(Sfx::Pop, 0.7, at);
@@ -2576,10 +2656,26 @@ impl Scene {
                     self.save_mind();
                     // Quit again mid-burn, or nothing on screen to burn: go now.
                     let shown = self.settings.visible && !self.settings.paused && !self.on_call;
-                    if self.incinerating.is_some() || !shown {
+                    if self.incinerating.is_some() || self.quit_at.is_some() || !shown {
                         return false;
                     }
-                    self.incinerate();
+                    if self.settings.cursor_cling && !self.crumbled {
+                        // It won't go quietly: it grabs the pointer first.
+                        let mut ev = Vec::new();
+                        self.agent.cling(self.cursor.pos, &mut ev);
+                        self.speech.clear();
+                        self.say_one(
+                            &[
+                                "NO! Don't you dare quit on me!",
+                                "Get AWAY from that button!",
+                                "You'll have to go through me!",
+                            ],
+                            Priority::Event,
+                        );
+                        self.quit_at = Some(Instant::now() + Duration::from_millis(1800));
+                    } else {
+                        self.incinerate();
+                    }
                 }
                 Command::ResetStats => {
                     self.stats = Stats::default();
@@ -2763,6 +2859,123 @@ impl Scene {
         let text = lines[i].replace("{}", &app);
         let said = self.speech.say(&text, Priority::Event);
         self.speak(said);
+    }
+
+    /// Its tools: move shots and splats; shots that hit the cursor hurt it.
+    fn use_arsenal(&mut self, dt: f32) {
+        for h in self.arsenal.update(dt, self.cursor.pos) {
+            match h {
+                stickman::arsenal::Hit::Cursor { at, dir, paint } => {
+                    self.particles.sparks(at, dir, 14);
+                    self.sfx(Sfx::Punch, 0.6, at);
+                    if self.cursor_fx() && !self.agent.clinging() {
+                        let area = self.layout.screen_at(at).frame;
+                        self.cursor.push(dir * CURSOR_PUSH * 0.8, area);
+                        self.last_cursor = self.cursor.pos;
+                    }
+                    log::info!(
+                        "event: {} hit the cursor",
+                        if paint { "paint" } else { "an ink ball" }
+                    );
+                    self.deed(Deed::CursorHit);
+                    self.boss_hit(Blow::Word);
+                    self.remember(Memory::StruckCursor);
+                    self.earn(Feat::HitCursor);
+                }
+                stickman::arsenal::Hit::Splat { at } => self.sfx(Sfx::Thud, 0.25, at),
+            }
+        }
+        for id in std::mem::take(&mut self.arsenal.freed) {
+            self.renderer.free_sprite(id);
+        }
+    }
+
+    /// It reached for a tool: an eraser or a bucket of paint appears in its
+    /// hands, or it starts drawing itself a cannon.
+    fn pull_out_tool(&mut self, at: V2) {
+        use stickman::agent::Gadget;
+        self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(13);
+        let g = Gadget::ALL[(self.seed >> 33) as usize % Gadget::ALL.len()];
+        log::info!("event: pulled out a {}", g.name());
+        self.sfx(Sfx::Pop, 0.6, at);
+        self.particles.dust(at, 0.3);
+        match g {
+            Gadget::Cannon => {
+                let mut ev = Vec::new();
+                self.agent.draw_cannon(&mut ev);
+                self.handle(&ev);
+                self.say_one(
+                    &["Hold on, I'm drawing something…", "One sec. Art time."],
+                    Priority::Quip,
+                );
+            }
+            _ => {
+                self.paint = stickman::arsenal::PAINTS
+                    [(self.seed >> 41) as usize % stickman::arsenal::PAINTS.len()];
+                self.agent.arm(g);
+                let line: &[&str] = if g == Gadget::Eraser {
+                    &["I'll erase you!", "Eraser time!"]
+                } else {
+                    &["Let's redecorate!", "You look like you need a paint job."]
+                };
+                self.say_one(line, Priority::Quip);
+            }
+        }
+    }
+
+    /// It sawed through window `window`'s toolbar: capture that strip so a
+    /// copy can drop and dangle (the window itself is untouched).
+    fn saw_toolbar(&mut self, at: V2, window: u32) {
+        let Some(w) = self.snapshot.windows.iter().find(|w| w.id == window) else {
+            return;
+        };
+        let strip = Rect {
+            x: w.rect.x,
+            y: w.rect.y,
+            width: w.rect.width.min(900.0),
+            height: w.rect.height.min(52.0),
+        };
+        let below = self
+            .overlays
+            .get(self.layout.index_at(at))
+            .or(self.overlays.first())
+            .map_or(0, |o| o.state().window_number as u32);
+        if let Some(tx) = &self.ocr_tx {
+            let _ = tx.send(ocr::Job::Grab(ocr::GrabRequest {
+                id: SAW_ID,
+                window: 0,
+                below,
+                global: strip,
+                cut: ocr::Cut::Plain,
+            }));
+            self.saw_pending = Some((strip, window, w.rect));
+        }
+        self.sfx(Sfx::Clank, 0.7, at);
+        self.particles.sparks(at, v2(0.0, -1.0), 20);
+    }
+
+    /// The sawn strip's pixels arrived: it drops and dangles.
+    fn saw_captured(&mut self, g: ocr::GrabResult) {
+        let Some((strip, window, frame)) = self.saw_pending.take() else {
+            return;
+        };
+        let Some(c) = g.cutout else { return };
+        let Some(sprite) = self.renderer.create_sprite(&c.rgba, c.width, c.height) else {
+            return;
+        };
+        log::info!("event: sawed the toolbar off a window");
+        self.arsenal
+            .add_sawn(sprite, strip, c.background, window, self.agent.pos.x);
+        self.sawn.push((window, frame));
+        self.say_one(
+            &[
+                "Timber!",
+                "Your toolbar's broken. Shame.",
+                "Oops. Did I do that?",
+            ],
+            Priority::Quip,
+        );
+        self.shown = None;
     }
 
     /// Say one of `lines` (picked at random), if speech is on.
@@ -3300,9 +3513,23 @@ impl Scene {
                 return;
             }
             let mut ev = Vec::new();
+            let tool = stickman::agent::Gadget::ALL
+                .into_iter()
+                .find(|g| format!("{g:?}").eq_ignore_ascii_case(what.trim()));
             if what.trim() == "cling" {
                 self.agent.cling(self.cursor.pos, &mut ev);
                 self.handle(&ev);
+            } else if let Some(g) = tool {
+                if g == stickman::agent::Gadget::Cannon {
+                    self.agent.draw_cannon(&mut ev);
+                    self.handle(&ev);
+                } else {
+                    self.agent.arm(g);
+                }
+            } else if what.trim() == "saw" {
+                if let Some(w) = self.snapshot.active().map(|w| w.id) {
+                    self.saw_toolbar(self.agent.pos, w);
+                }
             } else if self.agent.perform(&what, &mut ev) {
                 self.handle(&ev);
             } else {
@@ -3442,6 +3669,11 @@ impl Scene {
         }
         self.cursor.sample();
         self.check_escape();
+        if self.quit_at.is_some_and(|t| Instant::now() >= t) {
+            // It had its last stand on the pointer: now it burns.
+            self.quit_at = None;
+            self.incinerate();
+        }
         let cursor_moved = (self.cursor.pos - self.last_cursor).length() > 0.5;
         if cursor_moved {
             self.last_mouse_move = Instant::now();
@@ -3679,6 +3911,8 @@ impl Scene {
                     && self.snapshot.active().is_some(),
                 can_shove: self.settings.window_shoves && self.window_fx() && self.accessibility,
                 can_cling: self.settings.cursor_cling && !self.on_call,
+                can_gadget: self.settings.tools && !self.on_call,
+                can_saw: self.settings.saws && self.ocr_tx.is_some() && !self.on_call,
                 dread,
                 dread_level,
                 dock: self.dock(),
@@ -3740,6 +3974,7 @@ impl Scene {
                 }
             }
             self.particles.update(FIXED_DT);
+            self.use_arsenal(FIXED_DT);
             self.speech.update(FIXED_DT);
             self.update_note(FIXED_DT);
             self.fly_window(FIXED_DT);
@@ -3841,6 +4076,9 @@ impl Scene {
             || self.boss.is_some()
             || self.flight.is_some()
             || self.sword.is_some()
+            || self.arsenal.animating()
+            || self.agent.gadget.is_some()
+            || self.agent.squashed()
             || self.note.as_ref().is_some_and(|n| n.animating())
             || self.mind.enraged;
         self.present();
@@ -3919,6 +4157,9 @@ impl Scene {
             || self.boss.is_some()
             || self.flight.is_some()
             || self.sword.is_some()
+            || self.arsenal.animating()
+            || self.agent.gadget.is_some()
+            || self.agent.squashed()
             || self.note.as_ref().is_some_and(|n| n.animating());
         let zzz = self.zzz_frame();
         if let Some(shown) = &self.shown {
@@ -3935,6 +4176,7 @@ impl Scene {
         let hands = self.agent.holding.then(|| self.agent.hands());
         self.words.draw(&mut self.draw, hands);
         self.doodles.draw(&mut self.draw);
+        self.arsenal.draw(&mut self.draw);
         self.sketch.draw(&mut self.draw);
         if self.drawing.is_some() {
             self.draw_mode_frame();
@@ -4021,6 +4263,9 @@ impl Scene {
             j.draw(&mut self.draw); // bars in front of the figure
         }
         self.draw_sword();
+        if let Some((g, grip, aim)) = self.agent.gadget_pose(self.cursor.pos) {
+            stickman::arsenal::draw_held(&mut self.draw, g, grip, aim, self.paint);
+        }
         if let Some(n) = &self.note {
             n.draw(&mut self.draw);
         }
@@ -4621,6 +4866,11 @@ impl App {
             captive: Captive::Free,
             dodger: stickman::dodge::Dodger::new(now.elapsed().as_nanos() as u64 ^ 0x5eed),
             dodges: std::collections::VecDeque::new(),
+            arsenal: stickman::arsenal::Arsenal::new(now.elapsed().as_nanos() as u64 ^ 0xa75e),
+            paint: stickman::arsenal::PAINTS[0],
+            saw_pending: None,
+            sawn: Vec::new(),
+            quit_at: None,
             focus_restore: None,
             intent: ClickIntent::default(),
             hits: VecDeque::new(),
@@ -4697,6 +4947,16 @@ impl ApplicationHandler for App {
                 if let Some(w) = scene.snapshot.active() {
                     scene.focus_restore = Some((w.pid, Instant::now()));
                 }
+            }
+            // Scrolling over the figure squashes or stretches it.
+            WindowEvent::MouseWheel { delta, .. } if scene.settings.squish => {
+                let dy = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => y * 20.0,
+                    winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                };
+                let mut ev = Vec::new();
+                scene.agent.squish(dy, &mut ev);
+                scene.handle(&ev);
             }
             WindowEvent::Focused(true) => {
                 // A click on the figure activated us; hand focus straight back.
@@ -4917,6 +5177,8 @@ mod tests {
             user_idle: 0.0,
             can_shove: false,
             can_cling: false,
+            can_gadget: false,
+            can_saw: false,
             tk_words_near: 0,
             music: false,
             can_throw_window: false,

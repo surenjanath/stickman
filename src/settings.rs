@@ -307,6 +307,12 @@ pub struct Settings {
     pub cursor_dodges: bool,
     /// In a fight it may grab the cursor and hang on (never moves the pointer).
     pub cursor_cling: bool,
+    /// Fights with tools: an eraser, paint, a cannon it draws.
+    pub tools: bool,
+    /// Saws toolbars off windows (a copy dangles; the window is untouched).
+    pub saws: bool,
+    /// Scrolling over it squashes and stretches it.
+    pub squish: bool,
     /// Telekinesis may pick up and throw the active window (Accessibility).
     pub throw_windows: bool,
     /// Rip app icons up off the Dock and throw them (Accessibility).
@@ -364,6 +370,9 @@ impl Default for Settings {
             boss_fights: true,
             cursor_dodges: true,
             cursor_cling: true,
+            tools: true,
+            saws: true,
+            squish: true,
             throw_windows: true,
             pelt_icons: true,
             weapons: true,
@@ -417,6 +426,9 @@ pub enum Command {
     ToggleBossFights,
     ToggleCursorDodges,
     ToggleCursorCling,
+    ToggleTools,
+    ToggleSaws,
+    ToggleSquish,
     /// Start a boss fight now.
     StartBoss,
     /// Call the minions now.
@@ -491,6 +503,9 @@ impl Command {
             Command::ToggleBossFights => 331,
             Command::ToggleCursorDodges => 332,
             Command::ToggleCursorCling => 333,
+            Command::ToggleTools => 334,
+            Command::ToggleSaws => 335,
+            Command::ToggleSquish => 336,
             Command::StartBoss => 410,
             Command::CallMinions => 411,
             Command::ToggleThrowWindows => 320,
@@ -567,6 +582,9 @@ impl Command {
             331 => Command::ToggleBossFights,
             332 => Command::ToggleCursorDodges,
             333 => Command::ToggleCursorCling,
+            334 => Command::ToggleTools,
+            335 => Command::ToggleSaws,
+            336 => Command::ToggleSquish,
             410 => Command::StartBoss,
             411 => Command::CallMinions,
             320 => Command::ToggleThrowWindows,
@@ -630,6 +648,9 @@ impl Settings {
             Command::ToggleBossFights => self.boss_fights = !self.boss_fights,
             Command::ToggleCursorDodges => self.cursor_dodges = !self.cursor_dodges,
             Command::ToggleCursorCling => self.cursor_cling = !self.cursor_cling,
+            Command::ToggleTools => self.tools = !self.tools,
+            Command::ToggleSaws => self.saws = !self.saws,
+            Command::ToggleSquish => self.squish = !self.squish,
             Command::ToggleThrowWindows => self.throw_windows = !self.throw_windows,
             Command::TogglePeltIcons => self.pelt_icons = !self.pelt_icons,
             Command::ToggleWeapons => self.weapons = !self.weapons,
@@ -682,6 +703,9 @@ impl Settings {
             Command::ToggleBossFights => self.boss_fights,
             Command::ToggleCursorDodges => self.cursor_dodges && self.cursor_push,
             Command::ToggleCursorCling => self.cursor_cling,
+            Command::ToggleTools => self.tools,
+            Command::ToggleSaws => self.saws,
+            Command::ToggleSquish => self.squish,
             Command::ToggleThrowWindows => self.throw_windows,
             Command::TogglePeltIcons => self.pelt_icons,
             Command::ToggleWeapons => self.weapons,
@@ -794,6 +818,9 @@ mod tests {
             Command::ToggleBossFights,
             Command::ToggleCursorDodges,
             Command::ToggleCursorCling,
+            Command::ToggleTools,
+            Command::ToggleSaws,
+            Command::ToggleSquish,
             Command::StartBoss,
             Command::CallMinions,
             Command::ToggleThrowWindows,

@@ -144,6 +144,41 @@ pub enum Dread {
     Vengeful,
 }
 
+/// A tool it fights with (besides a sword ripped off a scrollbar).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gadget {
+    /// A big eraser: swung like a sword.
+    Eraser,
+    /// A bucket of paint: thrown at the cursor a few times.
+    Bucket,
+    /// A cannon it drew itself: fires ink balls.
+    Cannon,
+}
+
+impl Gadget {
+    pub const ALL: [Gadget; 3] = [Gadget::Eraser, Gadget::Bucket, Gadget::Cannon];
+
+    /// How many throws or shots (or, for the eraser, hits) it's good for.
+    pub fn uses(self) -> u32 {
+        match self {
+            Gadget::Eraser => WEAPON_HITS,
+            Gadget::Bucket => 3,
+            Gadget::Cannon => 5,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Gadget::Eraser => "eraser",
+            Gadget::Bucket => "paint bucket",
+            Gadget::Cannon => "cannon",
+        }
+    }
+}
+
+/// Length of the eraser as a melee weapon (points).
+const ERASER_LEN: f32 = 44.0;
+
 /// Fear level from which it hides behind the Dock (see `Mind::dread_level`).
 pub const HIDE_LEVEL: f32 = crate::mind::HIDE_LEVEL;
 
@@ -189,6 +224,10 @@ pub struct Senses {
     /// May leap up, grab the cursor and hang on to it (it never moves the
     /// pointer: the user keeps control, the figure comes along).
     pub can_cling: bool,
+    /// May pull out tools (eraser, paint, a drawn cannon) in a fight.
+    pub can_gadget: bool,
+    /// May saw the toolbar off the window it stands on.
+    pub can_saw: bool,
     /// Words telekinesis could lift right now (near the figure).
     pub tk_words_near: usize,
     /// Music is playing: dance to it.
@@ -278,6 +317,35 @@ pub enum Event {
     },
     /// Let go of the cursor (its choice).
     LetGo {
+        at: V2,
+    },
+    /// Reached for a tool: the app picks one ([`Agent::arm`] or
+    /// [`Agent::draw_cannon`]).
+    WantGadget {
+        at: V2,
+    },
+    /// Its drawn cannon is finished and in its hands.
+    CannonReady {
+        at: V2,
+    },
+    /// Threw paint or fired the cannon from `from` toward `target`.
+    Fired {
+        from: V2,
+        target: V2,
+        gadget: Gadget,
+    },
+    /// The tool is used up (out of paint, cannon worn out) and gone.
+    GadgetSpent {
+        at: V2,
+        gadget: Gadget,
+    },
+    /// Sawed through the toolbar of window `window`, standing at `at`.
+    Sawed {
+        at: V2,
+        window: u32,
+    },
+    /// The user squashed or stretched it (scrolling over it).
+    Squished {
         at: V2,
     },
     /// Hard landing or bounce.
@@ -471,6 +539,14 @@ pub enum Action {
     Dangled,
     /// Hanging on to the cursor by both hands and refusing to let go.
     Cling,
+    /// Pulling a tool out of thin air.
+    Rummage,
+    /// Throwing paint or firing the cannon at `target`.
+    Fire {
+        target: V2,
+    },
+    /// Sawing the toolbar off the window it stands on.
+    Saw,
     /// Kick in mid-air (after leaping at a cursor overhead).
     FlyingKick {
         aim: f32,
@@ -546,6 +622,9 @@ impl Action {
             Action::Doodle { .. } => DOODLE_LEAD + DOODLE_DRAW + 0.5,
             Action::Shove { .. } => 0.6,
             Action::Charge { .. } => 0.55,
+            Action::Rummage => 0.6,
+            Action::Fire { .. } => 0.45,
+            Action::Saw => 1.8,
             Action::RipWeapon => 0.6,
             Action::Compose => 2.2,
             Action::Slash { .. } => 0.45,
@@ -726,6 +805,15 @@ pub struct Agent {
     shaken_cooldown: f32,
     /// How hard it's being shaken (0..1), smoothed.
     shake: f32,
+    /// The tool in hand, and what's left of it.
+    pub gadget: Option<Gadget>,
+    gadget_uses: u32,
+    gadget_cooldown: f32,
+    saw_cooldown: f32,
+    /// Squash and stretch from the user scrolling over it: height scale
+    /// (1 = normal) and its spring speed.
+    squash: f32,
+    squash_rate: f32,
 }
 
 impl Agent {
@@ -796,7 +884,66 @@ impl Agent {
             cling_punch: 0.0,
             shaken_cooldown: 0.0,
             shake: 0.0,
+            gadget: None,
+            gadget_uses: 0,
+            gadget_cooldown: 3.0,
+            saw_cooldown: 6.0,
+            squash: 1.0,
+            squash_rate: 0.0,
         }
+    }
+
+    /// Take up `g` (the eraser is a melee weapon, like a sword).
+    pub fn arm(&mut self, g: Gadget) {
+        self.gadget = Some(g);
+        self.gadget_uses = g.uses();
+        if g == Gadget::Eraser {
+            self.weapon = Some(ERASER_LEN * self.scale / 0.55);
+            self.weapon_hits = 0;
+        }
+    }
+
+    /// Draw a cannon in the air beside it; once drawn it's in its hands.
+    pub fn draw_cannon(&mut self, events: &mut Vec<Event>) {
+        let size = 30.0 * (self.scale / 0.55);
+        let origin = self.shoulder() + v2(self.facing * (self.reach() + size + 6.0), -4.0);
+        self.set_action(Action::Doodle {
+            shape: Shape::Cannon,
+            origin,
+            size,
+        });
+        events.push(Event::DoodleStarted {
+            shape: Shape::Cannon,
+            origin,
+            size,
+        });
+    }
+
+    /// The tool's grip and where it points, for drawing it.
+    pub fn gadget_pose(&self, aim: V2) -> Option<(Gadget, V2, V2)> {
+        let g = self.gadget?;
+        let grip = self.hands();
+        let toward = match g {
+            Gadget::Eraser => self.blade().map_or(aim, |(_, tip)| tip),
+            _ => aim,
+        };
+        Some((g, grip, toward))
+    }
+
+    /// The user scrolled over it by `delta` points: squash (down) or stretch
+    /// (up). It springs back, wobbling.
+    pub fn squish(&mut self, delta: f32, events: &mut Vec<Event>) {
+        let before = self.squash;
+        self.squash = (self.squash - delta * 0.006).clamp(0.35, 1.9);
+        self.squash_rate = 0.0;
+        if (self.squash - 1.0).abs() > 0.25 && (before - 1.0).abs() <= 0.25 {
+            events.push(Event::Squished { at: self.head() });
+        }
+    }
+
+    /// Squashed or stretched out of shape right now.
+    pub fn squashed(&self) -> bool {
+        (self.squash - 1.0).abs() > 0.01 || self.squash_rate.abs() > 0.05
     }
 
     /// Hanging on to the cursor.
@@ -1067,6 +1214,20 @@ impl Agent {
             Action::Dodge => poses::dodge(),
             Action::Dangled => poses::dangle(self.clock),
             Action::Cling => poses::cling(self.clock, self.shake),
+            Action::Rummage => poses::grab(k(self.action)),
+            Action::Fire { target } => {
+                let aim = self.aim_at(target, -0.9, 0.9);
+                if self.gadget == Some(Gadget::Cannon) {
+                    poses::telekinesis(self.clock, aim)
+                } else {
+                    poses::throw(k(self.action), aim)
+                }
+            }
+            Action::Saw => {
+                // Arm pumping back and forth across the edge underfoot.
+                let pump = 0.5 + 0.5 * (t * 14.0).sin();
+                poses::punch(0.35 + 0.4 * pump, 1.1)
+            }
             Action::LieDown => poses::lie_down(k(self.action)),
             Action::Sleep => poses::sleep(self.clock),
             Action::Dance => poses::dance(t),
@@ -1246,7 +1407,18 @@ impl Agent {
         let rotated = self.rotated_pose();
         let root_y =
             self.root_y(&rotated, self.anchor()) + self.root_correction + self.duck_offset();
-        forward_kinematics(&rotated, [self.pos.x, root_y], self.scale, self.facing)
+        let mut bones = forward_kinematics(&rotated, [self.pos.x, root_y], self.scale, self.facing);
+        if (self.squash - 1.0).abs() > 0.005 {
+            // Squash and stretch about the feet, keeping its area.
+            let (sy, sx) = (self.squash, 1.0 / self.squash.sqrt());
+            let (px, py) = (self.pos.x, self.pos.y);
+            let warp = |p: [f32; 2]| [px + (p[0] - px) * sx, py + (p[1] - py) * sy];
+            for b in &mut bones {
+                b.start = warp(b.start);
+                b.end = warp(b.end);
+            }
+        }
+        bones
     }
 
     /// Bounding box of the figure, padded by `pad` points.
@@ -1367,6 +1539,11 @@ impl Agent {
             self.health = (self.health + 4.0 * dt).min(self.traits.max_health);
         }
         self.frustration = (self.frustration - 1.5 * dt).max(0.0);
+        // Squashed or stretched: spring back to shape, wobbling.
+        self.squash_rate += (-(self.squash - 1.0) * 140.0 - self.squash_rate * 7.0) * dt;
+        self.squash = (self.squash + self.squash_rate * dt).clamp(0.3, 2.0);
+        self.gadget_cooldown -= dt;
+        self.saw_cooldown -= dt;
 
         let before_root = self.root_y(&self.rotated_pose(), self.anchored) + self.root_correction;
         let before_pos = self.pos.y;
@@ -1403,6 +1580,11 @@ impl Agent {
         self.root_correction *= (-dt / self.settle).exp();
         if self.root_correction.abs() < 0.01 {
             self.root_correction = 0.0;
+        }
+        if self.gadget == Some(Gadget::Eraser) && self.weapon.is_none() {
+            // Dropped or thrown away, like a sword.
+            self.gadget = None;
+            self.gadget_cooldown = 6.0;
         }
         if self.action == Action::Cling {
             // Last, with this tick's pose settled: hands exactly on the arrow.
@@ -1855,6 +2037,15 @@ impl Agent {
                 self.spin = 0.0;
                 self.set_action(Action::Stand);
             }
+            Action::Doodle {
+                shape: Shape::Cannon,
+                ..
+            } => {
+                // Drawn: it lifts the cannon off the page.
+                self.arm(Gadget::Cannon);
+                events.push(Event::CannonReady { at: self.hands() });
+                self.set_action(Action::Stand);
+            }
             Action::Think | Action::Taunt => self.t = 0.0, // loop until behaviour changes
             _ => self.set_action(Action::Stand),
         }
@@ -2015,6 +2206,41 @@ impl Agent {
             _ => {}
         }
         match self.action {
+            Action::Rummage if !self.act_fired && self.t >= 0.3 => {
+                self.act_fired = true;
+                events.push(Event::WantGadget { at: self.hands() });
+                return;
+            }
+            Action::Fire { target } if !self.act_fired && self.t >= 0.18 => {
+                self.act_fired = true;
+                if let Some(g) = self.gadget {
+                    events.push(Event::Fired {
+                        from: self.hands(),
+                        target,
+                        gadget: g,
+                    });
+                    self.gadget_uses = self.gadget_uses.saturating_sub(1);
+                    if self.gadget_uses == 0 {
+                        self.gadget = None;
+                        self.gadget_cooldown = 6.0;
+                        events.push(Event::GadgetSpent {
+                            at: self.hands(),
+                            gadget: g,
+                        });
+                    }
+                }
+                return;
+            }
+            Action::Saw if !self.act_fired && self.t >= 1.5 => {
+                self.act_fired = true;
+                if let Some(g) = self.ground.filter(|g| g.kind == PlatformKind::Window) {
+                    events.push(Event::Sawed {
+                        at: self.pos,
+                        window: g.owner,
+                    });
+                }
+                return;
+            }
             Action::RipWeapon if !self.act_fired && self.t >= 0.3 => {
                 self.act_fired = true;
                 events.push(Event::WantWeapon { at: self.hands() });
@@ -2213,6 +2439,42 @@ impl Agent {
                 {
                     return;
                 }
+                // A paint bucket or its cannon: keep its distance and shoot.
+                if let Some(g @ (Gadget::Bucket | Gadget::Cannon)) = self.gadget {
+                    let close = (s.cursor - self.shoulder()).length() < 150.0;
+                    if self.attack_cooldown <= 0.0 && !close {
+                        let target = s.cursor + s.cursor_vel * 0.15;
+                        self.face((target.x - self.pos.x).signum());
+                        self.attack_cooldown = if g == Gadget::Cannon { 0.75 } else { 1.2 };
+                        self.set_action(Action::Fire { target });
+                    } else if close {
+                        let away = if s.cursor.x < self.pos.x { 1.0 } else { -1.0 };
+                        self.walk_to(
+                            clamp_between(self.pos.x + away * 260.0, s.min_x, s.max_x),
+                            true,
+                        );
+                    } else if !matches!(self.action, Action::Taunt | Action::Fire { .. }) {
+                        self.face(dx.signum());
+                        self.set_action(Action::Taunt);
+                    }
+                    return;
+                }
+                // Now and then, pull out a tool: an eraser, paint, or it
+                // draws itself a cannon.
+                if s.can_gadget
+                    && matches!(t, Tactic::Any | Tactic::Blade)
+                    && self.gadget.is_none()
+                    && self.weapon.is_none()
+                    && !self.holding
+                    && self.gadget_cooldown <= 0.0
+                {
+                    self.gadget_cooldown = if t == Tactic::Blade { 3.0 } else { 9.0 };
+                    let chance = if t == Tactic::Blade { 0.6 } else { 0.3 };
+                    if self.random(0.0, 1.0) < chance {
+                        self.set_action(Action::Rummage);
+                        return;
+                    }
+                }
                 // Now and then, arm up: rip a scrollbar off the window.
                 if s.weapon_available
                     && matches!(t, Tactic::Any | Tactic::Blade)
@@ -2396,6 +2658,28 @@ impl Agent {
     }
 
     fn sabotage(&mut self, s: &Senses, world: &World) {
+        // Standing on the active window's title bar: saw its toolbar off.
+        if let (Some(g), Some((id, _))) = (self.ground, s.active_window) {
+            if s.can_saw
+                && g.kind == PlatformKind::Window
+                && g.owner == id
+                && self.saw_cooldown <= 0.0
+                && !self.holding
+                && self.weapon.is_none()
+            {
+                self.saw_cooldown = 25.0;
+                if self.random(0.0, 1.0) < 0.5 {
+                    let side = if self.random(0.0, 1.0) < 0.5 {
+                        1.0
+                    } else {
+                        -1.0
+                    };
+                    self.face(side);
+                    self.set_action(Action::Saw);
+                    return;
+                }
+            }
+        }
         // Mischief with powers: pick up the user's window and toss it aside.
         if self.traits.telekinesis
             && s.can_throw_window
@@ -2809,6 +3093,8 @@ mod tests {
             user_idle: 0.0,
             can_shove: false,
             can_cling: false,
+            can_gadget: false,
+            can_saw: false,
             tk_words_near: 0,
             music: false,
             can_throw_window: false,
@@ -3273,6 +3559,131 @@ mod tests {
         run(&mut a, &w, &s, 14.0, &mut ev);
         assert!(ev.iter().any(|e| matches!(e, Event::LetGo { .. })));
         assert!(!a.clinging());
+    }
+
+    #[test]
+    fn in_a_fight_it_pulls_out_tools_and_uses_them_up() {
+        let w = world(vec![]);
+        // It reaches for one.
+        let mut a = agent();
+        let mut s = senses(Mode::Combat);
+        s.can_gadget = true;
+        s.tactic = Tactic::Blade;
+        let mut ev = vec![];
+        run(&mut a, &w, &s, 20.0, &mut ev);
+        assert!(
+            ev.iter().any(|e| matches!(e, Event::WantGadget { .. })),
+            "never reached for a tool"
+        );
+        // A bucket: three throws from a distance, then it's empty.
+        let mut a = agent();
+        a.arm(Gadget::Bucket);
+        let mut s = senses(Mode::Combat);
+        s.cursor = v2(1400.0, GROUND_Y - 200.0);
+        let mut ev = vec![];
+        run(&mut a, &w, &s, 8.0, &mut ev);
+        let fired = ev
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Event::Fired {
+                        gadget: Gadget::Bucket,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(fired, 3);
+        assert!(ev.iter().any(|e| matches!(
+            e,
+            Event::GadgetSpent {
+                gadget: Gadget::Bucket,
+                ..
+            }
+        )));
+        assert_eq!(a.gadget, None);
+        // The eraser is swung like a sword.
+        let mut a = agent();
+        a.arm(Gadget::Eraser);
+        assert!(a.weapon.is_some());
+        let mut s = senses(Mode::Combat);
+        s.cursor = a.shoulder() + v2(40.0, 0.0);
+        let mut ev = vec![];
+        run(&mut a, &w, &s, 3.0, &mut ev);
+        assert!(
+            ev.iter().any(|e| matches!(e, Event::Slashed { .. })),
+            "eraser never hit"
+        );
+    }
+
+    #[test]
+    fn it_draws_a_cannon_then_fires_it() {
+        let w = world(vec![]);
+        let mut a = agent();
+        let mut ev = vec![];
+        a.draw_cannon(&mut ev);
+        assert!(ev.iter().any(|e| matches!(
+            e,
+            Event::DoodleStarted {
+                shape: Shape::Cannon,
+                ..
+            }
+        )));
+        let mut s = senses(Mode::Combat);
+        s.cursor = v2(1500.0, GROUND_Y - 150.0);
+        run(&mut a, &w, &s, 10.0, &mut ev);
+        assert!(ev.iter().any(|e| matches!(e, Event::CannonReady { .. })));
+        let shots = ev
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Event::Fired {
+                        gadget: Gadget::Cannon,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(shots, Gadget::Cannon.uses() as usize);
+    }
+
+    #[test]
+    fn up_on_the_active_window_it_saws_the_toolbar_off() {
+        let (win, top) = chrome();
+        let w = world(vec![top]);
+        let mut a = Agent::new(1000.0, top, SCALE, 9);
+        a.saw_cooldown = 0.0;
+        let mut s = senses(Mode::Sabotage);
+        s.active_window = Some((42, win));
+        s.can_saw = true;
+        let sawed = (0..20).any(|_| {
+            a.saw_cooldown = 0.0;
+            a.ground = Some(top);
+            a.pos = v2(1000.0, top.y);
+            a.set_action(Action::Stand);
+            let mut ev = vec![];
+            run(&mut a, &w, &s, 2.5, &mut ev);
+            ev.iter()
+                .any(|e| matches!(e, Event::Sawed { window: 42, .. }))
+        });
+        assert!(sawed);
+    }
+
+    #[test]
+    fn squashed_it_springs_back_into_shape() {
+        let w = world(vec![]);
+        let mut a = agent();
+        let tall = |a: &Agent| a.pos.y - a.head().y;
+        let normal = tall(&a);
+        let mut ev = vec![];
+        a.squish(80.0, &mut ev);
+        assert!(ev.iter().any(|e| matches!(e, Event::Squished { .. })));
+        assert!(tall(&a) < normal * 0.8, "not squashed");
+        run(&mut a, &w, &senses(Mode::Idle), 3.0, &mut ev);
+        assert!(!a.squashed());
+        assert!((tall(&a) - normal).abs() < 3.0);
     }
 
     #[test]
