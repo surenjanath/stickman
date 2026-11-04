@@ -112,8 +112,35 @@ harnesses.
    learned shapes which mood it picks next (calm, observing, sabotage or
    combat). Then the loop repeats: new events → new feelings → a new
    reflection.
-6. **It keeps a diary and earns a record.**
-   - Each day ends with a diary entry about what you did to it.
+6. **It wages a war on the cursor, and learns how to win it.** Its goal is
+   to destroy the cursor.
+   - **The cursor has health**, kept between launches. Punches, thrown
+     words, sword hits and throwing the cursor all chip at it, and a small
+     bar under the pointer shows what's left. At zero the cursor shatters on
+     screen ("CURSOR DESTROYED!"; your real pointer keeps working) and comes
+     back 25% stronger, up to 600.
+   - **It plans, and judges its plans.** Each fight it picks a tactic
+     (fists, throwing words, grabbing the cursor, telekinesis or a sword),
+     sticks to it for 20 s, then takes stock: damage dealt per second, minus
+     the hits it took. It mostly goes with what has worked against *you*,
+     tries the untested ones, and now and then experiments. It says so:
+     "My fists isn't working. Switching to throwing words." The record is kept
+     between launches.
+   - **It knows its own state.** Below 30% health it says "I'm hurt. Falling
+     back.", backs away from the cursor and recovers (cornered, it still hits
+     back), then returns above 70%: "Healed up. Round two." Enraged, it never
+     retreats.
+   - **It picks its own fights.** It doesn't wait for the AI director to say
+     COMBAT. About once a second it weighs its odds, and attacks ("Now's my
+     chance.") only when they're good: healthy, you're at the computer, the
+     cursor is close or sitting still, it isn't scared of the app in front,
+     and enough time has passed (45 s at full temper, longer when calmer; never
+     at temper 0).
+   - The local AI is told about the war (victories, the cursor's health,
+     what has worked) and plans its schemes with that in mind.
+7. **It keeps a diary and earns a record.**
+   - Each day ends with a diary entry about what you did to it. **Copy Latest
+     Diary Entry** (menu bar, or Settings → Mind) copies it, ready to share.
    - Achievements, levels and unlocked moves track its history with you.
 
 **Watch it think** in Settings → Mind: live feeling bars (yellow, then red),
@@ -148,10 +175,10 @@ standing (idle), hand on chin (observing), knee up (sabotage), fists up
 | Mood / Health / AI | Live status: mood and the director's reason, health, level and grudge, whether Ollama is online. |
 | Settings… (⌘,) | The Settings window. |
 | Behaviour ▸ | Auto (AI director), or pin Idle, Observe, Sabotage or Combat. |
-| Draw Platforms (⌘D) · Leave Me a Note (⌘N) · Summon a Rival | Quick actions. |
+| Draw Platforms (⌘D) · Leave Me a Note (⌘N) · Copy Latest Diary Entry · Summon a Rival | Quick actions. Copy Latest Diary Entry puts its newest entry on the clipboard, ready to paste anywhere. |
 | Show Figure (⌘H) · Pause (⌘P) · Respawn (⌘R) | Hide, freeze or reset the figure. |
 | Grant … | Shortcuts to System Settings, shown only while a permission is missing. |
-| Quit (⌘Q) | Quit the app. |
+| Quit (⌘Q) | Quit the app. The figure gets its last words out ("I'LL BE BACK!" if it's angry, "Goodbye, friend…" if it likes you), catches fire, chars black and crumbles to ash, then the app closes (about 4 s). Quit again to skip. |
 
 ## Requirements
 
@@ -165,6 +192,15 @@ standing (idle), hand on chin (observing), knee up (sabotage), fists up
   - **Screen Recording:** OCR, so the figure can walk on text.
 
   Both are optional; the figure works without them. macOS asks on first launch.
+
+  **Why Screen Recording, and what happens to it:** the figure needs to know where
+  the lines of text are in your active window, so it can stand on them and rip
+  words off them. It captures only that window, finds the text with Apple's
+  on-device Vision framework, and releases the image straight away. Nothing is
+  saved to disk and nothing goes to the cloud: the only network address it ever
+  talks to is your own Ollama at `localhost:11434`. Without the permission it
+  still walks the Dock and your windows' title bars; it just can't stand on text
+  or throw words.
 
 ## Run
 
@@ -194,7 +230,7 @@ launching terminal.
 | `STICKMAN_CLICK_THROUGH=0` | Debug: the overlay catches every click (blocks the screen). |
 | `STICKMAN_DEBUG_OPEN_MENU=1` | Debug: pop the menu bar menu open once at startup. |
 | `STICKMAN_DEBUG_SAY="…"` | Debug: say this line at startup. |
-| `STICKMAN_DEBUG_DO=sleep\|dance\|cheer\|doodle\|superjump\|mindwords\|throwwindow\|rival\|draw\|sketch\|note\|reflect\|rage\|diary\|boss\|minions` | Debug: do that 3 s after launch. |
+| `STICKMAN_DEBUG_DO=sleep\|dance\|cheer\|doodle\|superjump\|mindwords\|throwwindow\|rival\|draw\|sketch\|note\|reflect\|rage\|diary\|boss\|minions\|quit\|copydiary` | Debug: do that 3 s after launch. |
 | `STICKMAN_DEBUG_OPEN_SETTINGS=1` | Debug: open the Settings window at launch (or `=Mind`, `=Abilities`, … for that tab). |
 | `STICKMAN_DEBUG_HAT=Crown` | Debug: wear that hat even if it's locked (`Bandana`, `TopHat`, `Pirate`, `Party`, `Wizard`, `Horns`, `Viking`). |
 | `STICKMAN_DEBUG_GRAB=1` | Debug: in combat, always grab a slow cursor in reach (instead of 30% of the time). |
@@ -317,6 +353,7 @@ main thread (winit / AppKit)                         background
 | `src/macos.rs` | AppKit and Accessibility wrappers (overlay setup, focus, window shake, opening URLs). |
 | `src/words.rs` | Word throwing: ammo choice, "holes", flying words. |
 | `src/mind.rs` | Memories, feelings, beliefs and schemes; reflection prompts and parsing (`mind.json`). |
+| `src/war.rs` | Its war on the cursor: cursor health, the record of each tactic, choosing tactics, picking fights, falling back. |
 | `src/note.rs` | Ransom notes: letters torn off the screen, layout and animation. |
 | `src/winfly.rs` | A window thrown by telekinesis: lift, flight, bounces, kept on screen. |
 | `src/rival.rs` | The rival and the duel (each figure fights the other as its "cursor"). |

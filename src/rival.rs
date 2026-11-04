@@ -5,7 +5,7 @@
 //! hit that would have struck the cursor knocks the opponent back instead.
 //! Whoever is knocked out first loses; then the rival walks off screen.
 
-use crate::agent::{Agent, Dread, Event, Mode, Senses, Traits};
+use crate::agent::{Agent, Dread, Event, Mode, Senses, Tactic, Traits};
 use crate::geom::{v2, V2};
 use crate::physics::{Platform, World};
 
@@ -91,6 +91,8 @@ impl Rival {
             can_throw_window: false,
             weapon_available: false,
             dread: Dread::None,
+            tactic: Tactic::Any,
+            retreat: false,
             ..*base
         }
     }
@@ -222,6 +224,8 @@ mod tests {
             can_throw_window: false,
             weapon_available: false,
             dread: crate::agent::Dread::None,
+            tactic: crate::agent::Tactic::Any,
+            retreat: false,
         }
     }
 

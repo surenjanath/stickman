@@ -434,6 +434,12 @@ impl MenuBar {
         Self::separator(menu);
         self.add(menu, "Draw Platforms", Some(Command::ToggleDrawMode), "d");
         self.add(menu, "Leave Me a Note", Some(Command::WriteNote), "n");
+        self.add(
+            menu,
+            "Copy Latest Diary Entry",
+            Some(Command::CopyDiary),
+            "",
+        );
         self.add(menu, "Summon a Rival", Some(Command::SummonRival), "");
         Self::separator(menu);
         self.add(menu, "Show Figure", Some(Command::ToggleVisible), "h");

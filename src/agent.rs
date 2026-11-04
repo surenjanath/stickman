@@ -80,6 +80,58 @@ impl Mode {
     }
 }
 
+/// How it means to fight the cursor (chosen from what has worked before).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, PartialOrd, Ord, Hash)]
+pub enum Tactic {
+    /// No plan: mix everything, as the moment suggests.
+    #[default]
+    Any,
+    /// Punches and kicks.
+    Fists,
+    /// Rip words off the screen and throw them.
+    Words,
+    /// Catch the cursor and throw it.
+    Grab,
+    /// Telekinesis: lift words, the cursor or the window.
+    Powers,
+    /// Rip a scrollbar off the window and use it as a sword.
+    Blade,
+}
+
+impl Tactic {
+    /// Every real plan (not `Any`).
+    pub const ALL: [Tactic; 5] = [
+        Tactic::Fists,
+        Tactic::Words,
+        Tactic::Grab,
+        Tactic::Powers,
+        Tactic::Blade,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Tactic::Any => "any",
+            Tactic::Fists => "fists",
+            Tactic::Words => "words",
+            Tactic::Grab => "grab",
+            Tactic::Powers => "powers",
+            Tactic::Blade => "blade",
+        }
+    }
+
+    /// In a sentence: "Switching to {}."
+    pub fn describe(self) -> &'static str {
+        match self {
+            Tactic::Any => "whatever works",
+            Tactic::Fists => "my fists",
+            Tactic::Words => "throwing words",
+            Tactic::Grab => "grabbing the cursor",
+            Tactic::Powers => "telekinesis",
+            Tactic::Blade => "a sword",
+        }
+    }
+}
+
 /// How it feels about the app in front: the one where the user hits it most.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Dread {
@@ -128,6 +180,10 @@ pub struct Senses {
     pub weapon_available: bool,
     /// How it feels about the active app (where it has been beaten before).
     pub dread: Dread,
+    /// Its plan for fighting the cursor.
+    pub tactic: Tactic,
+    /// Badly hurt: fall back and recover instead of pressing the attack.
+    pub retreat: bool,
 }
 
 /// What telekinesis is working on.
@@ -1277,6 +1333,24 @@ impl Agent {
         }
     }
 
+    /// Hurt in a fight: back off from the cursor and recover; cornered, hit back.
+    fn fall_back(&mut self, s: &Senses, events: &mut Vec<Event>) {
+        let away = if s.cursor.x < self.pos.x { 1.0 } else { -1.0 };
+        let to = clamp_between(self.pos.x + away * 500.0, s.min_x, s.max_x);
+        let close = (s.cursor - self.shoulder()).length() < self.reach() + 25.0;
+        if (to - self.pos.x).abs() > 40.0 && !close {
+            self.walk_to(to, true);
+        } else if close && self.attack_cooldown <= 0.0 {
+            self.attack(s.cursor);
+            events.push(Event::Swing {
+                at: self.shoulder(),
+            });
+        } else if !matches!(self.action, Action::Think | Action::Walk { .. }) {
+            self.face(-away);
+            self.set_action(Action::Think);
+        }
+    }
+
     /// Scared of the active window: get to the far side of the screen from it
     /// (off it first, if standing on it), then watch it warily.
     fn keep_away(&mut self, s: &Senses, id: u32, win: Rect) {
@@ -1483,10 +1557,15 @@ impl Agent {
     fn wants_to_snatch(&mut self, s: &Senses) -> bool {
         let hip_y = self.pos.y - poses::STAND_HIP * self.scale;
         let head_y = self.pos.y - 240.0 * self.scale;
+        let chance = match s.tactic {
+            Tactic::Grab => 0.9,
+            Tactic::Any => self.snatch_chance,
+            _ => 0.0,
+        };
         s.can_grab_cursor
             && s.cursor_vel.length() < 350.0
             && (head_y..=hip_y).contains(&s.cursor.y)
-            && self.random(0.0, 1.0) < self.snatch_chance
+            && self.random(0.0, 1.0) < chance
     }
 
     fn snatch(&mut self, target: V2) {
@@ -1747,7 +1826,7 @@ impl Agent {
     }
 
     /// Use telekinesis in combat, now and then.
-    fn mind_powers(&mut self, s: &Senses) -> bool {
+    fn mind_powers(&mut self, s: &Senses, eager: bool) -> bool {
         if !self.traits.telekinesis || self.tk_cooldown > 0.0 || self.holding {
             return false;
         }
@@ -1771,9 +1850,13 @@ impl Agent {
             Mind::Cursor => 0.35,
             Mind::Window => 0.6,
         };
-        let chance = base * (0.5 + self.traits.aggression);
+        let chance = if eager {
+            0.9
+        } else {
+            base * (0.5 + self.traits.aggression)
+        };
         if self.random(0.0, 1.0) >= chance {
-            self.tk_cooldown = 2.0; // not this time
+            self.tk_cooldown = if eager { 0.5 } else { 2.0 }; // not this time
             return false;
         }
         self.tk_cooldown = 7.0;
@@ -1808,17 +1891,26 @@ impl Agent {
         }
         match s.mode {
             Mode::Combat => {
-                if self.mind_powers(s) {
+                // Badly hurt: fall back and get its breath back.
+                if s.retreat {
+                    return self.fall_back(s, events);
+                }
+                let t = s.tactic;
+                if matches!(t, Tactic::Any | Tactic::Powers)
+                    && self.mind_powers(s, t == Tactic::Powers)
+                {
                     return;
                 }
                 // Now and then, arm up: rip a scrollbar off the window.
                 if s.weapon_available
+                    && matches!(t, Tactic::Any | Tactic::Blade)
                     && self.weapon.is_none()
                     && !self.holding
                     && self.rip_cooldown <= 0.0
                 {
-                    self.rip_cooldown = 4.0;
-                    if self.random(0.0, 1.0) < 0.45 {
+                    self.rip_cooldown = if t == Tactic::Blade { 1.5 } else { 4.0 };
+                    let chance = if t == Tactic::Blade { 1.0 } else { 0.45 };
+                    if self.random(0.0, 1.0) < chance {
                         self.weapon_hits = 0;
                         self.set_action(Action::RipWeapon);
                         return;
@@ -1833,11 +1925,13 @@ impl Agent {
                         self.set_action(Action::Throw { target });
                         return;
                     }
-                } else if let Some(a) = s.ammo {
+                } else if let Some(a) = s.ammo.filter(|_| matches!(t, Tactic::Any | Tactic::Words))
+                {
                     // Close-range fists beat fetching ammo, until a few hits
                     // in a row haven't driven the cursor off: then mix it up.
+                    // With words as the plan, it always goes for ammo.
                     let near = (s.cursor - self.shoulder()).length() < self.reach() + 25.0;
-                    if (!near || self.combo >= 3) && self.fetch(a, world) {
+                    if (!near || self.combo >= 3 || t == Tactic::Words) && self.fetch(a, world) {
                         return;
                     }
                 }
@@ -2401,6 +2495,8 @@ mod tests {
             can_throw_window: false,
             weapon_available: false,
             dread: crate::agent::Dread::None,
+            tactic: crate::agent::Tactic::Any,
+            retreat: false,
         }
     }
 
@@ -2507,6 +2603,56 @@ mod tests {
             ev.contains(&Event::Grabbed { id: 3 }),
             "never grabbed after jumping up"
         );
+    }
+
+    /// The cursor far away, a word to grab on a line overhead: what it does
+    /// depends on its plan.
+    fn far_cursor_with_ammo(t: Tactic) -> Vec<Event> {
+        let line = text_line(600.0, 1200.0, 900.0);
+        let w = world(vec![line]);
+        let mut a = agent();
+        let mut s = senses(Mode::Combat);
+        s.tactic = t;
+        s.cursor = v2(200.0, 300.0);
+        s.ammo = Some(Ammo {
+            id: 3,
+            at: v2(950.0, 908.0),
+            line_y: 900.0,
+        });
+        let mut ev = vec![];
+        run(&mut a, &w, &s, 6.0, &mut ev);
+        ev
+    }
+
+    #[test]
+    fn its_plan_decides_how_it_fights() {
+        assert!(far_cursor_with_ammo(Tactic::Words).contains(&Event::Grabbed { id: 3 }));
+        assert!(far_cursor_with_ammo(Tactic::Any).contains(&Event::Grabbed { id: 3 }));
+        // Fists: it ignores the ammo and goes for the cursor.
+        assert!(!far_cursor_with_ammo(Tactic::Fists).contains(&Event::Grabbed { id: 3 }));
+    }
+
+    #[test]
+    fn badly_hurt_it_falls_back_from_the_cursor() {
+        let w = world(vec![]);
+        let mut a = agent();
+        let mut s = senses(Mode::Combat);
+        s.cursor = v2(1250.0, GROUND_Y - 100.0);
+        s.retreat = true;
+        let mut ev = vec![];
+        run(&mut a, &w, &s, 4.0, &mut ev);
+        assert!(
+            a.pos.x < 600.0,
+            "didn't back off: {:?} at {:?}",
+            a.action,
+            a.pos
+        );
+        assert!(!ev.iter().any(|e| matches!(e, Event::Swing { .. })));
+        // Cornered (the cursor right on it): it hits back.
+        s.cursor = a.shoulder() + v2(-30.0, 0.0);
+        let mut ev = vec![];
+        run(&mut a, &w, &s, 2.0, &mut ev);
+        assert!(ev.iter().any(|e| matches!(e, Event::Swing { .. })));
     }
 
     #[test]

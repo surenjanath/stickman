@@ -243,6 +243,28 @@ pub fn restore_focus(pid: i64) {
     }
 }
 
+/// Put `text` on the general pasteboard (the clipboard). Main thread only.
+pub fn copy_to_clipboard(text: &str) -> bool {
+    let c = std::ffi::CString::new(text.replace('\0', "")).unwrap_or_default();
+    // SAFETY: documented NSPasteboard/NSString APIs on the main thread; the
+    // string is autoreleased and the pasteboard is a shared singleton (not owned).
+    unsafe {
+        let s: *mut Object = msg_send![class!(NSString), stringWithUTF8String: c.as_ptr()];
+        let kind: *mut Object = msg_send![class!(NSString),
+            stringWithUTF8String: c"public.utf8-plain-text".as_ptr()];
+        if s.is_null() || kind.is_null() {
+            return false;
+        }
+        let pb: *mut Object = msg_send![class!(NSPasteboard), generalPasteboard];
+        if pb.is_null() {
+            return false;
+        }
+        let _: isize = msg_send![pb, clearContents];
+        let ok: BOOL = msg_send![pb, setString: s forType: kind];
+        ok != NO
+    }
+}
+
 /// Open a URL (e.g. a System Settings privacy pane). Main thread only.
 pub fn open_url(url: &str) -> bool {
     let c = std::ffi::CString::new(url).unwrap_or_default();

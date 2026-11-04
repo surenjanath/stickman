@@ -240,6 +240,8 @@ mod tests {
             can_throw_window: false,
             weapon_available: false,
             dread: crate::agent::Dread::None,
+            tactic: crate::agent::Tactic::Any,
+            retreat: false,
         }
     }
 

@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::agent::{Dread, Mode};
+use crate::war::War;
 
 /// How many memories it keeps (oldest forgotten first).
 const MAX_MEMORIES: usize = 300;
@@ -233,6 +234,8 @@ pub struct Mind {
     pub totals: BTreeMap<String, u32>,
     /// Hits by app: where the user is meanest.
     pub hits_by_app: BTreeMap<String, u32>,
+    /// Its war on the cursor: the cursor's health and what has worked.
+    pub war: War,
 }
 
 fn now_secs() -> u64 {
@@ -470,6 +473,7 @@ impl Mind {
                     .to_string(),
             );
         }
+        s.push(self.war.summary());
         s.join(" ")
     }
 
@@ -570,6 +574,16 @@ impl Mind {
     }
 
     /// The prompt for the entry of `date` (from today's tally so far).
+    /// Its latest diary entry, ready to paste and share.
+    pub fn shareable_diary(&self, name: &str) -> Option<String> {
+        let e = self.diary.back()?;
+        Some(format!(
+            "From the diary of {name}, the stick figure that lives on my Mac desktop ({}):\n\n{}\n\n(Stickman, written by a local AI: https://github.com/surenjanath/stickman)",
+            e.date,
+            e.text.trim()
+        ))
+    }
+
     pub fn diary_prompt(&self, date: &str, name: &str, salty: bool) -> String {
         let style = if salty || self.enraged {
             "It may swear (no slurs, nothing hateful)."
@@ -934,6 +948,20 @@ mod tests {
         }
         assert_eq!(m.update_temper(true), Some(false));
         assert!(!m.enraged);
+    }
+
+    #[test]
+    fn the_latest_diary_entry_is_ready_to_share() {
+        let mut m = Mind::default();
+        assert_eq!(m.shareable_diary("Stick"), None);
+        m.add_diary("2026-11-02", "Old news.");
+        m.add_diary("2026-11-03", "  Dear diary, Safari again.  ");
+        let s = m.shareable_diary("Stick").unwrap();
+        assert!(s.starts_with("From the diary of Stick"));
+        assert!(s.contains("(2026-11-03)"));
+        assert!(s.contains("\n\nDear diary, Safari again.\n\n"));
+        assert!(!s.contains("Old news"));
+        assert!(s.contains("github.com/surenjanath/stickman"));
     }
 
     #[test]

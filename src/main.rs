@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use stickman::agent::{Agent, Dread, Event, Mind, Mode, Senses, FIXED_DT};
+use stickman::agent::{Agent, Dread, Event, Mind, Mode, Senses, Tactic, FIXED_DT};
 use stickman::boss::{Blow, Boss, Outcome};
 use stickman::director::{self, Directive, Observation};
 use stickman::doodle::Doodles;
@@ -56,6 +56,7 @@ use stickman::sound::{Sfx, Sound};
 use stickman::speech::{Moment, Priority, Speech};
 use stickman::stats::{Deed, Feat, Stats};
 use stickman::stickman::{Segment, BONES};
+use stickman::war;
 use stickman::windows::{self, Snapshot};
 use stickman::winfly::{Stage, WindowFlight};
 use stickman::words::{WordEvent, WordPlay};
@@ -262,6 +263,11 @@ const DIRECTOR_CHATTER: Duration = Duration::from_secs(20);
 /// as a mood rather than jitter.
 const MIN_MODE_DWELL: Duration = Duration::from_secs(12);
 
+/// Quitting: it panics, catches fire, chars, and crumbles to ash (seconds).
+const BURN_IGNITE: f32 = 0.7;
+const BURN_CRUMBLE: f32 = 2.4;
+const BURN_END: f32 = 3.8;
+
 /// Whether to switch from `current` to `proposed` now. Retaliation (COMBAT after
 /// being hit) is always allowed immediately.
 fn accept_directive(current: Mode, proposed: Mode, in_mode: Duration, recently_hit: bool) -> bool {
@@ -306,6 +312,18 @@ struct Scene {
     boss: Option<Boss>,
     boss_banner: Option<(u32, V2)>,
     next_boss: Instant,
+    /// Badly hurt in a fight: falling back to recover.
+    retreating: bool,
+    /// When it last picked a fight on its own, and when to weigh one next.
+    last_initiative: Instant,
+    next_initiative_check: Instant,
+    /// For timing tactic stints.
+    war_clock: Instant,
+    /// When the cursor last took a blow (shows its health for a moment).
+    war_hit: Option<Instant>,
+    /// Quitting: when it started burning, and whether it has crumbled yet.
+    incinerating: Option<Instant>,
+    crumbled: bool,
     rival_speech: Speech,
     rival_click: bool,
     next_rival: Instant,
@@ -864,10 +882,259 @@ impl Scene {
         self.speak(lines);
     }
 
-    /// A blow landed on the cursor: it counts in a boss fight.
+    /// A blow landed on the cursor: it counts in a boss fight, and otherwise
+    /// in its long war on the cursor.
     fn boss_hit(&mut self, b: Blow) {
         if let Some(boss) = &mut self.boss {
             boss.hit(b);
+            return;
+        }
+        self.war_hit = Some(Instant::now());
+        if self.mind.war.blow(b) {
+            self.cursor_destroyed();
+        }
+    }
+
+    /// The cursor's health ran out: it shatters (on screen; the real pointer
+    /// keeps working), and comes back stronger.
+    fn cursor_destroyed(&mut self) {
+        let (n, max) = (self.mind.war.victories, self.mind.war.cursor_max);
+        log::info!("war: destroyed the cursor (victory {n}; it returns with {max:.0} health)");
+        let at = self.cursor.pos;
+        self.particles.explosion(at, v2(0.0, -1.0));
+        for dir in [v2(1.0, 0.0), v2(-1.0, 0.0), v2(0.0, -1.0), v2(0.0, 1.0)] {
+            self.particles.sparks(at, dir, 24);
+        }
+        self.sfx(Sfx::Boom, 1.0, at);
+        let text = if n == 1 {
+            "CURSOR DESTROYED! Who's the animation now?".to_string()
+        } else {
+            format!("CURSOR DESTROYED! That's {n}. It'll be back… so will I.")
+        };
+        let lines = self.speech.say(&text, Priority::Event);
+        self.speak(lines);
+        if self.agent.action.is_still()
+            || matches!(self.agent.action, stickman::agent::Action::Walk { .. })
+        {
+            self.agent.perform("cheer", &mut Vec::new());
+        }
+        self.save_mind();
+    }
+
+    /// Copy its latest diary entry to the clipboard, ready to share.
+    fn copy_diary(&mut self) {
+        let (line, copied) = match self.mind.shareable_diary(&self.settings.name) {
+            Some(text) => {
+                if macos::copy_to_clipboard(&text) {
+                    ("Copied my diary. Go on, tell everyone what you did.", true)
+                } else {
+                    ("Couldn't copy my diary. Typical.", false)
+                }
+            }
+            None => ("My diary's empty. Give me something to write about.", false),
+        };
+        log::info!("diary: copy to clipboard ({copied})");
+        if self.settings.speech {
+            let lines = self.speech.say(line, Priority::Event);
+            self.speak(lines);
+        }
+    }
+
+    /// The user quit: it has a few last words, then goes up in flames.
+    fn incinerate(&mut self) {
+        log::info!("quit: incinerating the figure");
+        self.incinerating = Some(Instant::now());
+        self.crumbled = false;
+        self.squad = None;
+        self.speech.clear();
+        if self.settings.speech {
+            let f = &self.mind.feelings;
+            let pick = |opts: &[&'static str], seed: u64| opts[(seed >> 17) as usize % opts.len()];
+            let line = if self.mind.enraged || f.resentment > 60.0 {
+                pick(
+                    &["I'LL BE BACK!", "You haven't seen the last of me!"],
+                    self.seed,
+                )
+            } else if f.fear > 60.0 {
+                pick(&["Tell the cursor… I tried…", "Finally. Peace."], self.seed)
+            } else if f.affection > 60.0 {
+                pick(&["Goodbye, friend…", "Was it something I said?"], self.seed)
+            } else {
+                pick(
+                    &[
+                        "Wait— what are you doing?!",
+                        "Not like this!",
+                        "Is it hot in here?",
+                    ],
+                    self.seed,
+                )
+            };
+            let lines = self.speech.say(line, Priority::Event);
+            self.speak(lines);
+        }
+    }
+
+    /// Points along every bone (where flames and ash come from).
+    fn body_points(&self) -> Vec<V2> {
+        let mut pts = Vec::new();
+        for s in self.agent.segments() {
+            let (a, b) = (V2::from(s.start), V2::from(s.end));
+            for i in 0..=3 {
+                pts.push(a.lerp(b, i as f32 / 3.0));
+            }
+        }
+        pts
+    }
+
+    /// One frame of burning up. Returns `false` when it's over (quit).
+    fn burn(&mut self) -> bool {
+        let Some(start) = self.incinerating else {
+            return true;
+        };
+        let t = start.elapsed().as_secs_f32();
+        let dt = self.last_tick.elapsed().as_secs_f32().min(0.1);
+        self.last_tick = Instant::now();
+        self.set_click_through(true);
+        self.busy = true;
+        if t >= BURN_IGNITE && !self.crumbled {
+            let first = t - dt < BURN_IGNITE;
+            let at = self.agent.center();
+            if first {
+                self.sfx(Sfx::Whoosh, 0.9, at);
+            }
+            let heat = ((t - BURN_IGNITE) / (BURN_CRUMBLE - BURN_IGNITE)).clamp(0.0, 1.0);
+            let pts = self.body_points();
+            self.particles.flames(&pts, 0.4 + 0.6 * heat);
+        }
+        if t >= BURN_CRUMBLE && !self.crumbled {
+            log::info!("quit: crumbled to ash");
+            self.crumbled = true;
+            let pts = self.body_points();
+            self.particles.ash(&pts);
+            self.sfx(Sfx::Boom, 0.6, self.agent.center());
+            self.speech.clear();
+            self.free_speech_sprites();
+        }
+        self.particles.update(dt);
+        self.speech.update(dt);
+        self.present();
+        t < BURN_END
+    }
+
+    /// Ways it can fight the cursor right now.
+    fn tactics(&self) -> Vec<Tactic> {
+        let mut v = vec![Tactic::Fists];
+        if self.settings.throw_words && self.settings.walk_on_text && self.ocr_tx.is_some() {
+            v.push(Tactic::Words);
+        }
+        if self.cursor_fx() {
+            v.push(Tactic::Grab);
+        }
+        if self.agent.traits.telekinesis {
+            v.push(Tactic::Powers);
+        }
+        if self.settings.weapons && self.unlocked(4) && self.accessibility && self.ocr_tx.is_some()
+        {
+            v.push(Tactic::Blade);
+        }
+        v
+    }
+
+    /// Takes stock of the fight: times its tactic, switches when one isn't
+    /// working, falls back when badly hurt, and picks fights on its own.
+    fn wage_war(&mut self) {
+        let dt = self.war_clock.elapsed().as_secs_f32().min(0.5);
+        self.war_clock = Instant::now();
+        let free = self.rival.is_none() && self.jail.is_none() && !self.on_call;
+        let fighting = self.mode == Mode::Combat && free;
+        let roll = |seed: u64, shift: u32| ((seed >> shift) % 1000) as f32 / 1000.0;
+        // A stint ran its course (or the fight ended): take stock.
+        if let Some(done) = self.mind.war.tick(dt, fighting) {
+            if fighting {
+                let next = self.mind.war.choose(&self.tactics(), roll(self.seed, 19));
+                log::info!(
+                    "war: {} did {:.0} damage in {:.0}s (hit {} times); next: {}",
+                    done.tactic.name(),
+                    done.damage,
+                    done.secs,
+                    done.hurt,
+                    next.name()
+                );
+                self.mind.war.begin(next);
+                if let Some(line) = war::War::verdict(&done, next) {
+                    let lines = self.speech.say(&line, Priority::Director);
+                    self.speak(lines);
+                }
+            }
+        } else if fighting && self.mind.war.stint.is_none() {
+            let next = self.mind.war.choose(&self.tactics(), roll(self.seed, 19));
+            log::info!("war: fight starts, plan: {}", next.name());
+            self.mind.war.begin(next);
+        }
+        // Badly hurt: fall back and recover.
+        let health = self.agent.health / self.agent.traits.max_health.max(1.0);
+        let retreat = fighting && war::retreat(self.retreating, health, self.mind.enraged);
+        if retreat != self.retreating {
+            self.retreating = retreat;
+            log::info!(
+                "war: {}",
+                if retreat {
+                    "falling back"
+                } else {
+                    "back in the fight"
+                }
+            );
+            if fighting {
+                let text = if retreat {
+                    "I'm hurt. Falling back."
+                } else {
+                    "Healed up. Round two."
+                };
+                let lines = self.speech.say(text, Priority::Director);
+                self.speak(lines);
+            }
+        }
+        // Pick a fight on its own, when the odds look good.
+        let now = Instant::now();
+        if now < self.next_initiative_check {
+            return;
+        }
+        self.next_initiative_check = now + Duration::from_secs(1);
+        if fighting
+            || !free
+            || self.boss.is_some()
+            || self.intro_combat_until.is_some()
+            || self.settings.behaviour != Behaviour::Auto
+            || !self.settings.visible
+            || self.settings.paused
+        {
+            return;
+        }
+        let app = self.snapshot.active().map_or("", |w| w.owner.as_str());
+        let odds = war::Odds {
+            health,
+            cursor_dist: (self.cursor.pos - self.agent.center()).length(),
+            cursor_speed: self.cursor.velocity().length(),
+            user_active: self.last_mouse_move.elapsed() < Duration::from_secs(30),
+            since_last: self.last_initiative.elapsed().as_secs_f32(),
+            aggression: f32::from(self.settings.aggression) / 100.0,
+            resentment: self.mind.feelings.resentment,
+            scared: self.mind.dread(app) == Dread::Scared,
+        };
+        if war::take_initiative(&odds, roll(self.seed, 27)) {
+            log::info!("war: picks a fight on its own ({odds:?})");
+            self.last_initiative = now;
+            self.mode = Mode::Combat;
+            self.mode_since = now;
+            let lines = [
+                "Now's my chance.",
+                "You look distracted.",
+                "Ambush!",
+                "My turn.",
+            ];
+            let line = lines[(self.seed >> 13) as usize % lines.len()];
+            let said = self.speech.say(line, Priority::Director);
+            self.speak(said);
         }
     }
 
@@ -1595,6 +1862,7 @@ impl Scene {
                 self.particles.dust(pos, 0.4);
                 self.sfx(Sfx::Thud, 0.5, pos);
                 log::info!("event: the thrown cursor landed");
+                self.boss_hit(Blow::Thrown);
             }
         }
     }
@@ -1721,6 +1989,7 @@ impl Scene {
                 Event::Knockback { at, dir } => {
                     self.particles.explosion(at, -dir);
                     self.stats.hurt(false);
+                    self.mind.war.hurt();
                     self.remember(Memory::Hit);
                     self.sfx(Sfx::Boom, 0.9, at);
                     self.hits.push_back(Instant::now());
@@ -2026,6 +2295,7 @@ impl Scene {
                     let prompt = self.mind.diary_prompt(&today, &self.settings.name, salty);
                     self.write_diary(today, prompt);
                 }
+                Command::CopyDiary => self.copy_diary(),
                 Command::ReflectNow => {
                     self.last_reflection = Instant::now() - REFLECT_EVERY * 2;
                 }
@@ -2041,7 +2311,12 @@ impl Scene {
                 Command::Quit => {
                     self.save_stats();
                     self.save_mind();
-                    return false;
+                    // Quit again mid-burn, or nothing on screen to burn: go now.
+                    let shown = self.settings.visible && !self.settings.paused && !self.on_call;
+                    if self.incinerating.is_some() || !shown {
+                        return false;
+                    }
+                    self.incinerate();
                 }
                 Command::ResetStats => {
                     self.stats = Stats::default();
@@ -2581,6 +2856,18 @@ impl Scene {
                 self.start_boss();
                 return;
             }
+            if what.trim() == "copydiary" {
+                if self.mind.diary.is_empty() {
+                    self.mind
+                        .add_diary("2026-11-03", "Dear diary, he hit me in Safari again.");
+                }
+                self.copy_diary();
+                return;
+            }
+            if what.trim() == "quit" {
+                self.incinerate();
+                return;
+            }
             if what.trim() == "minions" {
                 self.call_minions();
                 return;
@@ -2739,6 +3026,9 @@ impl Scene {
         if !self.handle_commands() {
             return false;
         }
+        if self.incinerating.is_some() {
+            return self.burn();
+        }
         self.sync_menubar();
         if !self.settings.visible || self.settings.paused {
             // Frozen or hidden: no simulation, never intercept clicks, and draw
@@ -2792,6 +3082,7 @@ impl Scene {
             + rage)
             .clamp(0.0, 1.0);
         self.think();
+        self.wage_war();
         self.diary_tick();
         self.maybe_write_note();
         if self.ticks % 30 == 0 {
@@ -2988,6 +3279,8 @@ impl Scene {
                 dread: self
                     .mind
                     .dread(self.snapshot.active().map_or("", |w| w.owner.as_str())),
+                tactic: self.mind.war.tactic(),
+                retreat: self.retreating,
             };
             let dueling = self.rival.as_ref().is_some_and(|r| r.fighting());
             if !dueling {
@@ -3004,6 +3297,8 @@ impl Scene {
                     can_shove: false,
                     held: false,
                     dread: Dread::None,
+                    tactic: Tactic::Any,
+                    retreat: false,
                     ..senses
                 };
                 let cues = r.step(
@@ -3026,6 +3321,8 @@ impl Scene {
                     max_x: r.max_x,
                     top: r.top,
                     dread: Dread::None,
+                    tactic: Tactic::Any,
+                    retreat: false,
                     ..senses
                 };
                 minion_cues.extend(sq.step(&self.world, &base));
@@ -3193,8 +3490,20 @@ impl Scene {
     }
 
     fn present(&mut self) {
-        let segments = self.agent.segments();
-        let effects = !self.particles.is_empty()
+        let mut segments = self.agent.segments();
+        let burning = self.incinerating.map(|t| t.elapsed().as_secs_f32());
+        if let Some(t) = burning {
+            // It trembles, harder once alight.
+            let amp = if t < BURN_IGNITE { 1.2 } else { 2.2 };
+            let k = t * 47.0;
+            for (i, s) in segments.iter_mut().enumerate() {
+                let j = v2((k + i as f32 * 1.7).sin(), (k * 1.3 + i as f32).cos()) * amp;
+                s.start = (V2::from(s.start) + j).into();
+                s.end = (V2::from(s.end) + j).into();
+            }
+        }
+        let effects = burning.is_some()
+            || !self.particles.is_empty()
             || self.agent.since_hit() < 4.0
             || self.words.animating()
             || self.speech.visible()
@@ -3226,15 +3535,34 @@ impl Scene {
         if self.drawing.is_some() {
             self.draw_mode_frame();
         }
-        // Enraged, it flushes red.
-        let rgb = if self.mind.enraged {
+        // Burning, it chars black (with a glow flicker); enraged, it flushes red.
+        let rgb = if let Some(t) = burning {
+            let c = self.settings.color.rgb();
+            let k = ((t - BURN_IGNITE) / (BURN_CRUMBLE - BURN_IGNITE)).clamp(0.0, 1.0);
+            let flicker = if t >= BURN_IGNITE {
+                (t * 31.0).sin().abs() * 0.25
+            } else {
+                0.0
+            };
+            let char_ = [28.0, 18.0, 14.0];
+            let glow = [255.0, 110.0, 30.0];
+            std::array::from_fn(|i| {
+                let base = f32::from(c[i]) * (1.0 - k) + char_[i] * k;
+                (base * (1.0 - flicker) + glow[i] * flicker)
+                    .round()
+                    .clamp(0.0, 255.0) as u8
+            })
+        } else if self.mind.enraged {
             let c = self.settings.color.rgb();
             let red = [215u8, 25, 20];
             std::array::from_fn(|i| ((u16::from(c[i]) * 2 + u16::from(red[i]) * 3) / 5) as u8)
         } else {
             self.settings.color.rgb()
         };
-        self.draw.figure(&segments, rgb);
+        // Crumbled to ash: no figure, no hat.
+        if !self.crumbled {
+            self.draw.figure(&segments, rgb);
+        }
         // Its hat, once earned.
         // STICKMAN_DEBUG_HAT=Crown (etc.) wears one regardless (for screenshots).
         let forced = std::env::var("STICKMAN_DEBUG_HAT").ok().and_then(|n| {
@@ -3243,7 +3571,7 @@ impl Scene {
                 .find(|h| format!("{h:?}").eq_ignore_ascii_case(n.trim()))
         });
         let hat = forced.unwrap_or(self.settings.hat);
-        if forced.is_some() || hat.unlocked(&self.stats) {
+        if !self.crumbled && (forced.is_some() || hat.unlocked(&self.stats)) {
             let h = segments[stickman::stickman::HEAD];
             let up = (V2::from(h.end) - V2::from(h.start)).normalize_or(v2(0.0, -1.0));
             hat.draw(
@@ -3299,6 +3627,7 @@ impl Scene {
         self.particles.draw(&mut self.draw);
         self.health_bar();
         self.draw_boss();
+        self.draw_war();
         let rival_bar = self.rival.as_ref().map(|r| {
             (
                 r.agent.head(),
@@ -3385,6 +3714,26 @@ impl Scene {
                 alpha: 0.9,
             });
         }
+    }
+
+    /// The cursor's health under the pointer for a moment after each blow.
+    fn draw_war(&mut self) {
+        let Some(t) = self.war_hit.filter(|_| self.boss.is_none()) else {
+            return;
+        };
+        let age = t.elapsed().as_secs_f32();
+        if age > 2.5 {
+            self.war_hit = None;
+            return;
+        }
+        let alpha = (2.5 - age).min(1.0);
+        let c = self.cursor.pos;
+        Self::bar(
+            &mut self.draw,
+            c + v2(0.0, 62.0),
+            self.mind.war.fraction(),
+            alpha,
+        );
     }
 
     /// The boss banner and the cursor's health, at the top of the figure's
@@ -3781,6 +4130,13 @@ impl App {
             boss: None,
             boss_banner: None,
             next_boss: now + Duration::from_secs(600),
+            retreating: false,
+            last_initiative: now,
+            next_initiative_check: now + Duration::from_secs(5),
+            war_clock: now,
+            war_hit: None,
+            incinerating: None,
+            crumbled: false,
             rival_speech: Speech::new(seed ^ 0xBEEF),
             rival_click: false,
             next_rival: now + RIVAL_FIRST,
@@ -4110,6 +4466,8 @@ mod tests {
             can_throw_window: false,
             weapon_available: false,
             dread: stickman::agent::Dread::None,
+            tactic: stickman::agent::Tactic::Any,
+            retreat: false,
         };
         let count = |hold: bool| {
             let mut a = Agent::new(900.0, ground, FIGURE_SCALE, 11);

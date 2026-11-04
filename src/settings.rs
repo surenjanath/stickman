@@ -389,6 +389,8 @@ pub enum Command {
     ReflectNow,
     /// Write today's diary entry now.
     WriteDiary,
+    /// Copy its latest diary entry to the clipboard, ready to share.
+    CopyDiary,
     /// Forget everything it remembers and feels.
     ResetMind,
     /// Spell out a message now.
@@ -449,6 +451,7 @@ impl Command {
             Command::ToggleSleepyNights => 328,
             Command::ReflectNow => 408,
             Command::WriteDiary => 409,
+            Command::CopyDiary => 412,
             Command::ResetMind => 406,
             Command::WriteNote => 407,
             Command::SetLanguage(l) => {
@@ -516,6 +519,7 @@ impl Command {
             328 => Command::ToggleSleepyNights,
             408 => Command::ReflectNow,
             409 => Command::WriteDiary,
+            412 => Command::CopyDiary,
             406 => Command::ResetMind,
             407 => Command::WriteNote,
             700..=702 => Command::SetLanguage(Language::ALL[(tag - 700) as usize]),
@@ -730,6 +734,7 @@ mod tests {
             Command::ToggleSleepyNights,
             Command::ReflectNow,
             Command::WriteDiary,
+            Command::CopyDiary,
             Command::ResetMind,
             Command::WriteNote,
             Command::ToggleVisible,

@@ -36,6 +36,7 @@ const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 const HOT: [f32; 4] = [1.0, 0.86, 0.35, 1.0];
 const FIRE: [f32; 4] = [1.0, 0.45, 0.12, 1.0];
 const SMOKE: [f32; 4] = [0.55, 0.55, 0.58, 0.8];
+const EMBER: [f32; 4] = [1.0, 0.25, 0.05, 1.0];
 const STAR: [f32; 4] = [1.0, 0.85, 0.2, 1.0];
 const LOVE: [f32; 4] = [0.95, 0.25, 0.4, 1.0];
 
@@ -132,6 +133,110 @@ impl Particles {
                 shape: Shape::Disc,
                 gravity: -40.0,
                 drag: 1.5,
+            });
+        }
+    }
+
+    /// Flames licking up from `points` (a burning body). Call every frame;
+    /// `heat` (0..1) scales how many.
+    pub fn flames(&mut self, points: &[V2], heat: f32) {
+        for &at in points {
+            if self.rand(0.0, 1.0) > 0.06 + 0.22 * heat {
+                continue;
+            }
+            let pos = at + v2(self.rand(-5.0, 5.0), self.rand(-5.0, 5.0));
+            let roll = self.rand(0.0, 1.0);
+            let mut color = if roll < 0.35 {
+                HOT
+            } else if roll < 0.85 {
+                FIRE
+            } else {
+                EMBER
+            };
+            color[3] = 0.8;
+            let vel = v2(self.rand(-20.0, 20.0), self.rand(-160.0, -80.0));
+            let life = self.rand(0.2, 0.45);
+            let size0 = self.rand(3.0, 6.5) * (0.6 + 0.7 * heat);
+            self.push(Particle {
+                pos,
+                vel,
+                age: 0.0,
+                life,
+                size0,
+                size1: 0.0,
+                color,
+                shape: Shape::Disc,
+                gravity: -220.0,
+                drag: 1.2,
+            });
+            if self.rand(0.0, 1.0) < 0.08 {
+                let vel = v2(self.rand(-15.0, 15.0), self.rand(-60.0, -30.0));
+                let life = self.rand(0.8, 1.4);
+                self.push(Particle {
+                    pos: at,
+                    vel,
+                    age: 0.0,
+                    life,
+                    size0: 6.0,
+                    size1: 20.0,
+                    color: SMOKE,
+                    shape: Shape::Disc,
+                    gravity: -30.0,
+                    drag: 1.0,
+                });
+            }
+        }
+    }
+
+    /// A burnt body crumbling: ash falls from `points`, embers drift up, smoke.
+    pub fn ash(&mut self, points: &[V2]) {
+        for &at in points {
+            for _ in 0..3 {
+                let grey = self.rand(0.12, 0.35);
+                let pos = at + v2(self.rand(-4.0, 4.0), self.rand(-4.0, 4.0));
+                let vel = v2(self.rand(-40.0, 40.0), self.rand(-30.0, 20.0));
+                let life = self.rand(0.9, 1.6);
+                let size0 = self.rand(3.0, 6.0);
+                self.push(Particle {
+                    pos,
+                    vel,
+                    age: 0.0,
+                    life,
+                    size0,
+                    size1: 2.0,
+                    color: [grey, grey * 0.95, grey * 0.9, 1.0],
+                    shape: Shape::Disc,
+                    gravity: 520.0,
+                    drag: 1.6,
+                });
+            }
+            let vel = v2(self.rand(-20.0, 20.0), self.rand(-90.0, -40.0));
+            let life = self.rand(1.0, 1.8);
+            self.push(Particle {
+                pos: at,
+                vel,
+                age: 0.0,
+                life,
+                size0: 2.5,
+                size1: 0.5,
+                color: EMBER,
+                shape: Shape::Disc,
+                gravity: -40.0,
+                drag: 0.8,
+            });
+            let vel = v2(self.rand(-20.0, 20.0), self.rand(-50.0, -20.0));
+            let life = self.rand(1.2, 2.0);
+            self.push(Particle {
+                pos: at,
+                vel,
+                age: 0.0,
+                life,
+                size0: 10.0,
+                size1: 30.0,
+                color: SMOKE,
+                shape: Shape::Disc,
+                gravity: -25.0,
+                drag: 0.9,
             });
         }
     }
@@ -387,6 +492,27 @@ mod tests {
             p.update(1.0 / 60.0);
         }
         assert!(p.is_empty(), "{} particles still alive after 2 s", p.len());
+    }
+
+    #[test]
+    fn flames_rise_and_ash_falls() {
+        let body = [v2(0.0, 0.0), v2(0.0, 40.0), v2(10.0, 80.0)];
+        let mut p = Particles::new(3);
+        for _ in 0..40 {
+            p.flames(&body, 1.0);
+        }
+        assert!(p.len() > 10);
+        p.update(0.2);
+        let mean_y: f32 = p.list.iter().map(|q| q.pos.y).sum::<f32>() / p.len() as f32;
+        assert!(mean_y < 30.0, "flames should rise: {mean_y}");
+        let mut a = Particles::new(4);
+        a.ash(&body);
+        a.update(0.5);
+        assert!(a.list.iter().any(|q| q.pos.y > 100.0), "no ash fell");
+        for _ in 0..150 {
+            a.update(1.0 / 60.0);
+        }
+        assert!(a.is_empty(), "ash should settle and fade");
     }
 
     #[test]

@@ -448,6 +448,7 @@ impl SettingsWindow {
                 Self::button("Reflect Now", Command::ReflectNow),
                 Self::button("Leave Me a Note", Command::WriteNote),
                 Self::button("Write Diary Now", Command::WriteDiary),
+                Self::button("Copy Latest Entry", Command::CopyDiary),
             ],
             8.0,
         );
