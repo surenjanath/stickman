@@ -189,6 +189,9 @@ pub struct SettingsWindow {
     about_model: *mut Object,
     tabs: *mut Object,
     shown: Option<Settings>,
+    /// Permissions card: Accessibility, Screen Recording, local AI status.
+    permissions: Vec<*mut Object>,
+    permissions_shown: Vec<String>,
     centered: bool,
 }
 
@@ -213,6 +216,8 @@ impl SettingsWindow {
             about_model: std::ptr::null_mut(),
             tabs: std::ptr::null_mut(),
             shown: None,
+            permissions: Vec::new(),
+            permissions_shown: Vec::new(),
             centered: false,
         };
         // SAFETY: main thread (module contract). All selectors are documented
@@ -822,12 +827,35 @@ impl SettingsWindow {
             ],
             8.0,
         );
+        let status: Vec<*mut Object> = (0..3).map(|_| Self::wrapping("Checking…", 400.0)).collect();
+        self.permissions = status.clone();
+        let grants = Self::hstack(
+            &[
+                Self::button("Accessibility…", Command::OpenAccessibilitySettings),
+                Self::button("Screen Recording…", Command::OpenScreenRecordingSettings),
+                Self::button("Restart Stickman", Command::Relaunch),
+            ],
+            8.0,
+        );
+        let ollama = Self::button("Get Ollama", Command::GetOllama);
         Self::page(vec![
+            Row::Section("Permissions"),
+            Row::Field("Accessibility:", status[0]),
+            Row::Field("Screen Recording:", status[1]),
+            Row::Under(grants),
+            Row::Under(Self::hint(
+                "macOS asks for these the first time. Turn Stickman on in System Settings → \
+                 Privacy & Security under each one (if you run it from Terminal, turn on \
+                 Terminal instead). Accessibility works straight away; Screen Recording \
+                 needs a restart.",
+            )),
+            Row::Field("Local AI:", status[2]),
+            Row::Under(ollama),
             Row::Section("Your cursor"),
             Row::Under(push),
             Row::Under(cling),
-            Row::Under(dodges),
             Row::Under(squish),
+            Row::Under(dodges),
             Row::Under(Self::hint(
                 "After the mouse has been still for a moment, your pointer sidesteps its \
                  punches, slips out of its grip and backs away when it charges. Touch the \
@@ -957,6 +985,20 @@ impl SettingsWindow {
     }
 
     // --- State ----------------------------------------------------------------
+
+    /// Show the permission and local-AI status lines (cheap when unchanged).
+    pub fn set_permissions(&mut self, lines: &[String; 3]) {
+        if self.permissions_shown.as_slice() == lines.as_slice() || self.permissions.len() != 3 {
+            return;
+        }
+        // SAFETY: main thread; the labels live as long as the window.
+        unsafe {
+            for (l, text) in self.permissions.iter().zip(lines) {
+                let _: () = msg_send![*l, setStringValue: ns_string(text)];
+            }
+        }
+        self.permissions_shown = lines.to_vec();
+    }
 
     /// Show which local model it thinks with (About tab).
     pub fn set_model(&mut self, text: &str) {

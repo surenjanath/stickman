@@ -209,7 +209,7 @@ tabs with headed sections:
 | Mind | Live: its mood and level; bars for resentment, fear, grudge, affection, pride, health and experience (yellow, then red when they get bad); what it's thinking right now, its scheme, beliefs and next note; the app it dreads; the odds of each fight plan; Reflect Now, Leave Me a Note, Wipe Its Memory, Forgive & Reset Level. |
 | Diary | Its diary (Write Diary Now, Copy Latest Entry), a log of its thoughts and memories, achievements earned and what to go for next. |
 | Personality | Name, colour, size, hat; temper and chattiness sliders, language, bleeping, losing its temper; behaviour (Auto or one pinned mood), quiet during video calls, sleepy at night, earn moves by levelling up. |
-| Abilities | Your cursor (pushes, grabs, dodging back while you leave the mouse alone), your windows (shakes, shoves, throws), your screen (walking on text, ripping words and how long they stay, Dock icons, scrollbar swords, piles), powers and events (super powers, jail-break intro, rival visits, minions, boss fights, with Start a Boss Fight and Call the Minions buttons). |
+| Abilities | Permissions (what's allowed, with buttons to System Settings, Restart Stickman and Get Ollama); your cursor (pushes, grabs, dodging back while you leave the mouse alone), your windows (shakes, shoves, throws), your screen (walking on text, ripping words and how long they stay, Dock icons, scrollbar swords, piles), powers and events (super powers, jail-break intro, rival visits, minions, boss fights, with Start a Boss Fight and Call the Minions buttons). |
 | Fun & Sound | Naps, dancing, dancing to music, doodles, sitting on edges, speech bubbles, sound effects and their volume, power saving. |
 | About | Version, which model it thinks with, privacy, links (website, report a bug, show its files), credits and licence. |
 
@@ -240,6 +240,28 @@ isn't signed with an Apple Developer ID, so the first launch is blocked: click
 **Open Anyway** in System Settings → Privacy & Security, or run
 `xattr -dr com.apple.quarantine /Applications/Stickman.app`.
 
+### First launch on a new Mac
+
+macOS keeps two of Stickman's powers switched off until you allow them. On
+the first launch, Settings opens on **Abilities → Permissions**, which shows
+what's on and has buttons straight to the right place in System Settings:
+
+1. **Accessibility** (System Settings → Privacy & Security → Accessibility):
+   turn on **Stickman**. This lets it shake, slide and throw your windows and
+   rip Dock icons and scrollbars off. Works straight away.
+2. **Screen Recording** (System Settings → Privacy & Security → Screen &
+   System Audio Recording): turn on **Stickman**, then click **Restart
+   Stickman** in the Permissions card. This lets it walk on text, rip words
+   off the screen, write notes and saw toolbars. The screen is only read for
+   text boxes, on your Mac; nothing is saved or sent.
+3. **Local AI (optional):** install [Ollama](https://ollama.com/download) and
+   run `ollama pull llama3.2:1b`. Without it, simple built-in rules decide
+   what it does.
+
+Running from source with `cargo run`? macOS asks on behalf of your terminal,
+so turn on **Terminal** (or iTerm, etc.) in those two lists instead.
+Everything works without these permissions, just with fewer tricks.
+
 Releases are built by GitHub Actions (`.github/workflows/release.yml`) whenever a
 `v*` tag is pushed. To build the app yourself: `sh packaging/bundle.sh 0.1.0`
 (writes `dist/Stickman.app` and a zip).
@@ -251,11 +273,14 @@ Releases are built by GitHub Actions (`.github/workflows/release.yml`) whenever 
 - Optional: [Ollama](https://ollama.com) running locally with a small model, e.g.
   `ollama pull llama3.2:1b`. Without it, the built-in director is used.
 - Permissions, granted to the app or terminal that launches it (System Settings →
-  Privacy & Security):
-  - **Accessibility:** stomps shake windows.
-  - **Screen Recording:** OCR, so the figure can walk on text.
+  Privacy & Security; see [First launch on a new Mac](#first-launch-on-a-new-mac)):
+  - **Accessibility:** shaking, sliding and throwing windows; Dock icons and
+    scrollbar swords.
+  - **Screen Recording:** reading text (OCR), so the figure can walk on text,
+    rip words, write notes and saw toolbars.
 
-  Both are optional; the figure works without them. macOS asks on first launch.
+  Both are optional; the figure works without them. macOS asks on first launch,
+  and Settings → Abilities → Permissions shows what's on.
 
   **Why Screen Recording, and what happens to it:** the figure needs to know where
   the lines of text are in your active window, so it can stand on them and rip
@@ -284,6 +309,7 @@ launching terminal.
 | `STICKMAN_OLLAMA_URL` | Ollama URL (default `http://localhost:11434`). |
 | `STICKMAN_DIRECTOR_INTERVAL_S` | Seconds between the built-in rules' decisions between model calls (default 4). |
 | `STICKMAN_NO_CURSOR_PUSH=1` | Punches don't move your pointer. |
+| `STICKMAN_NO_DODGE=1` · `STICKMAN_NO_CLING=1` · `STICKMAN_NO_TOOLS=1` | Your cursor doesn't dodge; it doesn't hang on to your cursor; no tools or saw. |
 | `STICKMAN_NO_WINDOW_SHAKE=1` | Nothing moves your windows (no shakes, shoves or throws). |
 | `STICKMAN_NO_OCR=1` | Don't read screen text (no walking on text). |
 | `STICKMAN_NO_PROMPTS=1` | Never show macOS permission dialogs. |
@@ -298,6 +324,7 @@ launching terminal.
 | `STICKMAN_DEBUG_OPEN_SETTINGS=1` | Debug: open the Settings window at launch (or `=Mind`, `=Abilities`, … for that tab). |
 | `STICKMAN_DEBUG_HAT=Crown` | Debug: wear that hat even if it's locked (`Bandana`, `TopHat`, `Pirate`, `Party`, `Wizard`, `Horns`, `Viking`). |
 | `STICKMAN_DEBUG_GRAB=1` | Debug: in combat, always grab a slow cursor in reach (instead of 30% of the time). |
+| `STICKMAN_DEBUG_TACTIC=words\|fists\|grab\|powers\|blade` | Debug: always fight with that plan. |
 | `RUST_LOG=debug` | Verbose logs: director decisions, OCR, perf stats, click-through toggles. |
 
 ## Testing

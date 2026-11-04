@@ -687,6 +687,11 @@ fn test_grabs_and_throws_the_cursor() {
         ("STICKMAN_MODE", "COMBAT"),
         ("STICKMAN_NO_CURSOR_PUSH", "0"),
         ("STICKMAN_NO_OCR", "1"),
+        // Just the snatch and throw: the parked cursor mustn't dodge, and the
+        // figure mustn't hang on to it or reach for a tool instead.
+        ("STICKMAN_NO_DODGE", "1"),
+        ("STICKMAN_NO_CLING", "1"),
+        ("STICKMAN_NO_TOOLS", "1"),
         ("STICKMAN_DEBUG_GRAB", "1"),
         ("RUST_LOG", "info,stickman=debug"),
     ]);
@@ -912,6 +917,10 @@ fn test_menu_bar_icon(o: &Overlay) {
 fn test_rips_words_and_throws_them() {
     let o = Overlay::spawn(&[
         ("STICKMAN_MODE", "COMBAT"),
+        // The words plan, and nothing that would keep it busy instead.
+        ("STICKMAN_DEBUG_TACTIC", "words"),
+        ("STICKMAN_NO_TOOLS", "1"),
+        ("STICKMAN_NO_CLING", "1"),
         ("RUST_LOG", "info,stickman=debug"),
     ]);
     if field(&o.log_line, "ocr") != "true" {

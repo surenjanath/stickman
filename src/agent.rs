@@ -2315,8 +2315,15 @@ impl Agent {
         if self.hit_landed || self.t < window.0 || self.t > window.1 {
             return;
         }
-        let tip = self.segments()[bone].end;
-        if (v2(tip[0], tip[1]) - s.cursor).length() < radius {
+        // Anywhere along the striking forearm or shin counts (a fist that
+        // swings through the cursor hits it, not just one that ends on it).
+        let b = self.segments()[bone];
+        let (p0, p1) = (v2(b.start[0], b.start[1]), v2(b.end[0], b.end[1]));
+        let along = p1 - p0;
+        let k = ((s.cursor - p0).dot(along) / along.length_squared().max(1e-3)).clamp(0.0, 1.0);
+        let near = (p0 + along * k - s.cursor).length();
+        let tip = (p1 - s.cursor).length();
+        if tip < radius || near < radius * 0.6 {
             self.hit_landed = true;
             let dir = v2(aim.cos() * self.facing, aim.sin()).normalize_or_zero();
             events.push(Event::StruckCursor { at: s.cursor, dir });
@@ -2513,7 +2520,25 @@ impl Agent {
                         return;
                     }
                 }
-                if (s.cursor - self.shoulder()).length() < self.reach() + 25.0 {
+                let crowded = (s.cursor - self.shoulder()).length() < self.reach() * 0.6
+                    && dx.abs() < self.reach() * 0.6;
+                if crowded && self.weapon.is_none() && !self.holding_cursor {
+                    // Too close to swing at (its fists would go past): step
+                    // back to arm's length first, then it turns and hits.
+                    if !matches!(self.action, Action::Walk { .. }) {
+                        let side = if dx.abs() > 1.0 {
+                            dx.signum()
+                        } else {
+                            self.facing
+                        };
+                        let to = clamp_between(
+                            s.cursor.x - side * self.reach() * 0.95,
+                            s.min_x,
+                            s.max_x,
+                        );
+                        self.walk_to(to, false);
+                    }
+                } else if (s.cursor - self.shoulder()).length() < self.reach() + 25.0 {
                     if self.attack_cooldown <= 0.0 {
                         if self.wants_to_snatch(s) {
                             self.snatch(s.cursor);
@@ -3334,7 +3359,9 @@ mod tests {
                 .iter()
                 .find(|e| matches!(e, Event::ThrewCursor { .. }))
             {
+                // The real pointer is flying across the screen now.
                 threw = Some((*from, *vel));
+                break;
             }
         }
         let (from, vel) = threw.expect("held the cursor but never threw it");
@@ -3559,6 +3586,29 @@ mod tests {
         run(&mut a, &w, &s, 14.0, &mut ev);
         assert!(ev.iter().any(|e| matches!(e, Event::LetGo { .. })));
         assert!(!a.clinging());
+    }
+
+    #[test]
+    fn a_cursor_too_close_to_swing_at_makes_it_step_back_then_hit() {
+        let w = world(vec![]);
+        let mut a = agent();
+        let mut s = senses(Mode::Combat);
+        // Right in front of its shoulder: arms would reach past it.
+        s.cursor = a.shoulder() + v2(a.facing * 8.0, 4.0);
+        let start = a.pos.x;
+        let mut ev = vec![];
+        let mut stepped = 0.0f32;
+        for _ in 0..(6.0 / FIXED_DT) as usize {
+            a.update(&s, &w, &mut ev);
+            stepped = stepped.max((a.pos.x - start).abs());
+        }
+        assert!(stepped > 15.0, "never stepped back");
+        assert!(
+            ev.iter().any(|e| matches!(e, Event::StruckCursor { .. })),
+            "kept swinging at air: {:?} at {:?}",
+            a.action,
+            a.pos
+        );
     }
 
     #[test]

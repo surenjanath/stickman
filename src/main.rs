@@ -16,6 +16,9 @@
 //! - `STICKMAN_NO_CURSOR_PUSH=1`, `STICKMAN_NO_WINDOW_SHAKE=1` (also no window
 //!   shoves or throws), `STICKMAN_NO_OCR=1`: disable the effects that touch the
 //!   user's cursor, windows or screen contents.
+//! - `STICKMAN_NO_DODGE=1`, `STICKMAN_NO_CLING=1`, `STICKMAN_NO_TOOLS=1`: the
+//!   cursor doesn't dodge; the figure doesn't hang on to it; no tools or saw.
+//! - `STICKMAN_DEBUG_TACTIC=words|fists|grab|powers|blade`: a fixed fight plan.
 //! - `STICKMAN_NO_PROMPTS=1`: don't show macOS permission dialogs.
 //! - `STICKMAN_NO_SOUND=1`: no sound effects.
 //! - `STICKMAN_NO_INTRO=1`: skip the jail-break intro.
@@ -87,6 +90,17 @@ const OCR_INTERVAL: Duration = Duration::from_secs(12);
 const OCR_SETTLE: Duration = Duration::from_secs(1);
 /// How far a punch shoves the cursor, points.
 const CURSOR_PUSH: f32 = 70.0;
+
+/// `STICKMAN_DEBUG_TACTIC=words|fists|grab|powers|blade`: always that plan.
+fn debug_tactic() -> Option<Tactic> {
+    static T: std::sync::OnceLock<Option<Tactic>> = std::sync::OnceLock::new();
+    *T.get_or_init(|| {
+        let want = std::env::var("STICKMAN_DEBUG_TACTIC").ok()?;
+        Tactic::ALL
+            .into_iter()
+            .find(|t| t.name().eq_ignore_ascii_case(want.trim()))
+    })
+}
 
 fn env_flag(name: &str) -> bool {
     std::env::var(name).is_ok_and(|v| {
@@ -403,6 +417,13 @@ struct Scene {
     ax_tx: Sender<macos::AxQuery>,
     ax_rx: Receiver<macos::AxAnswer>,
     dock_pid: Option<i64>,
+    /// Permissions are re-checked this often (Accessibility can be granted
+    /// while it runs; Screen Recording takes effect after a restart).
+    perms_checked: Instant,
+    /// Screen Recording granted since launch (a restart puts it to use).
+    screen_recording_now: bool,
+    /// No settings file yet: the first launch on this Mac.
+    first_run: bool,
     dock_polled: Instant,
     /// The bottom Dock's extent, from its icons (a place to hide).
     dock_span: Option<stickman::agent::DockSpan>,
@@ -2695,6 +2716,14 @@ impl Scene {
                 Command::OpenScreenRecordingSettings => {
                     macos::open_url("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture");
                 }
+                Command::GetOllama => {
+                    macos::open_url("https://ollama.com/download");
+                }
+                Command::Relaunch => {
+                    if !self.relaunch() {
+                        return false;
+                    }
+                }
                 Command::OpenWebsite => {
                     macos::open_url(env!("CARGO_PKG_REPOSITORY"));
                 }
@@ -2976,6 +3005,99 @@ impl Scene {
             Priority::Quip,
         );
         self.shown = None;
+    }
+
+    /// Re-check permissions every couple of seconds: Accessibility takes effect
+    /// at once; Screen Recording is noted (it needs a restart).
+    fn check_permissions(&mut self) {
+        if self.perms_checked.elapsed() < Duration::from_secs(2) {
+            return;
+        }
+        self.perms_checked = Instant::now();
+        let ax = macos::accessibility_trusted(false);
+        if ax != self.accessibility {
+            log::info!(
+                "permissions: Accessibility {}",
+                if ax { "granted" } else { "revoked" }
+            );
+            self.accessibility = ax;
+            if ax && self.dock_pid.is_none() {
+                self.dock_pid = macos::dock_pid();
+            }
+        }
+        let sr = ocr::screen_capture_allowed();
+        if sr != self.screen_recording_now {
+            log::info!(
+                "permissions: Screen Recording {}",
+                if sr { "granted" } else { "revoked" }
+            );
+            self.screen_recording_now = sr;
+        }
+    }
+
+    /// The Permissions card's lines: Accessibility, Screen Recording, local AI.
+    fn permission_lines(&self) -> [String; 3] {
+        let ax = if self.accessibility {
+            "✅ Allowed.".to_string()
+        } else {
+            "⚠️ Off. Needed to shake, slide and throw your windows, and to rip Dock \
+             icons and scrollbars off."
+                .to_string()
+        };
+        let sr = match (self.ocr_tx.is_some(), self.screen_recording_now) {
+            (true, _) => "✅ Allowed.".to_string(),
+            (false, true) => "Allowed: restart Stickman to start using it.".to_string(),
+            (false, false) => "⚠️ Off. Needed to walk on text, rip words off the screen, \
+                               write notes and saw toolbars."
+                .to_string(),
+        };
+        let ai = match self.director_online {
+            Some(true) => format!("✅ Ollama is running ({}).", self.director_model),
+            Some(false) => format!(
+                "⚠️ Ollama isn't running, so it uses simple built-in rules. Install it, \
+                 then run: ollama pull {}",
+                self.director_model
+            ),
+            None if self.settings.behaviour != Behaviour::Auto => {
+                "Paused: its behaviour is pinned (Personality → Behaviour).".to_string()
+            }
+            None => "Checking…".to_string(),
+        };
+        [ax, sr, ai]
+    }
+
+    /// Start a fresh copy of the app, then quit (Screen Recording is only
+    /// picked up at launch).
+    fn relaunch(&mut self) -> bool {
+        self.save_stats();
+        self.save_mind();
+        let Ok(exe) = std::env::current_exe() else {
+            return true;
+        };
+        // Inside Stickman.app: reopen the bundle, so macOS knows it's the app.
+        let bundle = exe
+            .ancestors()
+            .find(|p| p.extension().is_some_and(|e| e == "app"))
+            .map(|p| p.to_path_buf());
+        let started = match bundle {
+            Some(app) => std::process::Command::new("open")
+                .arg("-n")
+                .arg(app)
+                .spawn(),
+            None => std::process::Command::new(&exe)
+                .args(std::env::args_os().skip(1))
+                .spawn(),
+        };
+        match started {
+            Ok(_) => {
+                log::info!("relaunching");
+                false
+            }
+            Err(e) => {
+                log::warn!("relaunch failed: {e}");
+                true
+            }
+        }
     }
 
     /// Say one of `lines` (picked at random), if speech is on.
@@ -3573,8 +3695,12 @@ impl Scene {
             .is_some_and(|w| w.is_visible())
             && self.ticks % 15 == 0)
             .then(|| self.mind_view());
+        let perms = view.is_some().then(|| self.permission_lines());
         if let Some(w) = &mut self.settings_window {
             w.sync(&self.settings);
+            if let Some(p) = &perms {
+                w.set_permissions(p);
+            }
             if let Some(view) = &view {
                 w.set_mind(view);
                 w.set_model(&format!(
@@ -3620,6 +3746,18 @@ impl Scene {
             self.menubar_logged = true;
             if env_flag("STICKMAN_DEBUG_OPEN_MENU") {
                 self.menubar.open();
+            }
+            // First launch on this Mac, with permissions missing: show where
+            // to turn them on.
+            if self.first_run
+                && (!self.accessibility || !self.screen_recording)
+                && !env_flag("STICKMAN_NO_PROMPTS")
+                && !env_flag("STICKMAN_DEBUG_OPEN_SETTINGS")
+            {
+                self.open_settings();
+                if let Some(w) = &self.settings_window {
+                    w.select_tab("Abilities");
+                }
             }
             if env_flag("STICKMAN_DEBUG_OPEN_SETTINGS") {
                 self.open_settings();
@@ -3668,6 +3806,7 @@ impl Scene {
             return true;
         }
         self.cursor.sample();
+        self.check_permissions();
         self.check_escape();
         if self.quit_at.is_some_and(|t| Instant::now() >= t) {
             // It had its last stand on the pointer: now it burns.
@@ -3916,7 +4055,12 @@ impl Scene {
                 dread,
                 dread_level,
                 dock: self.dock(),
-                tactic: self.mind.war.tactic(),
+                // STICKMAN_DEBUG_GRAB / STICKMAN_DEBUG_TACTIC: a fixed plan (tests).
+                tactic: if self.agent.snatch_chance >= 1.0 {
+                    Tactic::Grab
+                } else {
+                    debug_tactic().unwrap_or_else(|| self.mind.war.tactic())
+                },
                 retreat: self.retreating,
             };
             let dueling = self.rival.as_ref().is_some_and(|r| r.fighting());
@@ -4597,6 +4741,7 @@ impl App {
         // Settings: saved file, then environment overrides (not saved unless the
         // user changes something in the menu).
         let settings_path = Settings::default_path();
+        let first_run = settings_path.as_deref().is_some_and(|p| !p.exists());
         let mut settings = settings_path
             .as_deref()
             .map(Settings::load)
@@ -4620,6 +4765,16 @@ impl App {
         }
         if env_flag("STICKMAN_NO_OCR") {
             settings.walk_on_text = false;
+        }
+        if env_flag("STICKMAN_NO_DODGE") {
+            settings.cursor_dodges = false;
+        }
+        if env_flag("STICKMAN_NO_CLING") {
+            settings.cursor_cling = false;
+        }
+        if env_flag("STICKMAN_NO_TOOLS") {
+            settings.tools = false;
+            settings.saws = false;
         }
         if env_flag("STICKMAN_NO_SOUND") {
             settings.sound = false;
@@ -4849,6 +5004,9 @@ impl App {
             ax_tx,
             ax_rx,
             dock_pid: if ax { macos::dock_pid() } else { None },
+            perms_checked: now,
+            screen_recording_now: ocr_allowed,
+            first_run,
             dock_polled: now - Duration::from_secs(10),
             dock_span: None,
             flight: None,

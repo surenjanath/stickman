@@ -462,6 +462,10 @@ pub enum Command {
     ReportBug,
     /// About: reveal the settings, mind and diary in Finder.
     ShowDataFolder,
+    /// Permissions: download Ollama (the local AI).
+    GetOllama,
+    /// Permissions: quit and start again (Screen Recording needs a relaunch).
+    Relaunch,
     Quit,
 }
 
@@ -546,6 +550,8 @@ impl Command {
             Command::OpenWebsite => 502,
             Command::ReportBug => 503,
             Command::ShowDataFolder => 504,
+            Command::GetOllama => 505,
+            Command::Relaunch => 506,
             Command::Quit => 900,
         }
     }
@@ -612,6 +618,8 @@ impl Command {
             502 => Command::OpenWebsite,
             503 => Command::ReportBug,
             504 => Command::ShowDataFolder,
+            505 => Command::GetOllama,
+            506 => Command::Relaunch,
             900 => Command::Quit,
             _ => return None,
         })
@@ -844,6 +852,8 @@ mod tests {
             Command::OpenWebsite,
             Command::ReportBug,
             Command::ShowDataFolder,
+            Command::GetOllama,
+            Command::Relaunch,
             Command::Quit,
         ];
         all.extend(Behaviour::ALL.map(Command::SetBehaviour));
