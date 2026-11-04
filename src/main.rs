@@ -2967,6 +2967,8 @@ impl Scene {
             scheme: m.scheme.clone(),
             beliefs: m.beliefs.join(" · "),
             note: m.note.clone(),
+            dread: m.dread_status(),
+            plans: m.war.odds_text(&self.tactics()),
             log: log.join("\n"),
             diary: m
                 .diary

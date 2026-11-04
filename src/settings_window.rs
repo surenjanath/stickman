@@ -1,5 +1,6 @@
-//! The Settings window: every option in one place, in four tabs (Mind,
-//! Personality, Abilities, Fun & Sound), built from native AppKit controls.
+//! The Settings window: every option in one place, in six tabs (Mind, Diary,
+//! Personality, Abilities, Fun & Sound, About), built from native AppKit
+//! controls.
 //! The Mind tab is live: level bars for its feelings (yellow, then red when
 //! they get bad), what it's thinking, its scheme, beliefs and memory log.
 //!
@@ -55,16 +56,40 @@ unsafe impl Encode for NSEdgeInsets {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct NSRange {
-    location: usize,
-    length: usize,
+struct NSSize {
+    w: f64,
+    h: f64,
 }
-// SAFETY: matches NSRange (two NSUIntegers).
-unsafe impl Encode for NSRange {
+// SAFETY: matches CGSize (two CGFloats).
+unsafe impl Encode for NSSize {
     fn encode() -> Encoding {
-        // SAFETY: a valid Objective-C type encoding for NSRange.
-        unsafe { Encoding::from_str("{_NSRange=QQ}") }
+        // SAFETY: a valid Objective-C type encoding for CGSize.
+        unsafe { Encoding::from_str("{CGSize=dd}") }
     }
+}
+
+/// An NSView subclass that lays out top-down, so a scroll view's content
+/// starts at the top. Registered once.
+fn flipped_view_class() -> &'static objc::runtime::Class {
+    static REGISTER: std::sync::Once = std::sync::Once::new();
+    REGISTER.call_once(|| {
+        if let Some(mut decl) = objc::declare::ClassDecl::new("StickmanFlippedView", class!(NSView))
+        {
+            extern "C" fn is_flipped(_: &Object, _: objc::runtime::Sel) -> objc::runtime::BOOL {
+                YES
+            }
+            // SAFETY: matches `- (BOOL)isFlipped`.
+            unsafe {
+                decl.add_method(
+                    sel!(isFlipped),
+                    is_flipped as extern "C" fn(&Object, objc::runtime::Sel) -> objc::runtime::BOOL,
+                );
+            }
+            decl.register();
+        }
+    });
+    // Registered above (or by an earlier call); NSView as a last resort.
+    objc::runtime::Class::get("StickmanFlippedView").unwrap_or(class!(NSView))
 }
 
 /// Autoreleased NSString.
@@ -128,6 +153,10 @@ pub struct MindView {
     pub scheme: String,
     pub beliefs: String,
     pub note: String,
+    /// The app it dreads and what that makes it do.
+    pub dread: String,
+    /// The odds of each fight plan ("words 46% · blade 30% · …").
+    pub plans: String,
     /// Recent thoughts and memories, newest first.
     pub log: String,
     /// Diary entries, newest first.
@@ -146,7 +175,7 @@ pub struct SettingsWindow {
     headline: *mut Object,
     /// (level indicator, value label) per bar.
     bars: Vec<(*mut Object, *mut Object)>,
-    /// Thought, scheme, beliefs, note.
+    /// Thought, scheme, beliefs, note, dread, fight plans.
     mind_labels: Vec<*mut Object>,
     log: *mut Object,
     diary: *mut Object,
@@ -194,8 +223,8 @@ impl SettingsWindow {
             let window: *mut Object = msg_send![class!(NSWindow), alloc];
             // Titled | closable | miniaturizable; buffered backing.
             let window: *mut Object = msg_send![window,
-                initWithContentRect: NSRect { x: 0.0, y: 0.0, w: 640.0, h: 680.0 }
-                styleMask: 1usize | 2 | 4
+                initWithContentRect: NSRect { x: 0.0, y: 0.0, w: 680.0, h: 760.0 }
+                styleMask: 1usize | 2 | 4 | 8
                 backing: 2usize
                 defer: NO];
             let _: () = msg_send![window, setReleasedWhenClosed: NO];
@@ -206,12 +235,14 @@ impl SettingsWindow {
 
             let tabs: *mut Object = msg_send![class!(NSTabView), new];
             let mind = w.mind_tab();
+            let diary = w.diary_tab();
             let personality = w.personality_tab();
             let abilities = w.abilities_tab();
             let fun = w.fun_tab();
             let about = w.about_tab();
             for (label, view) in [
                 ("Mind", mind),
+                ("Diary", diary),
                 ("Personality", personality),
                 ("Abilities", abilities),
                 ("Fun & Sound", fun),
@@ -224,6 +255,9 @@ impl SettingsWindow {
                 let _: () = msg_send![tabs, addTabViewItem: item];
                 let _: () = msg_send![item, release];
             }
+            // No focus ring stuck around the selected tab.
+            let _: () = msg_send![tabs, setFocusRingType: 1usize];
+            let _: () = msg_send![window, setContentMinSize: NSSize { w: 660.0, h: 420.0 }];
             let _: () = msg_send![window, setContentView: tabs];
             w.tabs = tabs;
             let _: () = msg_send![tabs, release];
@@ -363,85 +397,182 @@ impl SettingsWindow {
         Self::hstack(&[l, value], 10.0)
     }
 
-    /// A tab's content: sections of labelled rows, top-aligned.
-    unsafe fn page(rows: Vec<Row>) -> *mut Object {
-        let empty = || -> *mut Object { msg_send![class!(NSGridCell), emptyContentView] };
-        let mut views = Vec::with_capacity(rows.len());
-        let mut sections = Vec::new();
-        for (i, row) in rows.iter().enumerate() {
-            views.push(match row {
-                Row::Section(title) => {
-                    let l = Self::label(title);
-                    Self::font(l, 13.0, true);
-                    sections.push(i);
-                    ns_array(&[l, empty()])
-                }
-                Row::Field(label, control) => ns_array(&[Self::label(label), *control]),
-                Row::Under(control) => ns_array(&[empty(), *control]),
-            });
+    /// A view's leading, trailing, top and bottom layout anchors.
+    unsafe fn edges(v: *mut Object) -> [*mut Object; 4] {
+        [
+            msg_send![v, leadingAnchor],
+            msg_send![v, trailingAnchor],
+            msg_send![v, topAnchor],
+            msg_send![v, bottomAnchor],
+        ]
+    }
+
+    /// Pin `view`'s edges to `to`'s, inset by `inset` points.
+    unsafe fn pin(view: *mut Object, to: *mut Object, inset: (f64, f64)) {
+        let _: () = msg_send![view, setTranslatesAutoresizingMaskIntoConstraints: NO];
+        let (h, v) = inset;
+        let insets = [h, -h, v, -v];
+        for ((mine, theirs), c) in Self::edges(view)
+            .into_iter()
+            .zip(Self::edges(to))
+            .zip(insets)
+        {
+            let k: *mut Object = msg_send![mine, constraintEqualToAnchor: theirs constant: c];
+            let _: () = msg_send![k, setActive: YES];
         }
+    }
+
+    /// The rows of one section as a grid: labels in a trailing-aligned
+    /// column when any row has one, otherwise a single full-width column.
+    unsafe fn grid(rows: &[Row]) -> *mut Object {
+        let empty = || -> *mut Object { msg_send![class!(NSGridCell), emptyContentView] };
+        let labelled = rows.iter().any(|r| matches!(r, Row::Field(..)));
+        let views: Vec<*mut Object> = rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Section(_) => None,
+                Row::Field(label, control) if labelled => {
+                    Some(ns_array(&[Self::label(label), *control]))
+                }
+                Row::Field(_, control) | Row::Under(control) if !labelled => {
+                    Some(ns_array(&[*control]))
+                }
+                Row::Under(control) => Some(ns_array(&[empty(), *control])),
+                Row::Field(..) => None,
+            })
+            .collect();
         let grid: *mut Object = msg_send![class!(NSGridView), gridViewWithViews: ns_array(&views)];
-        let _: () = msg_send![grid, setRowSpacing: 8.0f64];
+        let _: () = msg_send![grid, setRowSpacing: 9.0f64];
         let _: () = msg_send![grid, setColumnSpacing: 12.0f64];
-        let _: () = msg_send![grid, setContentHuggingPriority: 999.0f32 forOrientation: 1isize];
-        for i in 0..rows.len() {
+        for i in 0..views.len() {
             let row: *mut Object = msg_send![grid, rowAtIndex: i as isize];
             let _: () = msg_send![row, setYPlacement: 4isize]; // centre
         }
-        for &i in &sections {
-            let row: *mut Object = msg_send![grid, rowAtIndex: i as isize];
-            if i > 0 {
-                let _: () = msg_send![row, setTopPadding: 12.0f64];
-            }
-            // Headings span both columns, flush left.
-            let _: () = msg_send![row, mergeCellsInRange: NSRange { location: 0, length: 2 }];
-            let cell: *mut Object = msg_send![row, cellAtIndex: 0isize];
-            let _: () = msg_send![cell, setXPlacement: 2isize]; // leading
-        }
         let first: *mut Object = msg_send![grid, columnAtIndex: 0isize];
-        let _: () = msg_send![first, setXPlacement: 3isize]; // labels trailing
-                                                             // The same label column on every tab (and a tab with no labels at all
-                                                             // doesn't collapse it).
-        let _: () = msg_send![first, setWidth: 130.0f64];
-        // A spacer under the grid soaks up the rest of the tab's height.
-        let spacer: *mut Object = msg_send![class!(NSView), new];
-        let _: () = msg_send![spacer, setContentHuggingPriority: 1.0f32 forOrientation: 1isize];
-        let _: *mut Object = msg_send![spacer, autorelease];
-        let stack: *mut Object =
-            msg_send![class!(NSStackView), stackViewWithViews: ns_array(&[grid, spacer])];
+        if labelled {
+            let _: () = msg_send![first, setXPlacement: 3isize]; // labels trailing
+            let _: () = msg_send![first, setWidth: 112.0f64];
+        } else {
+            let _: () = msg_send![first, setXPlacement: 2isize]; // leading
+        }
+        grid
+    }
+
+    /// A rounded card (like System Settings' grouped sections) around `content`.
+    unsafe fn card(content: *mut Object) -> *mut Object {
+        let b: *mut Object = msg_send![class!(NSBox), new];
+        let _: *mut Object = msg_send![b, autorelease];
+        let _: () = msg_send![b, setBoxType: 4usize]; // custom
+        let _: () = msg_send![b, setTitlePosition: 0usize]; // no title
+        let _: () = msg_send![b, setCornerRadius: 10.0f64];
+        let _: () = msg_send![b, setBorderWidth: 1.0f64];
+        let border: *mut Object = msg_send![class!(NSColor), separatorColor];
+        let _: () = msg_send![b, setBorderColor: border];
+        let fill: *mut Object = msg_send![class!(NSColor), quaternarySystemFillColor];
+        let _: () = msg_send![b, setFillColor: fill];
+        let _: () = msg_send![b, setTranslatesAutoresizingMaskIntoConstraints: NO];
+        let inner: *mut Object = msg_send![b, contentView];
+        let _: () = msg_send![inner, addSubview: content];
+        Self::pin(content, inner, (16.0, 12.0));
+        b
+    }
+
+    /// A tab's content: a heading and a card per section, top-aligned, in a
+    /// scroll view (the window can be any height).
+    unsafe fn page(rows: Vec<Row>) -> *mut Object {
+        // Split into sections (rows before the first heading get a card too).
+        let mut sections: Vec<(Option<&'static str>, Vec<Row>)> = Vec::new();
+        for row in rows {
+            match row {
+                Row::Section(t) => sections.push((Some(t), Vec::new())),
+                r => {
+                    if sections.is_empty() {
+                        sections.push((None, Vec::new()));
+                    }
+                    if let Some(last) = sections.last_mut() {
+                        last.1.push(r);
+                    }
+                }
+            }
+        }
+        let stack: *mut Object = msg_send![class!(NSStackView), new];
+        let _: *mut Object = msg_send![stack, autorelease];
         let _: () = msg_send![stack, setOrientation: 1isize]; // vertical
         let _: () = msg_send![stack, setAlignment: 5isize]; // leading
-        let _: () = msg_send![stack, setEdgeInsets: NSEdgeInsets { top: 16.0, left: 24.0, bottom: 16.0, right: 24.0 }];
-        stack
+        let _: () = msg_send![stack, setSpacing: 6.0f64];
+        let _: () = msg_send![stack, setEdgeInsets: NSEdgeInsets { top: 18.0, left: 20.0, bottom: 20.0, right: 20.0 }];
+        let mut cards = Vec::new();
+        for (title, rows) in &sections {
+            if let Some(t) = title {
+                let l = Self::label(t);
+                Self::font(l, 13.0, true);
+                let _: () = msg_send![stack, addArrangedSubview: l];
+            }
+            if rows.is_empty() {
+                continue;
+            }
+            let card = Self::card(Self::grid(rows));
+            let _: () = msg_send![stack, addArrangedSubview: card];
+            let _: () = msg_send![stack, setCustomSpacing: 20.0f64 afterView: card];
+            cards.push(card);
+        }
+        // Cards stretch to the page's width.
+        for card in cards {
+            let w: *mut Object = msg_send![card, widthAnchor];
+            let sw: *mut Object = msg_send![stack, widthAnchor];
+            let k: *mut Object = msg_send![w, constraintEqualToAnchor: sw constant: -40.0f64];
+            let _: () = msg_send![k, setActive: YES];
+        }
+        Self::scrolling(stack)
+    }
+
+    /// `content` in a vertical scroll view, pinned to its top and as wide as it.
+    unsafe fn scrolling(content: *mut Object) -> *mut Object {
+        let scroll: *mut Object = msg_send![class!(NSScrollView), new];
+        let _: *mut Object = msg_send![scroll, autorelease];
+        let _: () = msg_send![scroll, setHasVerticalScroller: YES];
+        let _: () = msg_send![scroll, setAutohidesScrollers: YES];
+        let _: () = msg_send![scroll, setDrawsBackground: NO];
+        let _: () = msg_send![scroll, setBorderType: 0usize];
+        let doc: *mut Object = msg_send![flipped_view_class(), new];
+        let _: *mut Object = msg_send![doc, autorelease];
+        let _: () = msg_send![doc, setTranslatesAutoresizingMaskIntoConstraints: NO];
+        let _: () = msg_send![doc, addSubview: content];
+        Self::pin(content, doc, (0.0, 0.0));
+        let _: () = msg_send![scroll, setDocumentView: doc];
+        let clip: *mut Object = msg_send![scroll, contentView];
+        // Leading, trailing and top: as wide as the view, starting at the top.
+        for (mine, theirs) in Self::edges(doc).into_iter().zip(Self::edges(clip)).take(3) {
+            let k: *mut Object = msg_send![mine, constraintEqualToAnchor: theirs];
+            let _: () = msg_send![k, setActive: YES];
+        }
+        scroll
     }
 
     // --- Tabs -------------------------------------------------------------------
 
+    /// A read-only scrolling text box.
+    unsafe fn text_box(width: f64, height: f64, size: f64) -> (*mut Object, *mut Object) {
+        let scroll: *mut Object = msg_send![class!(NSTextView), scrollableTextView];
+        let tv: *mut Object = msg_send![scroll, documentView];
+        let _: () = msg_send![tv, setEditable: NO];
+        let font: *mut Object = msg_send![class!(NSFont), systemFontOfSize: size];
+        let _: () = msg_send![tv, setFont: font];
+        // A little room so the first line doesn't touch the edge.
+        let _: () = msg_send![tv, setTextContainerInset: NSSize { w: 6.0, h: 6.0 }];
+        Self::width(scroll, width);
+        Self::height(scroll, height);
+        (scroll, tv)
+    }
+
+    /// How it feels and what it's thinking, live, plus its mind's controls.
     unsafe fn mind_tab(&mut self) -> *mut Object {
         let headline = Self::wrapping("—", 420.0);
         Self::font(headline, 15.0, true);
         self.headline = headline;
         let bars: Vec<*mut Object> = BARS.iter().map(|(_, d)| self.bar(*d)).collect();
-        let labels: Vec<*mut Object> = (0..4).map(|_| Self::wrapping("—", 420.0)).collect();
+        let labels: Vec<*mut Object> = (0..6).map(|_| Self::wrapping("—", 420.0)).collect();
         self.mind_labels = labels.clone();
-        // The memory log: a read-only scrolling text view.
-        let scroll: *mut Object = msg_send![class!(NSTextView), scrollableTextView];
-        let tv: *mut Object = msg_send![scroll, documentView];
-        let _: () = msg_send![tv, setEditable: NO];
-        let small: *mut Object = msg_send![class!(NSFont), systemFontOfSize: 11.0f64];
-        let _: () = msg_send![tv, setFont: small];
-        Self::width(scroll, 420.0);
-        Self::height(scroll, 110.0);
-        self.log = tv;
-        let dscroll: *mut Object = msg_send![class!(NSTextView), scrollableTextView];
-        let dtv: *mut Object = msg_send![dscroll, documentView];
-        let _: () = msg_send![dtv, setEditable: NO];
-        let _: () = msg_send![dtv, setFont: small];
-        Self::width(dscroll, 420.0);
-        Self::height(dscroll, 90.0);
-        self.diary = dtv;
-        let achievements = Self::wrapping("—", 420.0);
-        self.achievements = achievements;
         let reflect = self.check(
             "Reflects on its memories with the local AI",
             Command::ToggleReflection,
@@ -454,8 +585,6 @@ impl SettingsWindow {
             &[
                 Self::button("Reflect Now", Command::ReflectNow),
                 Self::button("Leave Me a Note", Command::WriteNote),
-                Self::button("Write Diary Now", Command::WriteDiary),
-                Self::button("Copy Latest Entry", Command::CopyDiary),
             ],
             8.0,
         );
@@ -476,10 +605,12 @@ impl SettingsWindow {
             Row::Field("Scheme:", labels[1]),
             Row::Field("Believes:", labels[2]),
             Row::Field("Next note:", labels[3]),
-            Row::Field("Memory:", scroll),
-            Row::Field("Diary:", dscroll),
-            Row::Section("Achievements"),
-            Row::Under(achievements),
+            Row::Field("Dreads:", labels[4]),
+            Row::Field("Fight plans:", labels[5]),
+            Row::Under(Self::hint(
+                "Odds for its next fight: even to start, tilted toward what has worked, \
+                 never under 5%.",
+            )),
             Row::Section("Its mind"),
             Row::Under(reflect),
             Row::Under(notes),
@@ -487,10 +618,40 @@ impl SettingsWindow {
             Row::Under(resets),
             Row::Under(Self::hint(
                 "Wiping forgets every memory, feeling, belief and scheme. Resetting the level \
-                 forgets its experience and grudge.",
+                 forgets its experience and grudge. Its diary and memory log are on the \
+                 Diary tab.",
             )),
         ]);
         Self::page(rows)
+    }
+
+    /// Its diary (big enough to read), its memory log and achievements.
+    unsafe fn diary_tab(&mut self) -> *mut Object {
+        let (dscroll, dtv) = Self::text_box(560.0, 230.0, 12.0);
+        self.diary = dtv;
+        let (scroll, tv) = Self::text_box(560.0, 150.0, 11.0);
+        self.log = tv;
+        let achievements = Self::wrapping("—", 560.0);
+        self.achievements = achievements;
+        let diary_actions = Self::hstack(
+            &[
+                Self::button("Write Diary Now", Command::WriteDiary),
+                Self::button("Copy Latest Entry", Command::CopyDiary),
+            ],
+            8.0,
+        );
+        Self::page(vec![
+            Row::Section("Its diary"),
+            Row::Under(dscroll),
+            Row::Under(diary_actions),
+            Row::Under(Self::hint(
+                "It writes an entry when the day changes. Copy the latest one to share it.",
+            )),
+            Row::Section("What it remembers"),
+            Row::Under(scroll),
+            Row::Section("Achievements"),
+            Row::Under(achievements),
+        ])
     }
 
     unsafe fn personality_tab(&mut self) -> *mut Object {
@@ -808,6 +969,8 @@ impl SettingsWindow {
                 &view.scheme,
                 &view.beliefs,
                 &view.note,
+                &view.dread,
+                &view.plans,
             ]) {
                 let shown = if text.is_empty() {
                     "—"

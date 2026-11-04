@@ -32,7 +32,7 @@ Written in Rust for Apple Silicon:
 | **Super powers** | **Super jump:** a glowing power-up crouch, then a leap of up to ~1000 pt with a trail and a shockwave, to reach a cursor up high, a far-off window or a word. **Telekinesis:** hand out, purple aura: it lifts your pointer, wobbles it in the air and flings it; or raises a group of up to 6 words off the page, keeps them orbiting overhead, then fires them at your cursor one after another. |
 | **A mind of its own** | It remembers what you do to it (and in which app), and it develops feelings toward you: resentment, fear, affection, pride. Every couple of minutes it reflects on its memories with the local AI and rewrites its own beliefs ("The user hits me most in Safari"), a scheme ("Operation Pointer Doom: …") and the next note it wants to leave you. All of that feeds back into how it decides what to do. The idea is borrowed from self-improving agent harnesses like Google's Harness² (not a port; see [How it learns and remembers](#how-it-learns-and-remembers)). Kept in `mind.json`; see it, or wipe it, in Settings → Mind. |
 | **Losing its temper** | Push its resentment past 75 and it snaps ("THAT'S IT! F*** YOU!"): it flushes red, steams from the head, swears whatever its language (bleeped unless you turn bleeping off; never slurs), spells "F*** YOU" in torn-off letters, and attacks relentlessly until its resentment drops below 55 (petting helps). Switch off with "Loses its temper". |
-| **A diary** | Every day it tallies what happened; when the date changes, the local AI writes a short, dramatic "Dear diary" entry about yesterday (or a rule-based one when Ollama is off). It reads the opening aloud when you're back, and keeps 60 days of entries on the Mind tab. **Write Diary Now** writes today's so far. |
+| **A diary** | Every day it tallies what happened; when the date changes, the local AI writes a short, dramatic "Dear diary" entry about yesterday (or a rule-based one when Ollama is off). It reads the opening aloud when you're back, and keeps 60 days of entries on the Diary tab in Settings. **Write Diary Now** writes today's so far. |
 | **Achievements & hats** | 17 achievements (First Blood, Pickpocket, Icon Thief, Window Wrecker, Swordsman, Duelist, Desk Champion, Beloved, Seething, Pen Pal, Philosopher, Veteran, …), each celebrated with a trophy bubble and sparks. Levels and achievements unlock 8 hats it can wear (ninja bandana, top hat, crown, pirate hat, party hat, wizard hat, devil horns, viking helmet); pick one in Personality, where locked ones say how to earn them. |
 | **Moves you unlock** | Like a game, it starts with just its fists: super jump at level 2, telekinesis at 3, scrollbar swords at 4, window throwing at 5. Each level-up announces what it unlocked. Untick **Earn moves by levelling up** to have everything from the start. |
 | **Polite on calls, sleepy at night** | While any app is using a camera (a video call, most likely) it whispers "Shh… you're on a call", then goes silent and harmless: no speech, sound, notes or rivals, nothing done to your cursor or windows. It only checks whether a camera is running; it never opens one. After 11 pm it nods off four times sooner. Both can be switched off. |
@@ -145,7 +145,7 @@ harnesses.
      what has worked) and plans its schemes with that in mind.
 7. **It keeps a diary and earns a record.**
    - Each day ends with a diary entry about what you did to it. **Copy Latest
-     Diary Entry** (menu bar, or Settings → Mind) copies it, ready to share.
+     Diary Entry** (menu bar, or Settings → Diary) copies it, ready to share.
    - Achievements, levels and unlocked moves track its history with you.
 
 ### The loop at a glance
@@ -188,22 +188,25 @@ smaller form, written from scratch in Rust:
 | Needs right answers to learn from | No | No |
 
 **Watch it think** in Settings → Mind: live feeling bars (yellow, then red),
-its current thought, beliefs, scheme, next note, a log of memories and
-thoughts, and the diary. **Reflect Now** forces a reflection. **Wipe Its
+its current thought, beliefs, scheme, next note, the app it dreads and the
+odds of each fight plan. Its diary, memory log and achievements are on the
+Diary tab. **Reflect Now** forces a reflection. **Wipe Its
 Memory** makes it forget everything ("Huh? Who am I?"), and **Forgive & Reset
 Level** clears its experience and grudge.
 
 ## Settings window
 
-**Settings…** (⌘,) in the menu bar opens a window with every option, in four
+**Settings…** (⌘,) in the menu bar opens a window with every option, in six
 tabs with headed sections:
 
 | Tab | What's there |
 |---|---|
-| Mind | Live: its mood and level; bars for resentment, fear, grudge, affection, pride, health and experience (yellow, then red when they get bad); what it's thinking right now, its scheme, beliefs and next note; a log of its thoughts and memories; its diary; achievements earned and what to go for next; Reflect Now, Leave Me a Note, Write Diary Now, Wipe Its Memory, Forgive & Reset Level. |
+| Mind | Live: its mood and level; bars for resentment, fear, grudge, affection, pride, health and experience (yellow, then red when they get bad); what it's thinking right now, its scheme, beliefs and next note; the app it dreads; the odds of each fight plan; Reflect Now, Leave Me a Note, Wipe Its Memory, Forgive & Reset Level. |
+| Diary | Its diary (Write Diary Now, Copy Latest Entry), a log of its thoughts and memories, achievements earned and what to go for next. |
 | Personality | Name, colour, size, hat; temper and chattiness sliders, language, bleeping, losing its temper; behaviour (Auto or one pinned mood), quiet during video calls, sleepy at night, earn moves by levelling up. |
-| Abilities | Your cursor (pushes, grabs), your windows (shakes, shoves, throws), your screen (walking on text, ripping words and how long they stay, Dock icons, scrollbar swords, piles), powers and events (super powers, jail-break intro, rival visits, minions, boss fights, with Start a Boss Fight and Call the Minions buttons). |
-| Fun & Sound | Naps, dancing, dancing to music, doodles, sitting on edges, speech bubbles, sound effects and their volume. |
+| Abilities | Your cursor (pushes, grabs, dodging back while you leave the mouse alone), your windows (shakes, shoves, throws), your screen (walking on text, ripping words and how long they stay, Dock icons, scrollbar swords, piles), powers and events (super powers, jail-break intro, rival visits, minions, boss fights, with Start a Boss Fight and Call the Minions buttons). |
+| Fun & Sound | Naps, dancing, dancing to music, doodles, sitting on edges, speech bubbles, sound effects and their volume, power saving. |
+| About | Version, which model it thinks with, privacy, links (website, report a bug, show its files), credits and licence. |
 
 Everything is saved and restored on the next launch. Environment variables
 below override settings at startup.
