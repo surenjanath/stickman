@@ -2551,6 +2551,20 @@ impl Scene {
                 Command::OpenScreenRecordingSettings => {
                     macos::open_url("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture");
                 }
+                Command::OpenWebsite => {
+                    macos::open_url(env!("CARGO_PKG_REPOSITORY"));
+                }
+                Command::ReportBug => {
+                    macos::open_url(&format!("{}/issues", env!("CARGO_PKG_REPOSITORY")));
+                }
+                Command::ShowDataFolder => {
+                    if let Some(dir) = self.settings_path.as_ref().and_then(|p| p.parent()) {
+                        if std::fs::create_dir_all(dir).is_ok() {
+                            let url = format!("file://{}", dir.display()).replace(' ', "%20");
+                            macos::open_url(&url);
+                        }
+                    }
+                }
                 Command::OpenSettings => self.open_settings(),
                 Command::SummonRival => self.summon_rival(),
                 Command::StartBoss => self.start_boss(),
@@ -3273,6 +3287,10 @@ impl Scene {
             w.sync(&self.settings);
             if let Some(view) = &view {
                 w.set_mind(view);
+                w.set_model(&format!(
+                    "{}, running in Ollama on this Mac",
+                    self.director_model
+                ));
                 let unlocked: Vec<bool> = stickman::hats::Hat::ALL
                     .iter()
                     .map(|h| h.unlocked(&self.stats))

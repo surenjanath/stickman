@@ -440,6 +440,12 @@ pub enum Command {
     Respawn,
     OpenAccessibilitySettings,
     OpenScreenRecordingSettings,
+    /// About: the project's web page.
+    OpenWebsite,
+    /// About: file an issue.
+    ReportBug,
+    /// About: reveal the settings, mind and diary in Finder.
+    ShowDataFolder,
     Quit,
 }
 
@@ -517,6 +523,9 @@ impl Command {
             Command::Respawn => 400,
             Command::OpenAccessibilitySettings => 500,
             Command::OpenScreenRecordingSettings => 501,
+            Command::OpenWebsite => 502,
+            Command::ReportBug => 503,
+            Command::ShowDataFolder => 504,
             Command::Quit => 900,
         }
     }
@@ -576,6 +585,9 @@ impl Command {
             400 => Command::Respawn,
             500 => Command::OpenAccessibilitySettings,
             501 => Command::OpenScreenRecordingSettings,
+            502 => Command::OpenWebsite,
+            503 => Command::ReportBug,
+            504 => Command::ShowDataFolder,
             900 => Command::Quit,
             _ => return None,
         })
@@ -793,6 +805,9 @@ mod tests {
             Command::Respawn,
             Command::OpenAccessibilitySettings,
             Command::OpenScreenRecordingSettings,
+            Command::OpenWebsite,
+            Command::ReportBug,
+            Command::ShowDataFolder,
             Command::Quit,
         ];
         all.extend(Behaviour::ALL.map(Command::SetBehaviour));

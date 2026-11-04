@@ -156,6 +156,8 @@ pub struct SettingsWindow {
     hats_shown: Vec<bool>,
     /// Achievements list label.
     achievements: *mut Object,
+    /// About tab: which local model it thinks with.
+    about_model: *mut Object,
     tabs: *mut Object,
     shown: Option<Settings>,
     centered: bool,
@@ -179,6 +181,7 @@ impl SettingsWindow {
             hat_popup: std::ptr::null_mut(),
             hats_shown: Vec::new(),
             achievements: std::ptr::null_mut(),
+            about_model: std::ptr::null_mut(),
             tabs: std::ptr::null_mut(),
             shown: None,
             centered: false,
@@ -206,11 +209,13 @@ impl SettingsWindow {
             let personality = w.personality_tab();
             let abilities = w.abilities_tab();
             let fun = w.fun_tab();
+            let about = w.about_tab();
             for (label, view) in [
                 ("Mind", mind),
                 ("Personality", personality),
                 ("Abilities", abilities),
                 ("Fun & Sound", fun),
+                ("About", about),
             ] {
                 let item: *mut Object = msg_send![class!(NSTabViewItem), alloc];
                 let item: *mut Object = msg_send![item, initWithIdentifier: ns_string(label)];
@@ -727,7 +732,64 @@ impl SettingsWindow {
         ])
     }
 
+    unsafe fn about_tab(&mut self) -> *mut Object {
+        let title = Self::label("Stickman");
+        Self::font(title, 22.0, true);
+        let version = Self::label(&format!("Version {}", env!("CARGO_PKG_VERSION")));
+        Self::font(version, 12.0, false);
+        let model = Self::wrapping("A local model through Ollama.", 420.0);
+        self.about_model = model;
+        let links = Self::hstack(
+            &[
+                Self::button("Website", Command::OpenWebsite),
+                Self::button("Report a Bug", Command::ReportBug),
+                Self::button("Show Its Files", Command::ShowDataFolder),
+            ],
+            8.0,
+        );
+        Self::page(vec![
+            Row::Under(title),
+            Row::Under(version),
+            Row::Under(Self::wrapping(
+                "A stick figure with a mind of its own that lives on your desktop. It walks \
+                 on your windows and text, fights your cursor, remembers what you do to it \
+                 (and in which app), and writes a diary about you.",
+                420.0,
+            )),
+            Row::Section("How it thinks"),
+            Row::Field("Brain:", model),
+            Row::Under(Self::hint(
+                "Everything stays on your Mac: its memories, feelings, beliefs and diary are \
+                 kept in mind.json next to the settings, and only the local model reads them. \
+                 The screen is read for word and letter boxes, never stored or sent.",
+            )),
+            Row::Section("Links"),
+            Row::Under(links),
+            Row::Section("Credits"),
+            Row::Under(Self::wrapping(
+                "Written in Rust with winit, wgpu, rapier2d and Apple's Vision framework. \
+                 The figure's rig comes from StykAnimate by Filippo Calippo (GPL-3.0).",
+                420.0,
+            )),
+            Row::Field("License:", Self::label("GNU GPL v3.0")),
+            Row::Under(Self::hint(
+                "Free software: you may share and change it under the terms of the GPL.",
+            )),
+        ])
+    }
+
     // --- State ----------------------------------------------------------------
+
+    /// Show which local model it thinks with (About tab).
+    pub fn set_model(&mut self, text: &str) {
+        if self.about_model.is_null() {
+            return;
+        }
+        // SAFETY: main thread; the label lives as long as the window.
+        unsafe {
+            let _: () = msg_send![self.about_model, setStringValue: ns_string(text)];
+        }
+    }
 
     /// Show the mind's state (cheap when nothing changed or hidden).
     pub fn set_mind(&mut self, view: &MindView) {
