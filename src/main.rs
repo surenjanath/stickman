@@ -357,6 +357,11 @@ struct Scene {
     mode: Mode,
     mode_since: Instant,
     director_active: Arc<AtomicBool>,
+    /// Saving power (shared with the director): fewer AI calls, 30 fps.
+    saving_power: Arc<AtomicBool>,
+    /// Plugged in or not, and when that was last checked.
+    on_battery: bool,
+    power_checked: Instant,
     director_model: String,
     last_reason: String,
     director_online: Option<bool>,
@@ -593,7 +598,9 @@ impl Scene {
         }
         let intro = self.intro_combat_until.is_some();
         while let Ok(d) = self.directive_rx.try_recv() {
-            self.director_online = Some(d.source == director::Source::Llm);
+            if d.source != director::Source::Rules {
+                self.director_online = Some(d.source == director::Source::Llm);
+            }
             self.last_reason = d.reason.clone();
             let recently_hit = self
                 .hits
@@ -937,6 +944,38 @@ impl Scene {
         if self.settings.speech {
             let lines = self.speech.say(line, Priority::Event);
             self.speak(lines);
+        }
+    }
+
+    /// Plugged in or on battery (checked every 30 s), and the power-saving
+    /// setting: decides whether to save power. Says so when it starts or stops
+    /// on its own (Automatic, on unplugging or plugging in).
+    fn check_power(&mut self) {
+        if self.power_checked.elapsed() >= Duration::from_secs(30) {
+            self.power_checked = Instant::now();
+            let battery = macos::on_battery();
+            if battery != self.on_battery {
+                self.on_battery = battery;
+                log::info!(
+                    "power: {}",
+                    if battery { "on battery" } else { "plugged in" }
+                );
+                if self.settings.power_saving == stickman::settings::PowerSaving::Auto
+                    && self.settings.speech
+                {
+                    let line = if battery {
+                        "On battery. I'll take it easy."
+                    } else {
+                        "Plugged in! Full power!"
+                    };
+                    let lines = self.speech.say(line, Priority::Director);
+                    self.speak(lines);
+                }
+            }
+        }
+        let saving = self.settings.power_saving.active(self.on_battery);
+        if self.saving_power.swap(saving, Ordering::Relaxed) != saving {
+            log::info!("power: saving {}", if saving { "on" } else { "off" });
         }
     }
 
@@ -3082,6 +3121,7 @@ impl Scene {
             + rage)
             .clamp(0.0, 1.0);
         self.think();
+        self.check_power();
         self.wage_war();
         self.diary_tick();
         self.maybe_write_note();
@@ -4072,6 +4112,8 @@ impl App {
         let director_cfg = director::Config::from_env();
         let director_model = director_cfg.model.clone();
         let director_active = Arc::new(AtomicBool::new(forced_mode.is_none()));
+        let on_battery = macos::on_battery();
+        let saving_power = Arc::new(AtomicBool::new(settings.power_saving.active(on_battery)));
         if !agent.hold_still {
             director::spawn(
                 &self.runtime,
@@ -4079,6 +4121,7 @@ impl App {
                 obs_rx,
                 dir_tx,
                 director_active.clone(),
+                saving_power.clone(),
             );
         }
         let mode = forced_mode.unwrap_or(Mode::Idle);
@@ -4161,6 +4204,9 @@ impl App {
             mode,
             mode_since: now,
             director_active,
+            saving_power,
+            on_battery,
+            power_checked: Instant::now(),
             director_model,
             last_reason: String::new(),
             director_online: None,
@@ -4317,7 +4363,13 @@ impl ApplicationHandler for App {
                 event_loop.exit();
                 return;
             }
-            let interval = if scene.busy { TICK } else { IDLE_TICK };
+            // Saving power: half the frame rate.
+            let saving = scene.saving_power.load(Ordering::Relaxed);
+            let interval = match (scene.busy, saving) {
+                (true, false) => TICK,
+                (false, false) | (true, true) => IDLE_TICK,
+                (false, true) => IDLE_TICK * 2,
+            };
             scene.next_tick += interval;
             if scene.next_tick < now {
                 scene.next_tick = now + interval; // fell behind; don't burst

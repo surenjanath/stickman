@@ -57,7 +57,7 @@ Written in Rust for Apple Silicon:
 | **Sound** | Punches, kicks, whooshes, knockback booms, landing thuds, pops, stomps, a talking babble and a knockout wah-wah, all synthesised in code (no audio files) and panned by where they happen. Volume slider in Fun & Sound. |
 | **Multiple displays** | One overlay per screen. Each screen has its own floor (the Dock top, or the screen bottom), and windows on every screen are platforms. The figure wanders across a shared screen edge, dropping down when the next screen's floor is lower; an edge that would be a step up is a wall. Plugging in or rearranging displays is picked up within 2 s. |
 | **Sabotage** | It climbs onto your active window and stomps on it, shaking the window via Accessibility, or kicks it so the window slides across the screen (it rides along, and the window never leaves its screen). |
-| **AI director** | Every 4 s a local Ollama model (`llama3.2:1b` by default, ~200–300 ms) picks `IDLE` / `OBSERVE` / `SABOTAGE` / `COMBAT` from what you're doing: active app, mouse speed, hits, health, frustration, idle time. Modes last at least 12 s, except immediate retaliation after a hit. If Ollama is down, a built-in director takes over. |
+| **AI director** | A local Ollama model (`llama3.2:1b` by default, ~200–300 ms) picks `IDLE` / `OBSERVE` / `SABOTAGE` / `COMBAT` from what you're doing: active app, mouse speed, hits, health, frustration, idle time. It's only asked when something happens (you switch apps, hit it, whip the mouse, go idle or come back, it gets badly hurt, a fight starts), at most every 3 s, plus a heartbeat every 45 s. In between, cheap built-in rules keep it moving. When saving power it's gentler (8 s apart, 120 s heartbeat) and draws at 30 fps. **Power saving** (Settings → Fun & Sound) is Automatic by default: on when you unplug ("On battery. I'll take it easy."), off when plugged in. It can also be Always or Off. In a quiet 2-minute test that was 4 model calls instead of 30. Modes last at least 12 s, except immediate retaliation after a hit. If Ollama is down, the built-in rules take over completely. |
 | **Efficiency** | 60 Hz simulation when something moves, 30 Hz otherwise; frames that wouldn't visibly change are skipped. Idle ≈ 2–3% of one core (PRD budget 5%), walking ≈ 13–16%. |
 
 ![The hats it can earn: bandana, top hat, crown, pirate, party, wizard, horns, viking](docs/hats.png)
@@ -230,7 +230,7 @@ launching terminal.
 | `STICKMAN_MODE=IDLE\|OBSERVE\|SABOTAGE\|COMBAT` | Force a mode (director off). |
 | `STICKMAN_OLLAMA_MODEL` | Ollama model (default `llama3.2:1b`). |
 | `STICKMAN_OLLAMA_URL` | Ollama URL (default `http://localhost:11434`). |
-| `STICKMAN_DIRECTOR_INTERVAL_S` | Seconds between director decisions (default 4). |
+| `STICKMAN_DIRECTOR_INTERVAL_S` | Seconds between the built-in rules' decisions between model calls (default 4). |
 | `STICKMAN_NO_CURSOR_PUSH=1` | Punches don't move your pointer. |
 | `STICKMAN_NO_WINDOW_SHAKE=1` | Nothing moves your windows (no shakes, shoves or throws). |
 | `STICKMAN_NO_OCR=1` | Don't read screen text (no walking on text). |

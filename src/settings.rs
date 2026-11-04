@@ -87,6 +87,37 @@ impl Size {
     }
 }
 
+/// When to save power (fewer AI calls, a lower frame rate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum PowerSaving {
+    /// On battery: save power. Plugged in: full speed.
+    #[default]
+    Auto,
+    Always,
+    Off,
+}
+
+impl PowerSaving {
+    pub const ALL: [PowerSaving; 3] = [PowerSaving::Auto, PowerSaving::Always, PowerSaving::Off];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PowerSaving::Auto => "Automatic (on battery)",
+            PowerSaving::Always => "Always",
+            PowerSaving::Off => "Off (full speed)",
+        }
+    }
+
+    /// Whether to save power right now.
+    pub fn active(self, on_battery: bool) -> bool {
+        match self {
+            PowerSaving::Auto => on_battery,
+            PowerSaving::Always => true,
+            PowerSaving::Off => false,
+        }
+    }
+}
+
 /// How long thrown words stay where they land.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum WordStay {
@@ -248,6 +279,8 @@ pub struct Settings {
     pub volume: u8,
     /// How long thrown words stay where they land.
     pub word_stay: WordStay,
+    /// When to save power.
+    pub power_saving: PowerSaving,
     /// Hobbies: nap when the user is away, dance, doodle, sit on edges.
     pub naps: bool,
     pub dancing: bool,
@@ -311,6 +344,7 @@ impl Default for Settings {
             sound: true,
             volume: 70,
             word_stay: WordStay::Seconds5,
+            power_saving: PowerSaving::Auto,
             naps: true,
             dancing: true,
             doodles: true,
@@ -349,6 +383,7 @@ pub enum Command {
     ToggleSpeech,
     ToggleSound,
     SetWordStay(WordStay),
+    SetPowerSaving(PowerSaving),
     ToggleNaps,
     ToggleDancing,
     ToggleDoodles,
@@ -470,6 +505,9 @@ impl Command {
             Command::SetWordStay(w) => {
                 600 + WordStay::ALL.iter().position(|x| *x == w).unwrap_or(0) as isize
             }
+            Command::SetPowerSaving(p) => {
+                620 + PowerSaving::ALL.iter().position(|x| *x == p).unwrap_or(0) as isize
+            }
             Command::Respawn => 400,
             Command::OpenAccessibilitySettings => 500,
             Command::OpenScreenRecordingSettings => 501,
@@ -527,6 +565,7 @@ impl Command {
             850..=858 => Command::SetHat(crate::hats::Hat::ALL[(tag - 850) as usize]),
             326 => Command::ToggleEarnMoves,
             600..=604 => Command::SetWordStay(WordStay::ALL[(tag - 600) as usize]),
+            620..=622 => Command::SetPowerSaving(PowerSaving::ALL[(tag - 620) as usize]),
             400 => Command::Respawn,
             500 => Command::OpenAccessibilitySettings,
             501 => Command::OpenScreenRecordingSettings,
@@ -551,6 +590,7 @@ impl Settings {
             Command::ToggleSpeech => self.speech = !self.speech,
             Command::ToggleSound => self.sound = !self.sound,
             Command::SetWordStay(w) => self.word_stay = w,
+            Command::SetPowerSaving(p) => self.power_saving = p,
             Command::ToggleNaps => self.naps = !self.naps,
             Command::ToggleDancing => self.dancing = !self.dancing,
             Command::ToggleDoodles => self.doodles = !self.doodles,
@@ -590,6 +630,7 @@ impl Settings {
             Command::SetBehaviour(b) => self.behaviour == b,
             Command::SetSize(s) => self.size == s,
             Command::SetWordStay(w) => self.word_stay == w,
+            Command::SetPowerSaving(p) => self.power_saving == p,
             Command::SetLanguage(l) => self.language == l,
             Command::SetColor(c) => self.color == c,
             Command::SetHat(h) => self.hat == h,
@@ -747,6 +788,7 @@ mod tests {
         all.extend(Behaviour::ALL.map(Command::SetBehaviour));
         all.extend(Size::ALL.map(Command::SetSize));
         all.extend(WordStay::ALL.map(Command::SetWordStay));
+        all.extend(PowerSaving::ALL.map(Command::SetPowerSaving));
         all.extend(Language::ALL.map(Command::SetLanguage));
         all.extend(FigureColor::ALL.map(Command::SetColor));
         all.extend(crate::hats::Hat::ALL.map(Command::SetHat));
@@ -760,6 +802,23 @@ mod tests {
         assert_eq!(tags.len(), all.len(), "tags must be unique");
         assert_eq!(Command::from_tag(0), None);
         assert_eq!(Command::from_tag(105), None);
+    }
+
+    #[test]
+    fn power_saving_follows_the_battery_only_when_automatic() {
+        assert!(PowerSaving::Auto.active(true));
+        assert!(!PowerSaving::Auto.active(false));
+        assert!(PowerSaving::Always.active(false));
+        assert!(!PowerSaving::Off.active(true));
+        assert_eq!(Settings::default().power_saving, PowerSaving::Auto);
+        let mut s = Settings::default();
+        assert!(s.apply(Command::SetPowerSaving(PowerSaving::Off)));
+        assert!(s.checked(Command::SetPowerSaving(PowerSaving::Off)));
+        let tag = Command::SetPowerSaving(PowerSaving::Always).tag();
+        assert_eq!(
+            Command::from_tag(tag),
+            Some(Command::SetPowerSaving(PowerSaving::Always))
+        );
     }
 
     #[test]

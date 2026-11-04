@@ -78,7 +78,44 @@ impl Default for Observation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source {
     Llm,
+    /// The built-in director, because Ollama isn't answering.
     Fallback,
+    /// The built-in director between model calls (Ollama is fine; nothing
+    /// happened that's worth asking it about).
+    Rules,
+}
+
+/// Something worth waking the model for, comparing the last tick's
+/// observation with this one. Quiet stretches return `None`: the cheap rules
+/// handle those.
+pub fn wake_reason(prev: &Observation, now: &Observation) -> Option<&'static str> {
+    if now.active_app_name != prev.active_app_name {
+        Some("app switch")
+    } else if now.hits_last_minute > prev.hits_last_minute {
+        Some("got hit")
+    } else if now.mouse_speed_avg > 900.0 && prev.mouse_speed_avg <= 900.0 {
+        Some("mouse spike")
+    } else if now.user_idle_seconds > 20.0 && prev.user_idle_seconds <= 20.0 {
+        Some("user went idle")
+    } else if now.user_idle_seconds < 2.0 && prev.user_idle_seconds > 20.0 {
+        Some("user is back")
+    } else if now.agent_health < 35.0 && prev.agent_health >= 35.0 {
+        Some("badly hurt")
+    } else if now.current_state != prev.current_state && now.current_state == "COMBAT" {
+        Some("a fight started")
+    } else {
+        None
+    }
+}
+
+/// How often the model may be asked: at least `gap` apart, and at least once
+/// per `heartbeat` even when nothing happens. Gentler when saving power.
+pub fn pacing(saving_power: bool) -> (Duration, Duration) {
+    if saving_power {
+        (Duration::from_secs(8), Duration::from_secs(120))
+    } else {
+        (Duration::from_secs(3), Duration::from_secs(45))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -490,6 +527,7 @@ pub fn spawn(
     obs: watch::Receiver<Observation>,
     tx: Sender<Directive>,
     active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    saving: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     rt.spawn(async move {
         let client = match reqwest::Client::builder().build() {
@@ -500,59 +538,101 @@ pub fn spawn(
             }
         };
         log::info!(
-            "director: model {} at {} every {:?}",
+            "director: model {} at {}, asked on events (rules every {:?} in between)",
             cfg.model,
             cfg.url,
             cfg.interval
         );
+        let tick = Duration::from_secs(1);
         let mut llm_ok = true;
         let mut seed: u32 = 0x9e37_79b9;
+        let mut prev: Option<Observation> = None;
+        let mut pending: Option<&'static str> = Some("start");
+        let mut last_ask: Option<std::time::Instant> = None;
+        let mut last_rules = std::time::Instant::now();
+        let (mut calls, mut since_report) = (0u32, std::time::Instant::now());
         loop {
-            tokio::time::sleep(cfg.interval).await;
+            tokio::time::sleep(tick).await;
             // Paused while the behaviour is pinned or the figure is hidden: don't
             // spend GPU/CPU on the model.
             if !active.load(std::sync::atomic::Ordering::Relaxed) {
+                prev = None;
                 continue;
             }
+            let saving = saving.load(std::sync::atomic::Ordering::Relaxed);
+            let (gap, heartbeat) = pacing(saving);
             let o = obs.borrow().clone();
-            let started = std::time::Instant::now();
-            // One retry: small models occasionally emit malformed JSON.
-            let answer = match ask(&client, &cfg, &o).await {
-                Ok(d) => Ok(d),
-                Err(e) => {
-                    log::debug!("director: retrying after {e:#}");
-                    ask(&client, &cfg, &o).await
-                }
-            };
-            let d = match answer {
-                Ok(d) => {
-                    if !llm_ok {
-                        log::info!("director: Ollama is back");
+            if let Some(p) = &prev {
+                pending = pending.or(wake_reason(p, &o));
+            }
+            prev = Some(o.clone());
+            let since_ask = last_ask.map_or(Duration::MAX, |t| t.elapsed());
+            if since_ask >= heartbeat {
+                pending = pending.or(Some("heartbeat"));
+            }
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let roll = (seed % 1000) as f32 / 1000.0;
+            let d = if let Some(why) = pending.filter(|_| since_ask >= gap) {
+                pending = None;
+                last_ask = Some(std::time::Instant::now());
+                calls += 1;
+                let started = std::time::Instant::now();
+                // One retry: small models occasionally emit malformed JSON.
+                let answer = match ask(&client, &cfg, &o).await {
+                    Ok(d) => Ok(d),
+                    Err(e) => {
+                        log::debug!("director: retrying after {e:#}");
+                        ask(&client, &cfg, &o).await
                     }
-                    llm_ok = true;
-                    d
-                }
-                Err(e) => {
-                    if llm_ok {
-                        log::warn!(
-                            "director: {e:#}; using the built-in director until Ollama responds"
+                };
+                match answer {
+                    Ok(d) => {
+                        if !llm_ok {
+                            log::info!("director: Ollama is back");
+                        }
+                        llm_ok = true;
+                        log::info!(
+                            "director: asked the model ({why}): {} ({} ms) \"{}\" says \"{}\"",
+                            d.mode.as_str(),
+                            started.elapsed().as_millis(),
+                            d.reason,
+                            d.say
                         );
+                        d
                     }
-                    llm_ok = false;
-                    seed ^= seed << 13;
-                    seed ^= seed >> 17;
-                    seed ^= seed << 5;
-                    fallback(&o, (seed % 1000) as f32 / 1000.0)
+                    Err(e) => {
+                        if llm_ok {
+                            log::warn!(
+                                "director: {e:#}; using the built-in director until Ollama responds"
+                            );
+                        }
+                        llm_ok = false;
+                        fallback(&o, roll)
+                    }
                 }
+            } else if last_rules.elapsed() >= cfg.interval {
+                // Nothing worth a model call: the cheap rules keep it moving.
+                last_rules = std::time::Instant::now();
+                let mut d = fallback(&o, roll);
+                if llm_ok {
+                    d.source = Source::Rules;
+                }
+                if d.reason != "carry on" {
+                    log::info!("director: rules: {} \"{}\"", d.mode.as_str(), d.reason);
+                }
+                d
+            } else {
+                continue;
             };
-            log::info!(
-                "director: {} ({:?}, {} ms) \"{}\" says \"{}\"",
-                d.mode.as_str(),
-                d.source,
-                started.elapsed().as_millis(),
-                d.reason,
-                d.say
-            );
+            if since_report.elapsed() >= Duration::from_secs(300) {
+                log::info!(
+                    "director: {calls} model calls in the last 5 min (saving power: {saving})"
+                );
+                calls = 0;
+                since_report = std::time::Instant::now();
+            }
             if tx.send(d).is_err() {
                 return;
             }
@@ -641,6 +721,89 @@ mod tests {
         assert!(parse_response("not json").is_err());
         assert!(parse_response(r#"{"response":"I think combat"}"#).is_err());
         assert!(parse_response(r#"{"response":"{\"state\":\"DANCE\"}"}"#).is_err());
+    }
+
+    #[test]
+    fn the_model_is_woken_by_events_not_by_quiet_time() {
+        let base = Observation {
+            active_app_name: "Safari".into(),
+            agent_health: 100.0,
+            current_state: "IDLE",
+            user_idle_seconds: 1.0,
+            mouse_speed_avg: 100.0,
+            ..Default::default()
+        };
+        // Quiet: time passes, the mouse ambles about. No reason to ask.
+        let later = Observation {
+            seconds_in_state: 30.0,
+            mouse_speed_avg: 300.0,
+            ..base.clone()
+        };
+        assert_eq!(wake_reason(&base, &later), None);
+        let cases = [
+            (
+                Observation {
+                    active_app_name: "Notes".into(),
+                    ..base.clone()
+                },
+                "app switch",
+            ),
+            (
+                Observation {
+                    hits_last_minute: 1,
+                    ..base.clone()
+                },
+                "got hit",
+            ),
+            (
+                Observation {
+                    mouse_speed_avg: 1200.0,
+                    ..base.clone()
+                },
+                "mouse spike",
+            ),
+            (
+                Observation {
+                    user_idle_seconds: 21.0,
+                    ..base.clone()
+                },
+                "user went idle",
+            ),
+            (
+                Observation {
+                    agent_health: 30.0,
+                    ..base.clone()
+                },
+                "badly hurt",
+            ),
+            (
+                Observation {
+                    current_state: "COMBAT",
+                    ..base.clone()
+                },
+                "a fight started",
+            ),
+        ];
+        for (now, why) in cases {
+            assert_eq!(wake_reason(&base, &now), Some(why));
+        }
+        // Coming back after a while away.
+        let away = Observation {
+            user_idle_seconds: 120.0,
+            ..base.clone()
+        };
+        assert_eq!(wake_reason(&away, &base), Some("user is back"));
+        // A spike that continues isn't news.
+        let fast = Observation {
+            mouse_speed_avg: 1200.0,
+            ..base.clone()
+        };
+        assert_eq!(wake_reason(&fast, &fast), None);
+        // Gentler on battery.
+        let (gap, beat) = pacing(false);
+        let (bgap, bbeat) = pacing(true);
+        assert!(bgap > gap && bbeat > beat);
+        assert!(gap >= Duration::from_secs(3), "CLAUDE.md: debounce 3–5 s");
     }
 
     #[test]

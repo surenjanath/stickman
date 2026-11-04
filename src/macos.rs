@@ -243,6 +243,34 @@ pub fn restore_focus(pid: i64) {
     }
 }
 
+#[link(name = "IOKit", kind = "framework")]
+extern "C" {
+    fn IOPSCopyPowerSourcesInfo() -> CFTypeRef;
+    fn IOPSGetProvidingPowerSourceType(snapshot: CFTypeRef) -> CFTypeRef;
+}
+
+/// Running on battery (not plugged in). `false` on desktops or if unknown.
+/// Safe from any thread.
+pub fn on_battery() -> bool {
+    // SAFETY: IOPSCopyPowerSourcesInfo returns a +1 CFTypeRef (or NULL), which
+    // CFType::wrap_under_create_rule takes ownership of and releases on drop.
+    // IOPSGetProvidingPowerSourceType returns a CFStringRef owned by that
+    // snapshot (get rule), only read while the snapshot is alive.
+    unsafe {
+        let snap = IOPSCopyPowerSourcesInfo();
+        if snap.is_null() {
+            return false;
+        }
+        let snap = CFType::wrap_under_create_rule(snap);
+        let kind = IOPSGetProvidingPowerSourceType(snap.as_CFTypeRef());
+        if kind.is_null() {
+            return false;
+        }
+        let kind = CFString::wrap_under_get_rule(kind as _);
+        kind == "Battery Power"
+    }
+}
+
 /// Put `text` on the general pasteboard (the clipboard). Main thread only.
 pub fn copy_to_clipboard(text: &str) -> bool {
     let c = std::ffi::CString::new(text.replace('\0', "")).unwrap_or_default();

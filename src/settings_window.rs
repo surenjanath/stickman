@@ -17,7 +17,9 @@ use objc::{class, msg_send, sel, sel_impl, Encode, Encoding};
 
 use crate::hats::Hat;
 use crate::menubar::{action_target, SLIDER_AGGRESSION, SLIDER_CHATTINESS, SLIDER_VOLUME};
-use crate::settings::{Behaviour, Command, FigureColor, Language, Settings, Size, WordStay};
+use crate::settings::{
+    Behaviour, Command, FigureColor, Language, PowerSaving, Settings, Size, WordStay,
+};
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -681,6 +683,12 @@ impl SettingsWindow {
         let speech = self.check("Speech bubbles", Command::ToggleSpeech);
         let sound = self.check("Sound effects", Command::ToggleSound);
         let volume = self.slider(SLIDER_VOLUME);
+        let power = self.popup(
+            PowerSaving::ALL
+                .iter()
+                .map(|p| (p.label(), Command::SetPowerSaving(*p)))
+                .collect(),
+        );
         Self::page(vec![
             Row::Section("Hobbies"),
             Row::Under(naps),
@@ -698,6 +706,13 @@ impl SettingsWindow {
             )),
             Row::Under(Self::hint(
                 "Drawing platforms (⌘D), notes and rivals are in the menu bar menu.",
+            )),
+            Row::Section("Power"),
+            Row::Field("Power saving:", power),
+            Row::Under(Self::hint(
+                "Saving power: the local AI is asked less often (8 s apart, at least every \
+                 two minutes) and it draws at 30 frames a second. Automatic does this only on \
+                 battery, and says so when you unplug.",
             )),
         ])
     }
