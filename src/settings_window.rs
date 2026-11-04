@@ -804,10 +804,19 @@ impl SettingsWindow {
     }
 
     /// Switch to the tab labelled `label` (e.g. "Mind").
+    /// Unknown labels are ignored (AppKit throws for them, which would abort).
     pub fn select_tab(&self, label: &str) {
         // SAFETY: main thread; the tab view lives as long as the window.
+        // `indexOfTabViewItemWithIdentifier:` returns NSNotFound (isize::MAX)
+        // rather than throwing, so we only select a tab that exists.
         unsafe {
-            let _: () = msg_send![self.tabs, selectTabViewItemWithIdentifier: ns_string(label)];
+            let id = ns_string(label);
+            let i: isize = msg_send![self.tabs, indexOfTabViewItemWithIdentifier: id];
+            if i == isize::MAX {
+                log::warn!("settings window: no tab named {label:?}");
+                return;
+            }
+            let _: () = msg_send![self.tabs, selectTabViewItemAtIndex: i];
         }
     }
 
