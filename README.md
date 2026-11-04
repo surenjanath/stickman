@@ -211,7 +211,7 @@ tabs with headed sections:
 | Personality | Name, colour, size, hat; temper and chattiness sliders, language, bleeping, losing its temper; behaviour (Auto or one pinned mood), quiet during video calls, sleepy at night, earn moves by levelling up. |
 | Abilities | Permissions (what's allowed, with buttons to System Settings, Restart Stickman and Get Ollama); your cursor (pushes, grabs, dodging back while you leave the mouse alone), your windows (shakes, shoves, throws), your screen (walking on text, ripping words and how long they stay, Dock icons, scrollbar swords, piles), powers and events (super powers, jail-break intro, rival visits, minions, boss fights, with Start a Boss Fight and Call the Minions buttons). |
 | Fun & Sound | Naps, dancing, dancing to music, doodles, sitting on edges, speech bubbles, sound effects and their volume, power saving. |
-| About | Version, which model it thinks with, privacy, links (website, report a bug, show its files), credits and licence. |
+| About | Version, who made it (with a link to their GitHub), which model it thinks with, privacy, links (website, report a bug, show its files), credits and licence. |
 
 Everything is saved and restored on the next launch. Environment variables
 below override settings at startup.
@@ -515,6 +515,10 @@ Engineering rules (from `claude.md`):
   `defaultFigure()`) by Filippo Calippo, licensed GPL-3.0, which is why Stickman
   is GPL-3.0 too (see `LICENSE`).
 - All animation, behaviour, rendering and OS integration here is original.
+
+## Author
+
+Made by [Surenjanath Singh](https://github.com/surenjanath).
 
 ## License
 

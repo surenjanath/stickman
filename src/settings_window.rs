@@ -948,6 +948,7 @@ impl SettingsWindow {
         let links = Self::hstack(
             &[
                 Self::button("Website", Command::OpenWebsite),
+                Self::button("Surenjanath on GitHub", Command::OpenAuthor),
                 Self::button("Report a Bug", Command::ReportBug),
                 Self::button("Show Its Files", Command::ShowDataFolder),
             ],
@@ -956,6 +957,7 @@ impl SettingsWindow {
         Self::page(vec![
             Row::Under(title),
             Row::Under(version),
+            Row::Under(Self::label("Made by Surenjanath Singh")),
             Row::Under(Self::wrapping(
                 "A stick figure with a mind of its own that lives on your desktop. It walks \
                  on your windows and text, fights your cursor, remembers what you do to it \
@@ -972,6 +974,7 @@ impl SettingsWindow {
             Row::Section("Links"),
             Row::Under(links),
             Row::Section("Credits"),
+            Row::Field("Created by:", Self::label("Surenjanath Singh")),
             Row::Under(Self::wrapping(
                 "Written in Rust with winit, wgpu, rapier2d and Apple's Vision framework. \
                  The figure's rig comes from StykAnimate by Filippo Calippo (GPL-3.0).",

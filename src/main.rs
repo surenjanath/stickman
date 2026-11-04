@@ -2727,6 +2727,9 @@ impl Scene {
                 Command::OpenWebsite => {
                     macos::open_url(env!("CARGO_PKG_REPOSITORY"));
                 }
+                Command::OpenAuthor => {
+                    macos::open_url("https://github.com/surenjanath");
+                }
                 Command::ReportBug => {
                     macos::open_url(&format!("{}/issues", env!("CARGO_PKG_REPOSITORY")));
                 }

@@ -460,6 +460,8 @@ pub enum Command {
     OpenWebsite,
     /// About: file an issue.
     ReportBug,
+    /// About: the author's GitHub profile.
+    OpenAuthor,
     /// About: reveal the settings, mind and diary in Finder.
     ShowDataFolder,
     /// Permissions: download Ollama (the local AI).
@@ -549,6 +551,7 @@ impl Command {
             Command::OpenScreenRecordingSettings => 501,
             Command::OpenWebsite => 502,
             Command::ReportBug => 503,
+            Command::OpenAuthor => 507,
             Command::ShowDataFolder => 504,
             Command::GetOllama => 505,
             Command::Relaunch => 506,
@@ -617,6 +620,7 @@ impl Command {
             501 => Command::OpenScreenRecordingSettings,
             502 => Command::OpenWebsite,
             503 => Command::ReportBug,
+            507 => Command::OpenAuthor,
             504 => Command::ShowDataFolder,
             505 => Command::GetOllama,
             506 => Command::Relaunch,
@@ -851,6 +855,7 @@ mod tests {
             Command::OpenScreenRecordingSettings,
             Command::OpenWebsite,
             Command::ReportBug,
+            Command::OpenAuthor,
             Command::ShowDataFolder,
             Command::GetOllama,
             Command::Relaunch,
