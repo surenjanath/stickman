@@ -102,6 +102,9 @@ pub struct AppWindow {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Snapshot {
     pub windows: Vec<AppWindow>,
+    /// Our own windows floating over the apps (Settings): what's under them
+    /// is hidden, so the figure mustn't stand on it or rip it off the screen.
+    pub covers: Vec<Rect>,
 }
 
 impl Snapshot {
@@ -134,6 +137,16 @@ pub fn filter_windows(raw: &[WindowInfo], own_pid: i64, screens: &[Rect]) -> Vec
         .collect()
 }
 
+/// Our own ordinary windows (Settings, floating at level 3), not the overlay
+/// (level 25) or the menu bar item.
+pub fn own_covers(raw: &[WindowInfo], own_pid: i64) -> Vec<Rect> {
+    raw.iter()
+        .filter(|w| w.pid == own_pid && w.layer < 20 && w.alpha > 0.01)
+        .filter(|w| w.bounds.width >= 120.0 && w.bounds.height >= 60.0)
+        .map(|w| w.bounds)
+        .collect()
+}
+
 pub fn snapshot(own_pid: i64, screens: &[Rect]) -> Snapshot {
     let raw = list_windows(
         cgw::kCGWindowListOptionOnScreenOnly | cgw::kCGWindowListExcludeDesktopElements,
@@ -141,6 +154,7 @@ pub fn snapshot(own_pid: i64, screens: &[Rect]) -> Snapshot {
     );
     Snapshot {
         windows: filter_windows(&raw, own_pid, screens),
+        covers: own_covers(&raw, own_pid),
     }
 }
 
@@ -209,6 +223,19 @@ mod tests {
         ];
         let w = filter_windows(&list, 99, &[display]);
         assert_eq!(w.iter().map(|w| w.id).collect::<Vec<_>>(), [1]);
+    }
+
+    #[test]
+    fn our_settings_window_covers_the_apps_but_the_overlay_does_not() {
+        let list = [
+            raw(1, 99, 3, 100.0, 100.0, 640.0, 680.0), // Settings (floating)
+            raw(2, 99, 25, 0.0, 0.0, 1800.0, 1169.0),  // the overlay
+            raw(3, 99, 25, 1100.0, 0.0, 34.0, 24.0),   // menu bar item
+            raw(4, 42, 0, 50.0, 50.0, 900.0, 700.0),   // someone else's
+        ];
+        let covers = own_covers(&list, 99);
+        assert_eq!(covers.len(), 1);
+        assert_eq!(covers[0].width, 640.0);
     }
 
     #[test]

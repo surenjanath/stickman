@@ -453,6 +453,33 @@ struct Scene {
     stats_at: Instant,
 }
 
+fn intersects(a: &Rect, b: &Rect) -> bool {
+    a.x < b.right() && b.x < a.right() && a.y < b.bottom() && b.y < a.bottom()
+}
+
+/// `lines` with the parts hidden under `covers` cut out (a line can split in two).
+fn uncovered(lines: &[Platform], covers: &[Rect]) -> Vec<Platform> {
+    let mut out: Vec<Platform> = lines.to_vec();
+    for c in covers {
+        let (top, bottom) = (c.y as f32, c.bottom() as f32);
+        let (x0, x1) = (c.x as f32, c.right() as f32);
+        out = out
+            .into_iter()
+            .flat_map(|p| {
+                if p.y < top || p.y > bottom || p.x1 <= x0 || p.x0 >= x1 {
+                    return vec![p];
+                }
+                [(p.x0, x0), (x1, p.x1)]
+                    .into_iter()
+                    .filter(|(a, b)| b - a >= 40.0)
+                    .map(|(a, b)| Platform { x0: a, x1: b, ..p })
+                    .collect()
+            })
+            .collect();
+    }
+    out
+}
+
 impl Scene {
     fn platforms(&self) -> Vec<Platform> {
         let wins: Vec<(u32, Rect)> = self
@@ -461,9 +488,23 @@ impl Scene {
             .iter()
             .map(|w| (w.id, w.rect))
             .collect();
+        // Our own Settings window floats over the apps: it hides their title
+        // bars and text like any window in front would.
+        const COVER: u32 = u32::MAX;
+        let wins: Vec<(u32, Rect)> = self
+            .snapshot
+            .covers
+            .iter()
+            .map(|r| (COVER, *r))
+            .chain(wins)
+            .collect();
         let mut ps = self.layout.grounds();
-        ps.extend(window_platforms(&wins, &self.layout.frames(), 40.0));
-        ps.extend(self.text.iter().copied());
+        ps.extend(
+            window_platforms(&wins, &self.layout.frames(), 40.0)
+                .into_iter()
+                .filter(|p| p.owner != COVER),
+        );
+        ps.extend(uncovered(&self.text, &self.snapshot.covers));
         ps.extend(self.sketch.platforms());
         if self.settings.piles {
             ps.extend(self.words.pile_platforms());
@@ -477,6 +518,10 @@ impl Scene {
             self.snapshot = s;
             changed = true;
         }
+        if changed && self.words.covers != self.snapshot.covers {
+            log::debug!("windows: ours cover {:?}", self.snapshot.covers);
+        }
+        self.words.covers.clone_from(&self.snapshot.covers);
         let active = self.snapshot.active().map(|w| ocr::Request {
             id: w.id,
             rect: w.rect,
@@ -1583,9 +1628,16 @@ impl Scene {
         let screen = self.layout.screen_at(head).frame;
         let top = v2(head.x, (head.y - 230.0).max(screen.y as f32 + 60.0));
         self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(11);
+        // Letters under our Settings window would tear off its pixels instead.
+        let letters: Vec<(char, Rect)> = self
+            .screen_letters
+            .iter()
+            .filter(|(_, r)| !self.snapshot.covers.iter().any(|c| intersects(c, r)))
+            .copied()
+            .collect();
         let mut note = Note::plan(
             &text,
-            &self.screen_letters,
+            &letters,
             top,
             screen.x as f32 + 20.0,
             screen.right() as f32 - 20.0,
@@ -4660,6 +4712,38 @@ mod tests {
     use super::*;
     use stickman::physics::PlatformKind;
     use stickman::stickman::WALKER_RGB;
+
+    #[test]
+    fn text_under_our_settings_window_is_cut_out() {
+        let line = |x0, x1, y| Platform {
+            x0,
+            x1,
+            y,
+            kind: PlatformKind::Text,
+            owner: 7,
+        };
+        let settings = Rect {
+            x: 400.0,
+            y: 200.0,
+            width: 300.0,
+            height: 400.0,
+        };
+        let out = uncovered(
+            &[
+                line(100.0, 1000.0, 300.0),
+                line(100.0, 1000.0, 700.0),
+                line(450.0, 600.0, 250.0),
+            ],
+            &[settings],
+        );
+        // Split around it; the one below it is untouched; the one inside is gone.
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().any(|p| p.y == 300.0 && p.x1 == 400.0));
+        assert!(out.iter().any(|p| p.y == 300.0 && p.x0 == 700.0));
+        assert!(out
+            .iter()
+            .any(|p| p.y == 700.0 && p.x0 == 100.0 && p.x1 == 1000.0));
+    }
 
     #[test]
     fn clicks_are_caught_only_when_aiming() {

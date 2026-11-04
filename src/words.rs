@@ -142,6 +142,8 @@ pub struct WordPlay {
     pub hover_center: V2,
     /// Volley in progress: (target, seconds until the next word goes).
     volley: Option<(V2, f32)>,
+    /// Our own windows over the page (Settings): words under them are hidden.
+    pub covers: Vec<Rect>,
 }
 
 fn overlaps(a: &Rect, b: &Rect) -> f64 {
@@ -157,6 +159,11 @@ fn center(r: &Rect) -> V2 {
 }
 
 impl WordPlay {
+    /// Under one of our own windows (any overlap: the capture would show it).
+    fn covered(&self, r: &Rect) -> bool {
+        self.covers.iter().any(|c| overlaps(c, r) > 0.0)
+    }
+
     pub fn new(seed: u64) -> WordPlay {
         WordPlay {
             rng: seed | 1,
@@ -203,6 +210,7 @@ impl WordPlay {
         let target = self.target.map(|t| t.0.id);
         self.words.iter().filter(move |w| {
             Some(w.window) == active
+                && !self.covered(&w.rect)
                 && Some(w.id) != target
                 && (center(&w.rect) - near).length() < radius
                 && !self.holes.iter().any(|h| overlaps(&h.rect, &w.rect) > 0.3)
@@ -377,7 +385,18 @@ impl WordPlay {
         }
         if let Some((a, _, win, age)) = &mut self.target {
             *age += dt;
-            if (*win == ICON_WINDOW || Some(*win) == active) && *age < 10.0 {
+            let hidden = self.covers.iter().any(|c| {
+                overlaps(
+                    c,
+                    &Rect {
+                        x: f64::from(a.at.x) - 1.0,
+                        y: f64::from(a.at.y) - 1.0,
+                        width: 2.0,
+                        height: 2.0,
+                    },
+                ) > 0.0
+            });
+            if (*win == ICON_WINDOW || Some(*win) == active) && *age < 10.0 && !hidden {
                 return Some(*a);
             }
             self.target = None;
@@ -396,9 +415,10 @@ impl WordPlay {
             .iter()
             .filter(|w| {
                 Some(w.window) == active
+                    && !self.covered(&w.rect)
                     && !self.holes.iter().any(|h| overlaps(&h.rect, &w.rect) > 0.3)
             })
-            .chain(self.icons.iter())
+            .chain(self.icons.iter().filter(|w| !self.covered(&w.rect)))
             .min_by(|a, b| {
                 let score = |w: &ScreenWord| {
                     let d = (center(&w.rect) - figure).length();
@@ -729,7 +749,8 @@ impl WordPlay {
 
     /// Holes first (under everything), then carried and flying words as sprites.
     pub fn draw(&self, out: &mut DrawList, hands: Option<V2>) {
-        for h in &self.holes {
+        // Our Settings window is in front of the page: no patches on it.
+        for h in self.holes.iter().filter(|h| !self.covered(&h.rect)) {
             let alpha = if h.age > HOLE_LIFETIME {
                 1.0 - (h.age - HOLE_LIFETIME) / HOLE_FADE
             } else {
