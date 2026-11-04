@@ -2100,8 +2100,12 @@ impl Agent {
                         self.set_action(Action::Throw { target });
                         return;
                     }
-                } else if let Some(a) = s.ammo.filter(|_| matches!(t, Tactic::Any | Tactic::Words))
-                {
+                } else if let Some(a) = s.ammo.filter(|_| {
+                    // Planning a sword with no scrollbar to rip off: words instead.
+                    let unarmed =
+                        t == Tactic::Blade && self.weapon.is_none() && !s.weapon_available;
+                    matches!(t, Tactic::Any | Tactic::Words) || unarmed
+                }) {
                     // Close-range fists beat fetching ammo, until a few hits
                     // in a row haven't driven the cursor off: then mix it up.
                     // With words as the plan, it always goes for ammo.
@@ -2809,6 +2813,8 @@ mod tests {
         assert!(far_cursor_with_ammo(Tactic::Any).contains(&Event::Grabbed { id: 3 }));
         // Fists: it ignores the ammo and goes for the cursor.
         assert!(!far_cursor_with_ammo(Tactic::Fists).contains(&Event::Grabbed { id: 3 }));
+        // A sword plan with no scrollbar to rip off: it throws words instead.
+        assert!(far_cursor_with_ammo(Tactic::Blade).contains(&Event::Grabbed { id: 3 }));
     }
 
     #[test]

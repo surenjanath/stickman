@@ -1094,12 +1094,13 @@ impl Scene {
             if fighting {
                 let next = self.mind.war.choose(&self.tactics(), roll(self.seed, 19));
                 log::info!(
-                    "war: {} did {:.0} damage in {:.0}s (hit {} times); next: {}",
+                    "war: {} did {:.0} damage in {:.0}s (hit {} times); next: {} (odds {})",
                     done.tactic.name(),
                     done.damage,
                     done.secs,
                     done.hurt,
-                    next.name()
+                    next.name(),
+                    self.mind.war.odds_text(&self.tactics())
                 );
                 self.mind.war.begin(next);
                 if let Some(line) = war::War::verdict(&done, next) {
@@ -1109,7 +1110,11 @@ impl Scene {
             }
         } else if fighting && self.mind.war.stint.is_none() {
             let next = self.mind.war.choose(&self.tactics(), roll(self.seed, 19));
-            log::info!("war: fight starts, plan: {}", next.name());
+            log::info!(
+                "war: fight starts, plan: {} (odds {})",
+                next.name(),
+                self.mind.war.odds_text(&self.tactics())
+            );
             self.mind.war.begin(next);
         }
         // Badly hurt: fall back and recover.

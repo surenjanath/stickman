@@ -22,8 +22,14 @@ pub const STINT: f32 = 20.0;
 const MIN_STINT: f32 = 3.0;
 /// How much a hit from the user costs, in damage dealt.
 const HURT_COST: f32 = 2.0;
-/// How often it tries something other than its best tactic.
-const EXPLORE: f32 = 0.12;
+/// No tactic's chance of being picked ever drops below this.
+pub const MIN_ODDS: f32 = 0.05;
+/// How sharply results tilt the odds: a tactic that does this much more net
+/// damage per second than another is e (≈2.7) times as likely.
+const TILT: f32 = 1.0;
+/// Stints before a tactic's results count fully (until then its odds stay
+/// close to the even share).
+const TRUST_STINTS: f32 = 3.0;
 
 /// What one tactic has achieved over all its stints.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
@@ -150,31 +156,61 @@ impl War {
         Some(s)
     }
 
-    /// Pick a tactic from `available`: usually the one that has worked best,
-    /// with a bonus for ones it hasn't tried much, and now and then (`roll`
-    /// under `EXPLORE`) something at random, to keep learning.
-    pub fn choose(&self, available: &[Tactic], roll: f32) -> Tactic {
+    /// The chance of picking each of `available` next. It starts fair (an
+    /// equal share each), tilts toward what has done more net damage per
+    /// second as the record grows (a tactic's results count for more the
+    /// more stints it has had), and never drops below `MIN_ODDS`.
+    pub fn odds(&self, available: &[Tactic]) -> Vec<(Tactic, f32)> {
         let n = available.len();
         if n == 0 {
-            return Tactic::Any;
+            return Vec::new();
         }
-        if roll < EXPLORE {
-            return available[((roll / EXPLORE) * n as f32) as usize % n];
+        let even = 1.0 / n as f32;
+        // How results alone would share it out (softmax of the rates).
+        let rates: Vec<f32> = available
+            .iter()
+            .map(|t| self.record_of(*t).rate())
+            .collect();
+        let top = rates.iter().copied().fold(f32::MIN, f32::max);
+        let pull: Vec<f32> = rates.iter().map(|r| ((r - top) / TILT).exp()).collect();
+        let total: f32 = pull.iter().sum();
+        // Blend with the even share by how much each record can be trusted.
+        let mut p: Vec<f32> = available
+            .iter()
+            .zip(&pull)
+            .map(|(t, w)| {
+                let k = self.record_of(*t).stints as f32;
+                let trust = k / (k + TRUST_STINTS);
+                (1.0 - trust) * even + trust * w / total
+            })
+            .collect();
+        normalize(&mut p);
+        floor_odds(&mut p, MIN_ODDS.min(even));
+        available.iter().copied().zip(p).collect()
+    }
+
+    /// Pick a tactic from `available` at random by its [`War::odds`] (`roll`
+    /// is a uniform random number in 0..1).
+    pub fn choose(&self, available: &[Tactic], roll: f32) -> Tactic {
+        let odds = self.odds(available);
+        let mut acc = 0.0;
+        for (t, p) in &odds {
+            acc += p;
+            if roll < acc {
+                return *t;
+            }
         }
-        let tried: f32 = available
-            .iter()
-            .map(|t| self.record_of(*t).stints as f32)
-            .sum::<f32>()
-            + 1.0;
-        let score = |t: &Tactic| {
-            let r = self.record_of(*t);
-            r.rate() + 0.4 * (tried.ln().max(0.0) / (r.stints as f32 + 1.0)).sqrt()
-        };
-        available
-            .iter()
-            .copied()
-            .max_by(|a, b| score(a).total_cmp(&score(b)))
-            .unwrap_or(Tactic::Any)
+        odds.last().map_or(Tactic::Any, |(t, _)| *t)
+    }
+
+    /// The odds in words: "words 46% · blade 30% · fists 8%".
+    pub fn odds_text(&self, available: &[Tactic]) -> String {
+        let mut o = self.odds(available);
+        o.sort_by(|a, b| b.1.total_cmp(&a.1));
+        o.iter()
+            .map(|(t, p)| format!("{} {:.0}%", t.name(), p * 100.0))
+            .collect::<Vec<_>>()
+            .join(" · ")
     }
 
     /// Its best and worst tactics so far (each tried at least twice).
@@ -241,6 +277,38 @@ impl War {
             Some(format!("Too many hits. Trying {}.", next.describe()))
         } else {
             None
+        }
+    }
+}
+
+fn normalize(p: &mut [f32]) {
+    let sum: f32 = p.iter().sum();
+    if sum > 0.0 {
+        p.iter_mut().for_each(|v| *v /= sum);
+    }
+}
+
+/// Raise every share below `floor` to it, taking the difference from the
+/// others in proportion (repeated, since that can push another under).
+fn floor_odds(p: &mut [f32], floor: f32) {
+    for _ in 0..p.len() {
+        let low: f32 = p.iter().filter(|v| **v <= floor).count() as f32 * floor;
+        let rest: f32 = p.iter().filter(|v| **v > floor).sum();
+        if rest <= 0.0 {
+            break;
+        }
+        let scale = (1.0 - low) / rest;
+        let mut again = false;
+        for v in p.iter_mut() {
+            if *v <= floor {
+                *v = floor;
+            } else {
+                *v *= scale;
+                again |= *v < floor;
+            }
+        }
+        if !again {
+            break;
         }
     }
 }
@@ -349,9 +417,11 @@ mod tests {
     fn it_learns_which_tactic_works_and_mostly_sticks_to_it() {
         let mut w = War::default();
         let all = Tactic::ALL;
-        // Untried tactics get tried first.
-        let first = w.choose(&all, 0.5);
-        assert!(all.contains(&first));
+        let odds = |w: &War, t: Tactic| w.odds(&all).iter().find(|o| o.0 == t).unwrap().1;
+        // Fair to begin with: an equal share each.
+        for t in all {
+            assert!((odds(&w, t) - 0.2).abs() < 1e-4);
+        }
         for _ in 0..3 {
             stint(&mut w, Tactic::Fists, 0, 3);
             stint(&mut w, Tactic::Words, 6, 0);
@@ -359,14 +429,42 @@ mod tests {
             stint(&mut w, Tactic::Powers, 1, 0);
             stint(&mut w, Tactic::Blade, 0, 0);
         }
+        // Words worked best: it's the favourite, fists the least likely, and
+        // nothing is ever below 5%.
+        let words = odds(&w, Tactic::Words);
+        assert!(all
+            .iter()
+            .all(|t| *t == Tactic::Words || odds(&w, *t) < words));
+        assert!(odds(&w, Tactic::Fists) < odds(&w, Tactic::Blade));
+        let sum: f32 = w.odds(&all).iter().map(|o| o.1).sum();
+        assert!((sum - 1.0).abs() < 1e-4);
+        // A runaway favourite still leaves everything else at least 5%.
+        for _ in 0..40 {
+            stint(&mut w, Tactic::Words, 40, 0);
+        }
+        for t in all {
+            assert!(odds(&w, t) >= MIN_ODDS - 1e-4, "{t:?} at {}", odds(&w, t));
+        }
+        assert!(odds(&w, Tactic::Words) > 0.55);
+        // Once the losers have a long record too, the floor is what holds them up.
+        for _ in 0..40 {
+            for t in [Tactic::Fists, Tactic::Grab, Tactic::Powers, Tactic::Blade] {
+                stint(&mut w, t, 0, 0);
+            }
+        }
+        for t in all {
+            assert!(odds(&w, t) >= MIN_ODDS - 1e-4, "{t:?} at {}", odds(&w, t));
+        }
+        assert!((odds(&w, Tactic::Fists) - MIN_ODDS).abs() < 0.01);
+        assert!((odds(&w, Tactic::Words) - 0.8).abs() < 0.01);
+        // The pick follows the odds: the roll walks the shares in order.
+        assert_eq!(w.choose(&all, 0.0), Tactic::Fists);
         assert_eq!(w.choose(&all, 0.5), Tactic::Words);
-        assert_eq!(w.record_of(Tactic::Words).stints, 3);
+        assert_eq!(w.choose(&all, 0.999), Tactic::Blade);
         // Only what's available.
         assert_ne!(w.choose(&[Tactic::Fists, Tactic::Grab], 0.5), Tactic::Words);
-        // Sometimes it experiments.
-        assert_eq!(w.choose(&all, 0.0), Tactic::Fists);
+        assert!(w.odds_text(&all).starts_with("words "));
         assert!(w.summary().contains("best weapon is throwing words"));
-        assert!(w.summary().contains("my fists works worst"));
     }
 
     #[test]
