@@ -852,9 +852,13 @@ fn test_ai_director_decides() {
     )
     .is_ok();
     let o = Overlay::spawn(&[("STICKMAN_MODE", ""), ("STICKMAN_DIRECTOR_INTERVAL_S", "1")]);
-    // With Ollama up, a model decision must arrive (a transient fallback is fine);
-    // without it, the built-in director must keep the figure going.
-    let want = if ollama_up { "(Llm," } else { "(Fallback," };
+    // With Ollama up, the model must be asked (at launch, and on events);
+    // without it, the built-in director must take over.
+    let want = if ollama_up {
+        "director: asked the model"
+    } else {
+        "using the built-in director"
+    };
     let line = o
         .wait_for(want, Duration::from_secs(20))
         .unwrap_or_else(|| panic!("no {want} decision within 20 s (ollama up: {ollama_up})"));
@@ -903,7 +907,8 @@ fn test_menu_bar_icon(o: &Overlay) {
 }
 
 /// The headline trick: in combat the figure rips words off the active window
-/// and throws them at the cursor (pointer pushes are disabled in tests).
+/// (or icons off the Dock, when it's standing on it and they're nearer) and
+/// throws them at the cursor (pointer pushes are disabled in tests).
 fn test_rips_words_and_throws_them() {
     let o = Overlay::spawn(&[
         ("STICKMAN_MODE", "COMBAT"),
@@ -913,10 +918,8 @@ fn test_rips_words_and_throws_them() {
         println!("      (skipped: Screen Recording not granted to the terminal)");
         return;
     }
-    let ripped = o.wait_for(
-        "event: ripped a word off the screen",
-        Duration::from_secs(25),
-    );
+    // "ripped a word off the screen" or "ripped an icon off the Dock".
+    let ripped = o.wait_for("event: ripped a", Duration::from_secs(25));
     let Some(line) = ripped else {
         let words_seen = o
             .logs
@@ -941,7 +944,7 @@ fn test_rips_words_and_throws_them() {
             .lock()
             .unwrap()
             .iter()
-            .filter(|l| l.contains("ripped a word"))
+            .filter(|l| l.contains("event: ripped a"))
             .count()
             > 1;
     assert!(thrown, "a word was grabbed but never thrown");
