@@ -21,8 +21,13 @@ pub enum Shape {
     House,
     Sun,
     Spiral,
-    /// A cannon it draws to fight with (not one of its idle doodles).
+    /// Weapons it draws to fight with (not idle doodles). Drawn pointing
+    /// right (+x); [`Shape::grip`] is where its hand goes.
     Cannon,
+    Sword,
+    Hammer,
+    Bow,
+    Bomb,
 }
 
 impl Shape {
@@ -35,6 +40,31 @@ impl Shape {
         Shape::Spiral,
     ];
 
+    pub const WEAPONS: [Shape; 5] = [
+        Shape::Cannon,
+        Shape::Sword,
+        Shape::Hammer,
+        Shape::Bow,
+        Shape::Bomb,
+    ];
+
+    /// A weapon (drawn bold, then taken off the page into its hand).
+    pub fn weapon(self) -> bool {
+        Shape::WEAPONS.contains(&self)
+    }
+
+    /// Where the hand holds it, in the shape's unit box.
+    pub fn grip(self) -> V2 {
+        match self {
+            Shape::Cannon => v2(-0.2, 0.0),
+            Shape::Sword => v2(-0.7, 0.0),
+            Shape::Hammer => v2(-0.75, 0.0),
+            Shape::Bow => v2(0.35, 0.0),
+            Shape::Bomb => v2(-0.1, 0.2),
+            _ => V2::ZERO,
+        }
+    }
+
     pub fn color(self) -> [f32; 4] {
         match self {
             Shape::Heart => [0.9, 0.2, 0.3, 1.0],
@@ -43,7 +73,11 @@ impl Shape {
             Shape::House => [0.2, 0.45, 0.85, 1.0],
             Shape::Sun => [1.0, 0.55, 0.1, 1.0],
             Shape::Spiral => [0.55, 0.3, 0.85, 1.0],
-            Shape::Cannon => [0.1, 0.1, 0.12, 1.0],
+            Shape::Cannon => [0.2, 0.22, 0.3, 1.0],
+            Shape::Sword => [0.2, 0.5, 0.95, 1.0],
+            Shape::Hammer => [0.88, 0.42, 0.12, 1.0],
+            Shape::Bow => [0.15, 0.62, 0.3, 1.0],
+            Shape::Bomb => [0.16, 0.16, 0.22, 1.0],
         }
     }
 
@@ -108,21 +142,141 @@ impl Shape {
                 }
                 s
             }
-            Shape::Cannon => vec![
-                // Barrel, pointing right.
+            Shape::Cannon => {
+                // A tapered barrel with a rounded breech, bands and a
+                // muzzle, on a spoked wheel, with a lit fuse.
+                let breech: Vec<V2> = (0..=10)
+                    .map(|i| {
+                        let a = PI / 2.0 + i as f32 / 10.0 * PI;
+                        v2(-0.75 + 0.18 * a.cos(), -0.09 - 0.29 * a.sin())
+                    })
+                    .collect();
+                let mut s = vec![
+                    vec![
+                        v2(-0.75, 0.2),
+                        v2(0.85, 0.08),
+                        v2(0.85, -0.5),
+                        v2(-0.75, -0.38),
+                    ],
+                    breech,
+                    circle(v2(-0.95, -0.09), 0.06, 8),
+                    vec![
+                        v2(0.85, -0.6),
+                        v2(0.95, -0.6),
+                        v2(0.95, 0.18),
+                        v2(0.85, 0.18),
+                    ],
+                    vec![v2(0.0, -0.45), v2(0.0, 0.14)],
+                    vec![v2(0.45, -0.48), v2(0.45, 0.11)],
+                    circle(v2(-0.2, 0.5), 0.42, 20),
+                ];
+                for i in 0..3 {
+                    let a = i as f32 / 3.0 * PI + 0.3;
+                    let d = v2(a.cos(), a.sin()) * 0.42;
+                    s.push(vec![v2(-0.2, 0.5) - d, v2(-0.2, 0.5) + d]);
+                }
+                s.push(vec![v2(-0.6, -0.36), v2(-0.68, -0.6), v2(-0.55, -0.8)]);
+                for i in 0..4 {
+                    let a = i as f32 / 4.0 * TAU;
+                    let d = v2(a.cos(), a.sin()) * 0.1;
+                    s.push(vec![v2(-0.55, -0.88) + d * 0.3, v2(-0.55, -0.88) + d]);
+                }
+                s
+            }
+            Shape::Sword => vec![
+                // Blade, point to the right, with a fuller down the middle.
                 vec![
-                    v2(-0.9, -0.35),
-                    v2(0.9, -0.5),
-                    v2(0.9, 0.05),
-                    v2(-0.9, 0.2),
-                    v2(-0.9, -0.35),
+                    v2(-0.4, -0.12),
+                    v2(0.8, -0.12),
+                    v2(1.0, 0.0),
+                    v2(0.8, 0.12),
+                    v2(-0.4, 0.12),
                 ],
-                // Muzzle ring and the wheel.
-                vec![v2(0.9, -0.62), v2(1.0, -0.22), v2(0.9, 0.17)],
-                circle(v2(-0.35, 0.55), 0.38, 16),
-                // A fuse.
-                vec![v2(-0.9, -0.1), v2(-1.0, -0.5), v2(-0.8, -0.75)],
+                vec![v2(-0.3, 0.0), v2(0.7, 0.0)],
+                // Crossguard, grip and pommel.
+                vec![
+                    v2(-0.5, -0.42),
+                    v2(-0.4, -0.42),
+                    v2(-0.4, 0.42),
+                    v2(-0.5, 0.42),
+                    v2(-0.5, -0.42),
+                ],
+                vec![
+                    v2(-0.5, -0.07),
+                    v2(-0.86, -0.07),
+                    v2(-0.86, 0.07),
+                    v2(-0.5, 0.07),
+                ],
+                vec![v2(-0.62, -0.07), v2(-0.68, 0.07)],
+                vec![v2(-0.74, -0.07), v2(-0.8, 0.07)],
+                circle(v2(-0.93, 0.0), 0.07, 8),
             ],
+            Shape::Hammer => vec![
+                // Handle, then a big block head with bands.
+                vec![
+                    v2(0.45, -0.07),
+                    v2(-1.0, -0.07),
+                    v2(-1.0, 0.07),
+                    v2(0.45, 0.07),
+                ],
+                vec![
+                    v2(0.45, -0.55),
+                    v2(0.95, -0.55),
+                    v2(0.95, 0.55),
+                    v2(0.45, 0.55),
+                    v2(0.45, -0.55),
+                ],
+                vec![v2(0.45, -0.32), v2(0.95, -0.32)],
+                vec![v2(0.45, 0.32), v2(0.95, 0.32)],
+                vec![v2(-0.88, -0.07), v2(-0.8, 0.07)],
+                vec![v2(-0.74, -0.07), v2(-0.66, 0.07)],
+            ],
+            Shape::Bow => {
+                // The bow bends right; the string drawn back with an arrow on it.
+                let limb: Vec<V2> = (0..=20)
+                    .map(|i| {
+                        let y = -0.95 + 1.9 * i as f32 / 20.0;
+                        v2(-0.2 + 0.55 * (1.0 - y * y), y)
+                    })
+                    .collect();
+                vec![
+                    limb,
+                    vec![v2(-0.2, -0.95), v2(-0.45, 0.0), v2(-0.2, 0.95)],
+                    vec![v2(-0.45, 0.0), v2(0.95, 0.0)],
+                    vec![v2(0.8, -0.1), v2(0.97, 0.0), v2(0.8, 0.1)],
+                    vec![v2(-0.6, -0.12), v2(-0.45, 0.0), v2(-0.6, 0.12)],
+                ]
+            }
+            Shape::Bomb => {
+                let shine: Vec<V2> = (0..=6)
+                    .map(|i| {
+                        let a = PI * (1.1 + 0.35 * i as f32 / 6.0);
+                        v2(-0.1, 0.2) + v2(a.cos(), a.sin()) * 0.48
+                    })
+                    .collect();
+                let mut s = vec![
+                    circle(v2(-0.1, 0.2), 0.7, 28),
+                    shine,
+                    vec![
+                        v2(-0.25, -0.5),
+                        v2(-0.25, -0.66),
+                        v2(0.05, -0.66),
+                        v2(0.05, -0.5),
+                    ],
+                    vec![
+                        v2(-0.1, -0.66),
+                        v2(0.05, -0.85),
+                        v2(0.28, -0.8),
+                        v2(0.42, -0.9),
+                    ],
+                ];
+                for i in 0..4 {
+                    let a = i as f32 / 4.0 * TAU + 0.4;
+                    let d = v2(a.cos(), a.sin()) * 0.11;
+                    s.push(vec![v2(0.48, -0.9) + d * 0.3, v2(0.48, -0.9) + d]);
+                }
+                s
+            }
             Shape::Spiral => vec![(0..=60)
                 .map(|i| {
                     let k = i as f32 / 60.0;
@@ -130,6 +284,50 @@ impl Shape {
                     v2(a.cos(), a.sin()) * (0.08 + 0.92 * k)
                 })
                 .collect()],
+        }
+    }
+}
+
+/// A point of a shape's unit box on the page: centred on `origin`, `size`
+/// points to the edge, mirrored left-right when `mirror` (facing left).
+pub fn place(p: V2, origin: V2, size: f32, mirror: bool) -> V2 {
+    let x = if mirror { -p.x } else { p.x };
+    origin + v2(x, p.y) * size
+}
+
+/// Ink `shape` up to `progress` (0..1), each unit-box point placed by `map`.
+/// Weapons are drawn with a bold marker, doodles with a fine pen.
+pub fn ink(out: &mut DrawList, shape: Shape, progress: f32, alpha: f32, map: &dyn Fn(V2) -> V2) {
+    if alpha <= 0.0 || progress <= 0.0 {
+        return;
+    }
+    let strokes = shape.strokes();
+    let total: f32 = strokes.iter().map(|s| length(s)).sum();
+    let c = shape.color();
+    let (outline, line) = if shape.weapon() {
+        (3.6, 2.3)
+    } else {
+        (2.6, 1.5)
+    };
+    for (color, half) in [
+        ([1.0, 1.0, 1.0, 0.9 * alpha], outline),
+        ([c[0], c[1], c[2], alpha], line),
+    ] {
+        let mut left = progress * total;
+        'strokes: for s in &strokes {
+            for w in s.windows(2) {
+                if left <= 0.0 {
+                    break 'strokes;
+                }
+                let d = (w[1] - w[0]).length();
+                let end = if left < d {
+                    w[0].lerp(w[1], left / d)
+                } else {
+                    w[1]
+                };
+                left -= d;
+                out.capsule(map(w[0]), map(end), half, color);
+            }
         }
     }
 }
@@ -167,6 +365,8 @@ pub struct Doodle {
     pub origin: V2,
     /// Half size, points.
     pub size: f32,
+    /// Drawn facing left.
+    pub mirror: bool,
     /// How much has been drawn (0..1).
     pub progress: f32,
     pub age: f32,
@@ -176,38 +376,10 @@ impl Doodle {
     /// Draw the inked part.
     pub fn draw(&self, out: &mut DrawList) {
         let alpha = 1.0 - ((self.age - LIFETIME) / FADE).clamp(0.0, 1.0);
-        if alpha <= 0.0 || self.progress <= 0.0 {
-            return;
-        }
-        let strokes = self.shape.strokes();
-        let total: f32 = strokes.iter().map(|s| length(s)).sum();
-        let ink = self.shape.color();
-        for (color, half) in [
-            ([1.0, 1.0, 1.0, 0.85 * alpha], 2.6),
-            ([ink[0], ink[1], ink[2], alpha], 1.5),
-        ] {
-            let mut left = self.progress * total;
-            'strokes: for s in &strokes {
-                for w in s.windows(2) {
-                    if left <= 0.0 {
-                        break 'strokes;
-                    }
-                    let d = (w[1] - w[0]).length();
-                    let end = if left < d {
-                        w[0].lerp(w[1], left / d)
-                    } else {
-                        w[1]
-                    };
-                    left -= d;
-                    out.capsule(
-                        self.origin + w[0] * self.size,
-                        self.origin + end * self.size,
-                        half,
-                        color,
-                    );
-                }
-            }
-        }
+        let (o, size, mirror) = (self.origin, self.size, self.mirror);
+        ink(out, self.shape, self.progress, alpha, &|p| {
+            place(p, o, size, mirror)
+        });
     }
 }
 
@@ -218,7 +390,7 @@ pub struct Doodles {
 }
 
 impl Doodles {
-    pub fn start(&mut self, shape: Shape, origin: V2, size: f32) {
+    pub fn start(&mut self, shape: Shape, origin: V2, size: f32, mirror: bool) {
         if self.list.len() >= MAX_DOODLES {
             self.list.remove(0);
         }
@@ -226,6 +398,7 @@ impl Doodles {
             shape,
             origin,
             size,
+            mirror,
             progress: 0.0,
             age: 0.0,
         });
@@ -236,6 +409,12 @@ impl Doodles {
         if let Some(d) = self.list.last_mut() {
             d.progress = d.progress.max(k.clamp(0.0, 1.0));
         }
+    }
+
+    /// Take the newest drawing of `shape` off the page (it's picked up).
+    pub fn take(&mut self, shape: Shape) -> Option<Doodle> {
+        let i = self.list.iter().rposition(|d| d.shape == shape)?;
+        Some(self.list.remove(i))
     }
 
     pub fn update(&mut self, dt: f32) {
@@ -263,7 +442,7 @@ mod tests {
 
     #[test]
     fn shapes_fit_the_unit_box_and_pen_moves_continuously() {
-        for shape in Shape::ALL {
+        for shape in Shape::ALL.into_iter().chain(Shape::WEAPONS) {
             for s in shape.strokes() {
                 assert!(s.len() >= 2);
                 assert!(
@@ -287,9 +466,23 @@ mod tests {
     }
 
     #[test]
+    fn weapons_are_drawn_bolder_and_mirror_when_facing_left() {
+        let right = place(v2(1.0, 0.5), v2(100.0, 100.0), 10.0, false);
+        let left = place(v2(1.0, 0.5), v2(100.0, 100.0), 10.0, true);
+        assert_eq!(right, v2(110.0, 105.0));
+        assert_eq!(left, v2(90.0, 105.0));
+        for w in Shape::WEAPONS {
+            assert!(w.weapon());
+            let g = w.grip();
+            assert!(g.x.abs() <= 1.0 && g.y.abs() <= 1.0);
+        }
+        assert!(!Shape::Heart.weapon());
+    }
+
+    #[test]
     fn draws_only_what_has_been_inked_then_fades() {
         let mut d = Doodles::default();
-        d.start(Shape::Star, v2(100.0, 100.0), 25.0);
+        d.start(Shape::Star, v2(100.0, 100.0), 25.0, false);
         let count = |d: &Doodles| {
             let mut dl = DrawList::default();
             d.draw(&mut dl);

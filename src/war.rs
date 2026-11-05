@@ -23,7 +23,7 @@ const MIN_STINT: f32 = 3.0;
 /// How much a hit from the user costs, in damage dealt.
 const HURT_COST: f32 = 2.0;
 /// No tactic's chance of being picked ever drops below this.
-pub const MIN_ODDS: f32 = 0.05;
+pub const MIN_ODDS: f32 = 0.12;
 /// How sharply results tilt the odds: a tactic that does this much more net
 /// damage per second than another is e (≈2.7) times as likely.
 const TILT: f32 = 1.0;
@@ -430,7 +430,7 @@ mod tests {
             stint(&mut w, Tactic::Blade, 0, 0);
         }
         // Words worked best: it's the favourite, fists the least likely, and
-        // nothing is ever below 5%.
+        // nothing is ever below the floor.
         let words = odds(&w, Tactic::Words);
         assert!(all
             .iter()
@@ -438,14 +438,14 @@ mod tests {
         assert!(odds(&w, Tactic::Fists) < odds(&w, Tactic::Blade));
         let sum: f32 = w.odds(&all).iter().map(|o| o.1).sum();
         assert!((sum - 1.0).abs() < 1e-4);
-        // A runaway favourite still leaves everything else at least 5%.
+        // A runaway favourite still leaves everything else its floor share.
         for _ in 0..40 {
             stint(&mut w, Tactic::Words, 40, 0);
         }
         for t in all {
             assert!(odds(&w, t) >= MIN_ODDS - 1e-4, "{t:?} at {}", odds(&w, t));
         }
-        assert!(odds(&w, Tactic::Words) > 0.55);
+        assert!(odds(&w, Tactic::Words) > 0.45);
         // Once the losers have a long record too, the floor is what holds them up.
         for _ in 0..40 {
             for t in [Tactic::Fists, Tactic::Grab, Tactic::Powers, Tactic::Blade] {
@@ -456,10 +456,10 @@ mod tests {
             assert!(odds(&w, t) >= MIN_ODDS - 1e-4, "{t:?} at {}", odds(&w, t));
         }
         assert!((odds(&w, Tactic::Fists) - MIN_ODDS).abs() < 0.01);
-        assert!((odds(&w, Tactic::Words) - 0.8).abs() < 0.01);
+        assert!((odds(&w, Tactic::Words) - (1.0 - 4.0 * MIN_ODDS)).abs() < 0.01);
         // The pick follows the odds: the roll walks the shares in order.
         assert_eq!(w.choose(&all, 0.0), Tactic::Fists);
-        assert_eq!(w.choose(&all, 0.5), Tactic::Words);
+        assert_eq!(w.choose(&all, MIN_ODDS + 0.05), Tactic::Words);
         assert_eq!(w.choose(&all, 0.999), Tactic::Blade);
         // Only what's available.
         assert_ne!(w.choose(&[Tactic::Fists, Tactic::Grab], 0.5), Tactic::Words);

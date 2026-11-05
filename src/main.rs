@@ -461,6 +461,10 @@ struct Scene {
     arsenal: stickman::arsenal::Arsenal,
     /// This bucket's paint colour.
     paint: [f32; 4],
+    /// A drawn weapon on its way from the page into its hands.
+    lift: Option<stickman::arsenal::Lift>,
+    /// Tools it pulled out lately, newest last (so it varies them).
+    recent_tools: Vec<stickman::agent::Gadget>,
     /// A toolbar strip being captured: (strip, window, window frame).
     saw_pending: Option<(Rect, u32, Rect)>,
     /// Windows with a sawn-off strip dangling, and their frames then.
@@ -1194,7 +1198,12 @@ impl Scene {
         // A stint ran its course (or the fight ended): take stock.
         if let Some(done) = self.mind.war.tick(dt, fighting) {
             if fighting {
-                let next = self.mind.war.choose(&self.tactics(), roll(self.seed, 19));
+                // Never the same plan twice in a row.
+                let mut options = self.tactics();
+                if options.len() > 1 {
+                    options.retain(|t| *t != done.tactic);
+                }
+                let next = self.mind.war.choose(&options, roll(self.seed, 19));
                 log::info!(
                     "war: {} did {:.0} damage in {:.0}s (hit {} times); next: {} (odds {})",
                     done.tactic.name(),
@@ -2384,12 +2393,20 @@ impl Scene {
                     }
                 }
                 Event::Slashed { at, dir } => {
+                    let hammer = self.agent.gadget == Some(stickman::agent::Gadget::Hammer);
                     self.particles.sparks(at, dir, 26);
-                    self.sfx(Sfx::Clank, 0.8, at);
+                    if hammer {
+                        // A big cartoon BONK.
+                        self.particles.shockwave(at);
+                        self.sfx(Sfx::Boom, 0.5, at);
+                    } else {
+                        self.sfx(Sfx::Clank, 0.8, at);
+                    }
                     self.sfx(Sfx::Punch, 0.6, at);
                     if self.cursor_fx() {
                         let area = self.layout.screen_at(self.cursor.pos).frame;
-                        self.cursor.push(dir * CURSOR_PUSH * 1.8, area);
+                        let push = if hammer { 2.6 } else { 1.8 };
+                        self.cursor.push(dir * CURSOR_PUSH * push, area);
                         self.last_cursor = self.cursor.pos;
                     }
                     log::info!("event: sword hit the cursor");
@@ -2523,24 +2540,38 @@ impl Scene {
                     shape,
                     origin,
                     size,
+                    mirror,
                 } => {
                     log::info!("event: doodling a {shape:?}");
-                    self.doodles.start(shape, origin, size);
-                    self.quip(Moment::Doodling);
+                    self.doodles.start(shape, origin, size, mirror);
+                    if !shape.weapon() {
+                        self.quip(Moment::Doodling);
+                    }
                 }
                 Event::Dreaded { at, dread } => self.dreaded(at, dread),
                 Event::Hid { at, hidden } => self.hid(at, hidden),
                 Event::WantGadget { at } => self.pull_out_tool(at),
-                Event::CannonReady { at } => {
-                    log::info!("event: drew a cannon");
-                    self.doodles
-                        .list
-                        .retain(|d| d.shape != stickman::doodle::Shape::Cannon);
-                    self.sfx(Sfx::Clank, 0.6, at);
-                    self.say_one(
-                        &["Ha! Drew myself a cannon.", "Art is a weapon."],
-                        Priority::Quip,
-                    );
+                Event::WeaponDrawn { at, gadget } => {
+                    log::info!("event: drew a {}", gadget.name());
+                    // It takes the drawing off the page into its hands.
+                    let page = gadget.shape().and_then(|sh| self.doodles.take(sh));
+                    self.lift = page.map(|d| stickman::arsenal::Lift {
+                        origin: d.origin,
+                        size: d.size,
+                        mirror: d.mirror,
+                        k: 0.0,
+                    });
+                    self.sfx(Sfx::Pop, 0.6, at);
+                    self.sfx(Sfx::Clank, 0.4, at);
+                    use stickman::agent::Gadget;
+                    let line: &[&str] = match gadget {
+                        Gadget::Cannon => &["Ha! Drew myself a cannon.", "Art is a weapon."],
+                        Gadget::Sword => &["En garde!", "Sharpest thing I ever drew."],
+                        Gadget::Hammer => &["Hammer time.", "Stop. Hammer time!"],
+                        Gadget::Bow => &["Ready, aim...", "Robin Hood, eat your heart out."],
+                        _ => &["Kaboom incoming!", "Who wants a present?"],
+                    };
+                    self.say_one(line, Priority::Quip);
                 }
                 Event::Fired {
                     from,
@@ -2549,12 +2580,12 @@ impl Scene {
                 } => {
                     let floor = self.layout.screen_at(from).ground_y;
                     self.arsenal.fire(gadget, from, target, self.paint, floor);
-                    let s = if gadget == stickman::agent::Gadget::Cannon {
-                        Sfx::Boom
-                    } else {
-                        Sfx::Whoosh
+                    let (s, gain) = match gadget {
+                        stickman::agent::Gadget::Cannon => (Sfx::Boom, 0.5),
+                        stickman::agent::Gadget::Bow => (Sfx::Whoosh, 0.35),
+                        _ => (Sfx::Whoosh, 0.5),
                     };
-                    self.sfx(s, 0.5, from);
+                    self.sfx(s, gain, from);
                     if gadget == stickman::agent::Gadget::Cannon {
                         self.particles.dust(from, 0.4);
                     }
@@ -2564,6 +2595,10 @@ impl Scene {
                     self.particles.dust(at, 0.4);
                     let line: &[&str] = match gadget {
                         stickman::agent::Gadget::Bucket => &["Out of paint!", "Empty. Huh."],
+                        stickman::agent::Gadget::Bow => &["Out of arrows!", "Quiver's empty."],
+                        stickman::agent::Gadget::Bomb => {
+                            &["No more bombs!", "That was the last one."]
+                        }
                         _ => &["It broke! Cheap ink.", "Out of ammo!"],
                     };
                     self.say_one(line, Priority::Quip);
@@ -3010,7 +3045,7 @@ impl Scene {
                     }
                     log::info!(
                         "event: {} hit the cursor",
-                        if paint { "paint" } else { "an ink ball" }
+                        if paint { "paint" } else { "a shot" }
                     );
                     self.deed(Deed::CursorHit);
                     self.boss_hit(Blow::Word);
@@ -3018,6 +3053,27 @@ impl Scene {
                     self.earn(Feat::HitCursor);
                 }
                 stickman::arsenal::Hit::Splat { at } => self.sfx(Sfx::Thud, 0.25, at),
+                stickman::arsenal::Hit::Boom { at, near } => {
+                    log::info!(
+                        "event: a bomb went off{}",
+                        if near { " on the cursor" } else { "" }
+                    );
+                    let away = (self.cursor.pos - at).normalize_or(v2(0.0, -1.0));
+                    self.particles.explosion(at, v2(0.0, -1.0));
+                    self.particles.shockwave(at);
+                    self.sfx(Sfx::Boom, 0.9, at);
+                    if near {
+                        if self.cursor_fx() && !self.agent.clinging() {
+                            let area = self.layout.screen_at(self.cursor.pos).frame;
+                            self.cursor.push(away * CURSOR_PUSH * 2.4, area);
+                            self.last_cursor = self.cursor.pos;
+                        }
+                        self.deed(Deed::CursorHit);
+                        self.boss_hit(Blow::Word);
+                        self.remember(Memory::StruckCursor);
+                        self.earn(Feat::HitCursor);
+                    }
+                }
             }
         }
         for id in std::mem::take(&mut self.arsenal.freed) {
@@ -3026,36 +3082,62 @@ impl Scene {
     }
 
     /// It reached for a tool: an eraser or a bucket of paint appears in its
-    /// hands, or it starts drawing itself a cannon.
+    /// hands, or it draws itself a weapon (cannon, sword, hammer, bow, bombs).
+    /// Tools it used lately are less likely, so it keeps mixing them up.
     fn pull_out_tool(&mut self, at: V2) {
         use stickman::agent::Gadget;
+        let weights: Vec<f32> = Gadget::ALL
+            .iter()
+            .map(|g| {
+                let times = self.recent_tools.iter().filter(|r| *r == g).count() as f32;
+                let last = self.recent_tools.last() == Some(g);
+                if last {
+                    0.0
+                } else {
+                    1.0 / (1.0 + 2.0 * times)
+                }
+            })
+            .collect();
         self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(13);
-        let g = Gadget::ALL[(self.seed >> 33) as usize % Gadget::ALL.len()];
+        let mut roll = ((self.seed >> 33) % 10_000) as f32 / 10_000.0 * weights.iter().sum::<f32>();
+        let mut g = Gadget::ALL[0];
+        for (k, w) in weights.iter().enumerate() {
+            if roll < *w {
+                g = Gadget::ALL[k];
+                break;
+            }
+            roll -= w;
+        }
+        self.recent_tools.push(g);
+        if self.recent_tools.len() > 4 {
+            self.recent_tools.remove(0);
+        }
         log::info!("event: pulled out a {}", g.name());
         self.sfx(Sfx::Pop, 0.6, at);
         self.particles.dust(at, 0.3);
-        match g {
-            Gadget::Cannon => {
-                let mut ev = Vec::new();
-                self.agent.draw_cannon(&mut ev);
-                self.handle(&ev);
-                self.say_one(
-                    &["Hold on, I'm drawing something…", "One sec. Art time."],
-                    Priority::Quip,
-                );
-            }
-            _ => {
-                self.paint = stickman::arsenal::PAINTS
-                    [(self.seed >> 41) as usize % stickman::arsenal::PAINTS.len()];
-                self.agent.arm(g);
-                let line: &[&str] = if g == Gadget::Eraser {
-                    &["I'll erase you!", "Eraser time!"]
-                } else {
-                    &["Let's redecorate!", "You look like you need a paint job."]
-                };
-                self.say_one(line, Priority::Quip);
-            }
+        if g.shape().is_some() {
+            let mut ev = Vec::new();
+            self.agent.draw_weapon(g, &mut ev);
+            self.handle(&ev);
+            self.say_one(
+                &[
+                    "Hold on, I'm drawing something…",
+                    "One sec. Art time.",
+                    "Let me just sketch this…",
+                ],
+                Priority::Quip,
+            );
+            return;
         }
+        self.paint =
+            stickman::arsenal::PAINTS[(self.seed >> 41) as usize % stickman::arsenal::PAINTS.len()];
+        self.agent.arm(g);
+        let line: &[&str] = if g == Gadget::Eraser {
+            &["I'll erase you!", "Eraser time!"]
+        } else {
+            &["Let's redecorate!", "You look like you need a paint job."]
+        };
+        self.say_one(line, Priority::Quip);
     }
 
     /// It sawed through window `window`'s toolbar: capture that strip so a
@@ -3751,12 +3833,8 @@ impl Scene {
                 self.agent.cling(self.cursor.pos, &mut ev);
                 self.handle(&ev);
             } else if let Some(g) = tool {
-                if g == stickman::agent::Gadget::Cannon {
-                    self.agent.draw_cannon(&mut ev);
-                    self.handle(&ev);
-                } else {
-                    self.agent.arm(g);
-                }
+                self.agent.draw_weapon(g, &mut ev);
+                self.handle(&ev);
             } else if what.trim() == "saw" {
                 if let Some(w) = self.snapshot.active().map(|w| w.id) {
                     self.saw_toolbar(self.agent.pos, w);
@@ -3966,6 +4044,8 @@ impl Scene {
         if self.stats_saved.elapsed() > Duration::from_secs(30) {
             self.save_stats();
         }
+        // A debug plan is followed to the letter; the war's plan is a leaning.
+        self.agent.strict_tactic = env_flag("STICKMAN_DEBUG_GRAB") || debug_tactic().is_some();
         self.agent.snatch_chance = if env_flag("STICKMAN_DEBUG_GRAB") {
             1.0
         } else {
@@ -4231,6 +4311,12 @@ impl Scene {
             }
             self.particles.update(FIXED_DT);
             self.use_arsenal(FIXED_DT);
+            if let Some(l) = &mut self.lift {
+                l.k += FIXED_DT / 0.35;
+                if l.k >= 1.0 || self.agent.gadget.is_none() {
+                    self.lift = None;
+                }
+            }
             self.speech.update(FIXED_DT);
             self.update_note(FIXED_DT);
             self.fly_window(FIXED_DT);
@@ -4520,7 +4606,16 @@ impl Scene {
         }
         self.draw_sword();
         if let Some((g, grip, aim)) = self.agent.gadget_pose(self.cursor.pos) {
-            stickman::arsenal::draw_held(&mut self.draw, g, grip, aim, self.paint);
+            let facing = self.agent.facing;
+            stickman::arsenal::draw_held(
+                &mut self.draw,
+                g,
+                grip,
+                aim,
+                facing,
+                self.paint,
+                self.lift,
+            );
         }
         if let Some((l, hand)) = self.agent.lasso_view() {
             let clock = self.started.elapsed().as_secs_f32();
@@ -5142,6 +5237,8 @@ impl App {
             dodges: std::collections::VecDeque::new(),
             arsenal: stickman::arsenal::Arsenal::new(now.elapsed().as_nanos() as u64 ^ 0xa75e),
             paint: stickman::arsenal::PAINTS[0],
+            lift: None,
+            recent_tools: Vec::new(),
             saw_pending: None,
             sawn: Vec::new(),
             quit_at: None,

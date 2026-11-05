@@ -7,13 +7,19 @@
 //! on the [`Hit`]s that come back.
 
 use crate::agent::Gadget;
+use crate::doodle::{self, Shape};
 use crate::geom::{v2, Rect, V2};
 use crate::render::{DrawList, SpriteDraw};
+use crate::stickman::smoothstep;
 
 /// Paint falls like a thrown word (the same arc); ink balls fly almost straight.
 const PAINT_GRAVITY: f32 = crate::agent::PROJECTILE_GRAVITY;
 const INK_SPEED: f32 = 1500.0;
 const INK_GRAVITY: f32 = 250.0;
+const ARROW_SPEED: f32 = 1900.0;
+const ARROW_GRAVITY: f32 = 200.0;
+/// A bomb going off this close to the cursor still hits it.
+pub const BLAST_RADIUS: f32 = 110.0;
 /// A shot this close to the cursor hits it.
 const HIT_RADIUS: f32 = 24.0;
 /// Shots older than this are gone (off screen, say).
@@ -36,8 +42,17 @@ pub const PAINTS: [[f32; 4]; 5] = [
 ];
 const INK: [f32; 4] = [0.08, 0.08, 0.1, 1.0];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Paint,
+    Ink,
+    Arrow,
+    Bomb,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Shot {
+    kind: Kind,
     pos: V2,
     vel: V2,
     gravity: f32,
@@ -81,6 +96,8 @@ pub enum Hit {
     Cursor { at: V2, dir: V2, paint: bool },
     /// A shot splatted somewhere.
     Splat { at: V2 },
+    /// A bomb went off at `at`, `near` the cursor (within [`BLAST_RADIUS`]).
+    Boom { at: V2, near: bool },
 }
 
 #[derive(Debug, Default)]
@@ -115,22 +132,27 @@ impl Arsenal {
         !self.shots.is_empty() || !self.splats.is_empty() || !self.sawn.is_empty()
     }
 
-    /// Throw paint (a bucket) or fire an ink ball (the cannon) from `from` at
-    /// `target`; shots that miss splat at `floor` (the ground line).
+    /// Throw paint or a bomb, fire an ink ball (cannon) or an arrow (bow),
+    /// from `from` at `target`; shots that miss land at `floor` (the ground).
     pub fn fire(&mut self, gadget: Gadget, from: V2, target: V2, color: [f32; 4], floor: f32) {
-        let (vel, gravity, color, radius) = match gadget {
-            Gadget::Bucket => (
-                crate::agent::lob_velocity(from, target),
-                PAINT_GRAVITY,
-                color,
-                9.0,
+        let dir = (target - from).normalize_or(v2(1.0, 0.0));
+        let lob = crate::agent::lob_velocity(from, target);
+        let (kind, vel, gravity, color, radius) = match gadget {
+            Gadget::Bucket => (Kind::Paint, lob, PAINT_GRAVITY, color, 9.0),
+            Gadget::Cannon => (Kind::Ink, dir * INK_SPEED, INK_GRAVITY, INK, 6.0),
+            Gadget::Bow => (
+                Kind::Arrow,
+                dir * ARROW_SPEED,
+                ARROW_GRAVITY,
+                Shape::Bow.color(),
+                4.0,
             ),
-            _ => {
-                let dir = (target - from).normalize_or(v2(1.0, 0.0));
-                (dir * INK_SPEED, INK_GRAVITY, INK, 6.0)
-            }
+            Gadget::Bomb => (Kind::Bomb, lob, PAINT_GRAVITY, Shape::Bomb.color(), 10.0),
+            // Swung, not fired.
+            Gadget::Eraser | Gadget::Sword | Gadget::Hammer => return,
         };
         self.shots.push(Shot {
+            kind,
             pos: from,
             vel,
             gravity,
@@ -223,18 +245,34 @@ impl Arsenal {
             let seg = next - s.pos;
             let k = ((cursor - s.pos).dot(seg) / seg.length_squared().max(1e-3)).clamp(0.0, 1.0);
             if (s.pos + seg * k - cursor).length() < HIT_RADIUS + s.radius {
-                let paint = s.color != INK;
+                if s.kind == Kind::Bomb {
+                    hits.push(Hit::Boom {
+                        at: cursor,
+                        near: true,
+                    });
+                    return false;
+                }
                 hits.push(Hit::Cursor {
                     at: cursor,
                     dir: s.vel.normalize_or(v2(1.0, 0.0)),
-                    paint,
+                    paint: s.kind == Kind::Paint,
                 });
-                landed.push((cursor, s.color, s.radius * 2.0));
+                if s.kind != Kind::Arrow {
+                    landed.push((cursor, s.color, s.radius * 2.0));
+                }
                 return false;
             }
             s.pos = next;
             if s.pos.y >= s.floor || s.age > SHOT_LIFE {
-                landed.push((v2(s.pos.x, s.pos.y.min(s.floor)), s.color, s.radius * 1.6));
+                let at = v2(s.pos.x, s.pos.y.min(s.floor));
+                match s.kind {
+                    Kind::Bomb => hits.push(Hit::Boom {
+                        at,
+                        near: (cursor - at).length() < BLAST_RADIUS,
+                    }),
+                    Kind::Arrow => hits.push(Hit::Splat { at }),
+                    _ => landed.push((at, s.color, s.radius * 1.6)),
+                }
                 return false;
             }
             true
@@ -304,25 +342,102 @@ impl Arsenal {
             }
         }
         for s in &self.shots {
-            out.disc(s.pos, s.radius + 1.5, [1.0, 1.0, 1.0, 0.8]);
-            out.disc(s.pos, s.radius, s.color);
+            match s.kind {
+                Kind::Arrow => {
+                    // A shaft along its flight, with a head and fletching.
+                    let d = s.vel.normalize_or(v2(1.0, 0.0));
+                    let n = v2(-d.y, d.x);
+                    let tail = s.pos - d * 26.0;
+                    out.capsule(tail, s.pos, 3.2, [1.0, 1.0, 1.0, 0.85]);
+                    out.capsule(tail, s.pos, 1.8, s.color);
+                    for side in [-1.0, 1.0] {
+                        out.capsule(s.pos, s.pos - d * 7.0 + n * 5.0 * side, 1.8, s.color);
+                        out.capsule(tail, tail - d * 6.0 + n * 5.0 * side, 1.4, s.color);
+                    }
+                }
+                Kind::Bomb => {
+                    out.disc(s.pos, s.radius + 1.8, [1.0, 1.0, 1.0, 0.85]);
+                    out.disc(s.pos, s.radius, s.color);
+                    // The lit fuse, sparking.
+                    let fuse = s.pos + v2(4.0, -s.radius - 4.0);
+                    out.capsule(s.pos + v2(0.0, -s.radius), fuse, 1.5, s.color);
+                    let flick = 2.5 + 1.5 * (s.age * 40.0).sin().abs();
+                    out.disc(fuse, flick, [1.0, 0.75, 0.15, 1.0]);
+                }
+                _ => {
+                    out.disc(s.pos, s.radius + 1.5, [1.0, 1.0, 1.0, 0.8]);
+                    out.disc(s.pos, s.radius, s.color);
+                }
+            }
         }
     }
 }
 
-/// The tool in its hands, drawn from the grip toward `aim` (a point).
-pub fn draw_held(out: &mut DrawList, gadget: Gadget, grip: V2, aim: V2, paint: [f32; 4]) {
+/// A drawn weapon being taken off the page: where the drawing was, and how
+/// far into the move to its hand it is (0..1).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Lift {
+    pub origin: V2,
+    pub size: f32,
+    pub mirror: bool,
+    pub k: f32,
+}
+
+/// Where a point of a drawn weapon's unit box goes in its hand: the grip on
+/// `grip`, pointing at `aim`, kept upright when it points left.
+fn held_map(shape: Shape, grip: V2, aim: V2, facing: f32) -> (V2, V2, f32, f32) {
+    let to = aim - grip;
+    let dir = match shape {
+        // A bomb sits in the hand; it doesn't point.
+        Shape::Bomb => v2(facing, 0.0),
+        // Aimed, but never tipped further than a comfortable angle.
+        Shape::Cannon | Shape::Bow => {
+            let a = to.y.atan2(to.x * facing).clamp(-0.8, 0.5);
+            v2(a.cos() * facing, a.sin())
+        }
+        _ => to.normalize_or(v2(facing, 0.0)),
+    };
+    let size = match shape {
+        // Swung: the tip reaches the end of the blade.
+        Shape::Sword | Shape::Hammer => to.length().max(20.0) / (1.0 - shape.grip().x),
+        Shape::Bomb => 15.0,
+        _ => 30.0,
+    };
+    let up = if dir.x < 0.0 { -1.0 } else { 1.0 };
+    (grip, dir, size, up)
+}
+
+/// Draw the tool in its hand at `grip`, pointing at `aim` (`facing` ±1). A
+/// drawn weapon is its own drawing, flying off the page while `lift` runs.
+pub fn draw_held(
+    out: &mut DrawList,
+    gadget: Gadget,
+    grip: V2,
+    aim: V2,
+    facing: f32,
+    paint: [f32; 4],
+    lift: Option<Lift>,
+) {
+    if let Some(shape) = gadget.shape() {
+        let (grip, dir, size, up) = held_map(shape, grip, aim, facing);
+        let g = shape.grip();
+        let held = move |p: V2| {
+            let v = v2(p.x - g.x, (p.y - g.y) * up) * size;
+            grip + v2(v.x * dir.x - v.y * dir.y, v.x * dir.y + v.y * dir.x)
+        };
+        match lift {
+            Some(l) if l.k < 1.0 => {
+                let k = smoothstep(l.k);
+                let page = move |p: V2| doodle::place(p, l.origin, l.size, l.mirror);
+                doodle::ink(out, shape, 1.0, 1.0, &|p| page(p).lerp(held(p), k));
+            }
+            _ => doodle::ink(out, shape, 1.0, 1.0, &held),
+        }
+        return;
+    }
     let dir = (aim - grip).normalize_or(v2(1.0, 0.0));
-    let normal = v2(-dir.y, dir.x);
     let outline = [1.0, 1.0, 1.0, 0.85];
     match gadget {
-        Gadget::Eraser => {
-            // A chunky pink eraser.
-            let tip = grip + dir * 30.0;
-            out.capsule(grip, tip, 9.5, outline);
-            out.capsule(grip, tip, 8.0, [0.96, 0.66, 0.72, 1.0]);
-            out.capsule(grip, grip + dir * 9.0, 8.0, [0.35, 0.45, 0.85, 1.0]);
-        }
         Gadget::Bucket => {
             // A bucket hanging from the hand, paint at the brim.
             let top = grip + v2(0.0, 6.0);
@@ -338,14 +453,12 @@ pub fn draw_held(out: &mut DrawList, gadget: Gadget, grip: V2, aim: V2, paint: [
             out.rect(top + v2(0.0, 2.0), v2(8.0, 2.5), 2.0, paint);
             out.ring(grip, 6.0, 1.2, [0.3, 0.3, 0.32, 1.0]);
         }
-        Gadget::Cannon => {
-            // A hand-drawn cannon on its shoulder, barrel toward the aim.
-            let back = grip - dir * 14.0;
-            let muzzle = grip + dir * 34.0;
-            out.capsule(back, muzzle, 9.0, outline);
-            out.capsule(back, muzzle, 7.5, INK);
-            out.capsule(muzzle - dir * 3.0, muzzle + normal * 0.0, 9.5, INK);
-            out.disc(back - normal * 4.0, 6.0, [0.25, 0.25, 0.28, 1.0]);
+        _ => {
+            // A chunky pink eraser.
+            let tip = grip + dir * 30.0;
+            out.capsule(grip, tip, 9.5, outline);
+            out.capsule(grip, tip, 8.0, [0.96, 0.66, 0.72, 1.0]);
+            out.capsule(grip, grip + dir * 9.0, 8.0, [0.35, 0.45, 0.85, 1.0]);
         }
     }
 }
@@ -412,6 +525,101 @@ mod tests {
         }
         let at = splat.expect("never splatted");
         assert!((at.y - 1100.0).abs() < 1.0, "splatted at {at:?}");
+    }
+
+    #[test]
+    fn an_arrow_flies_straight_and_hits_without_a_splat() {
+        let mut a = Arsenal::new(3);
+        let cursor = v2(900.0, 400.0);
+        a.fire(Gadget::Bow, v2(300.0, 420.0), cursor, PAINTS[0], 1000.0);
+        let mut hit = false;
+        for _ in 0..60 {
+            hit |= a
+                .update(1.0 / 60.0, cursor)
+                .iter()
+                .any(|h| matches!(h, Hit::Cursor { paint: false, .. }));
+        }
+        assert!(hit, "the arrow missed");
+        assert!(a.splats.is_empty(), "arrows don't splat");
+    }
+
+    #[test]
+    fn a_bomb_blows_up_on_the_cursor_or_where_it_lands() {
+        let mut a = Arsenal::new(4);
+        let cursor = v2(800.0, 600.0);
+        a.fire(Gadget::Bomb, v2(400.0, 700.0), cursor, PAINTS[0], 1000.0);
+        let mut boom = None;
+        for _ in 0..200 {
+            for h in a.update(1.0 / 60.0, cursor) {
+                if let Hit::Boom { near, .. } = h {
+                    boom = Some(near);
+                }
+            }
+        }
+        assert_eq!(boom, Some(true));
+        // Thrown way off: it lands and goes off, far from the cursor.
+        a.fire(
+            Gadget::Bomb,
+            v2(400.0, 700.0),
+            v2(100.0, 700.0),
+            PAINTS[0],
+            760.0,
+        );
+        let mut far = None;
+        for _ in 0..200 {
+            for h in a.update(1.0 / 60.0, cursor) {
+                if let Hit::Boom { near, at } = h {
+                    far = Some((near, at));
+                }
+            }
+        }
+        let (near, at) = far.expect("never went off");
+        assert!(!near);
+        assert!((at.y - 760.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn swung_weapons_fire_nothing() {
+        let mut a = Arsenal::new(5);
+        for g in [Gadget::Eraser, Gadget::Sword, Gadget::Hammer] {
+            a.fire(g, v2(0.0, 0.0), v2(100.0, 0.0), PAINTS[0], 500.0);
+        }
+        assert!(!a.animating());
+    }
+
+    #[test]
+    fn a_drawn_weapon_is_its_own_drawing_and_lifts_off_the_page() {
+        let bounds = |lift: Option<Lift>| {
+            let mut dl = DrawList::default();
+            draw_held(
+                &mut dl,
+                Gadget::Sword,
+                v2(500.0, 500.0),
+                v2(560.0, 500.0),
+                1.0,
+                PAINTS[0],
+                lift,
+            );
+            dl.bounds().expect("drew something")
+        };
+        // In the hand: the blade runs from the grip to the aim.
+        let (lo, hi) = bounds(None);
+        assert!(
+            lo.x < 500.0 && hi.x > 555.0 && hi.x < 575.0,
+            "{lo:?} {hi:?}"
+        );
+        // Just picked up: still where it was drawn.
+        let page = Lift {
+            origin: v2(200.0, 300.0),
+            size: 36.0,
+            mirror: false,
+            k: 0.0,
+        };
+        let (lo, hi) = bounds(Some(page));
+        assert!(
+            lo.x < 170.0 && hi.x > 230.0 && hi.y < 340.0,
+            "{lo:?} {hi:?}"
+        );
     }
 
     #[test]

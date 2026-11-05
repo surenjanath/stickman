@@ -614,7 +614,7 @@ impl SettingsWindow {
             Row::Field("Fight plans:", labels[5]),
             Row::Under(Self::hint(
                 "Odds for its next fight: even to start, tilted toward what has worked, \
-                 never under 5%.",
+                 never under 12%, never the same plan twice in a row.",
             )),
             Row::Section("Its mind"),
             Row::Under(reflect),

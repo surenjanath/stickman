@@ -152,19 +152,34 @@ pub enum Gadget {
     Eraser,
     /// A bucket of paint: thrown at the cursor a few times.
     Bucket,
-    /// A cannon it drew itself: fires ink balls.
+    /// Drawn in the air, then taken off the page: a cannon (ink balls)…
     Cannon,
+    /// …a sword and a hammer (swung)…
+    Sword,
+    Hammer,
+    /// …a bow (arrows) and bombs (lobbed; they blow up).
+    Bow,
+    Bomb,
 }
 
 impl Gadget {
-    pub const ALL: [Gadget; 3] = [Gadget::Eraser, Gadget::Bucket, Gadget::Cannon];
+    pub const ALL: [Gadget; 7] = [
+        Gadget::Eraser,
+        Gadget::Bucket,
+        Gadget::Cannon,
+        Gadget::Sword,
+        Gadget::Hammer,
+        Gadget::Bow,
+        Gadget::Bomb,
+    ];
 
-    /// How many throws or shots (or, for the eraser, hits) it's good for.
+    /// How many throws or shots (or, swung, hits) it's good for.
     pub fn uses(self) -> u32 {
         match self {
-            Gadget::Eraser => WEAPON_HITS,
-            Gadget::Bucket => 3,
+            Gadget::Eraser | Gadget::Sword | Gadget::Hammer => WEAPON_HITS,
+            Gadget::Bucket | Gadget::Bomb => 3,
             Gadget::Cannon => 5,
+            Gadget::Bow => 6,
         }
     }
 
@@ -173,15 +188,69 @@ impl Gadget {
             Gadget::Eraser => "eraser",
             Gadget::Bucket => "paint bucket",
             Gadget::Cannon => "cannon",
+            Gadget::Sword => "drawn sword",
+            Gadget::Hammer => "hammer",
+            Gadget::Bow => "bow",
+            Gadget::Bomb => "bomb",
+        }
+    }
+
+    /// The drawing it makes of this weapon (`None`: pulled out of thin air).
+    pub fn shape(self) -> Option<Shape> {
+        match self {
+            Gadget::Cannon => Some(Shape::Cannon),
+            Gadget::Sword => Some(Shape::Sword),
+            Gadget::Hammer => Some(Shape::Hammer),
+            Gadget::Bow => Some(Shape::Bow),
+            Gadget::Bomb => Some(Shape::Bomb),
+            Gadget::Eraser | Gadget::Bucket => None,
+        }
+    }
+
+    /// The weapon a drawing becomes.
+    pub fn drawn_as(shape: Shape) -> Option<Gadget> {
+        Gadget::ALL.into_iter().find(|g| g.shape() == Some(shape))
+    }
+
+    /// Reach as a melee weapon, at full size (`None`: it's thrown or fired).
+    pub fn melee(self) -> Option<f32> {
+        match self {
+            Gadget::Eraser => Some(44.0),
+            Gadget::Sword => Some(64.0),
+            Gadget::Hammer => Some(54.0),
+            _ => None,
         }
     }
 }
 
+/// Fighting moves it keeps count of, so it doesn't wear one out: each use
+/// makes that move less likely for a while ([`STALE_TAU`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Move {
+    Fists,
+    Snatch,
+    Lasso,
+    Tool,
+    Rip,
+    Powers,
+    Words,
+    Cling,
+}
+const MOVES: usize = 8;
+/// How long (s) a move it just used stays stale.
+const STALE_TAU: f32 = 25.0;
+/// The moods a fight can be in, a few seconds at a time.
+const WHIMS: [Tactic; 6] = [
+    Tactic::Any,
+    Tactic::Fists,
+    Tactic::Words,
+    Tactic::Grab,
+    Tactic::Powers,
+    Tactic::Blade,
+];
+
 /// How long a lasso throw takes (wind-up to release at 40%).
 const LASSO_THROW: f32 = 0.5;
-
-/// Length of the eraser as a melee weapon (points).
-const ERASER_LEN: f32 = 44.0;
 
 /// Fear level from which it hides behind the Dock (see `Mind::dread_level`).
 pub const HIDE_LEVEL: f32 = crate::mind::HIDE_LEVEL;
@@ -359,13 +428,14 @@ pub enum Event {
         at: V2,
     },
     /// Reached for a tool: the app picks one ([`Agent::arm`] or
-    /// [`Agent::draw_cannon`]).
+    /// [`Agent::draw_weapon`]).
     WantGadget {
         at: V2,
     },
-    /// Its drawn cannon is finished and in its hands.
-    CannonReady {
+    /// Finished drawing a weapon: it takes it off the page into its hands.
+    WeaponDrawn {
         at: V2,
+        gadget: Gadget,
     },
     /// Threw paint or fired the cannon from `from` toward `target`.
     Fired {
@@ -448,6 +518,7 @@ pub enum Event {
         shape: Shape,
         origin: V2,
         size: f32,
+        mirror: bool,
     },
     /// The user switched to (or away from) the app it dreads.
     Dreaded {
@@ -608,6 +679,8 @@ pub enum Action {
         shape: Shape,
         origin: V2,
         size: f32,
+        /// Drawn facing left.
+        mirror: bool,
     },
     /// Kick the window underfoot sideways.
     Shove {
@@ -769,6 +842,16 @@ pub struct Agent {
     rip_cooldown: f32,
     /// Chance of grabbing a slow cursor in reach instead of hitting it.
     pub snatch_chance: f32,
+    /// Fight strictly by the plan in [`Senses::tactic`] (debugging, tests);
+    /// otherwise the plan is only a leaning and its mood keeps changing.
+    pub strict_tactic: bool,
+    /// How much each [`Move`] has been used lately (fades over `STALE_TAU`).
+    used: [f32; MOVES],
+    /// Its fighting mood right now, how long it lasts, and how often each
+    /// mood has come up lately.
+    whim: Tactic,
+    whim_left: f32,
+    whim_used: [f32; WHIMS.len()],
     /// Carrying a word overhead.
     pub holding: bool,
     /// Holding the user's cursor. The app clears this when the user yanks free.
@@ -885,6 +968,11 @@ impl Agent {
             weapon_hits: 0,
             rip_cooldown: 3.0,
             snatch_chance: 0.3,
+            strict_tactic: false,
+            used: [0.0; MOVES],
+            whim: Tactic::Any,
+            whim_left: 0.0,
+            whim_used: [0.0; WHIMS.len()],
             holding: false,
             holding_cursor: false,
             act_fired: false,
@@ -946,29 +1034,42 @@ impl Agent {
         }
     }
 
-    /// Take up `g` (the eraser is a melee weapon, like a sword).
+    /// Take up `g` (the eraser, sword and hammer are swung, like a sword).
     pub fn arm(&mut self, g: Gadget) {
         self.gadget = Some(g);
         self.gadget_uses = g.uses();
-        if g == Gadget::Eraser {
-            self.weapon = Some(ERASER_LEN * self.scale / 0.55);
+        if let Some(len) = g.melee() {
+            self.weapon = Some(len * self.scale / 0.55);
             self.weapon_hits = 0;
         }
     }
 
-    /// Draw a cannon in the air beside it; once drawn it's in its hands.
-    pub fn draw_cannon(&mut self, events: &mut Vec<Event>) {
-        let size = 30.0 * (self.scale / 0.55);
-        let origin = self.shoulder() + v2(self.facing * (self.reach() + size + 6.0), -4.0);
+    /// Draw weapon `g` in the air in front of it, big and bold; once drawn
+    /// it takes it off the page into its hands.
+    pub fn draw_weapon(&mut self, g: Gadget, events: &mut Vec<Event>) {
+        // No drawing in mid-air (landing would cut it short): it just has it.
+        let Some(shape) = g.shape().filter(|_| self.ground.is_some()) else {
+            return self.arm(g);
+        };
+        let size = 42.0 * (self.scale / 0.55);
+        let origin = self.shoulder() + v2(self.facing * (self.reach() * 0.3 + size), 10.0);
+        self.doodle(shape, origin, size, events);
+    }
+
+    /// Start drawing `shape` at `origin` (facing its way).
+    fn doodle(&mut self, shape: Shape, origin: V2, size: f32, events: &mut Vec<Event>) {
+        let mirror = self.facing < 0.0;
         self.set_action(Action::Doodle {
-            shape: Shape::Cannon,
+            shape,
             origin,
             size,
+            mirror,
         });
         events.push(Event::DoodleStarted {
-            shape: Shape::Cannon,
+            shape,
             origin,
             size,
+            mirror,
         });
     }
 
@@ -976,9 +1077,9 @@ impl Agent {
     pub fn gadget_pose(&self, aim: V2) -> Option<(Gadget, V2, V2)> {
         let g = self.gadget?;
         let grip = self.hands();
-        let toward = match g {
-            Gadget::Eraser => self.blade().map_or(aim, |(_, tip)| tip),
-            _ => aim,
+        let toward = match g.melee() {
+            Some(_) => self.blade().map_or(aim, |(_, tip)| tip),
+            None => aim,
         };
         Some((g, grip, toward))
     }
@@ -1297,16 +1398,7 @@ impl Agent {
                 let size = 20.0 * (self.scale / 0.55);
                 let origin = self.shoulder() + v2(self.facing * (self.reach() + size + 4.0), -8.0);
                 let shape = Shape::Heart;
-                self.set_action(Action::Doodle {
-                    shape,
-                    origin,
-                    size,
-                });
-                events.push(Event::DoodleStarted {
-                    shape,
-                    origin,
-                    size,
-                });
+                self.doodle(shape, origin, size, events);
             }
             _ => return false,
         }
@@ -1430,7 +1522,8 @@ impl Agent {
             Action::Rummage => poses::grab(k(self.action)),
             Action::Fire { target } => {
                 let aim = self.aim_at(target, -0.9, 0.9);
-                if self.gadget == Some(Gadget::Cannon) {
+                if matches!(self.gadget, Some(Gadget::Cannon | Gadget::Bow)) {
+                    // Cannon on the shoulder, or the bow held out, string drawn.
                     poses::telekinesis(self.clock, aim)
                 } else {
                     poses::throw(k(self.action), aim)
@@ -1563,7 +1656,13 @@ impl Agent {
                 shape,
                 origin,
                 size,
-            } => Some(origin + doodle::pen_at(shape, self.doodle_k()) * size),
+                mirror,
+            } => Some(doodle::place(
+                doodle::pen_at(shape, self.doodle_k()),
+                origin,
+                size,
+                mirror,
+            )),
             _ => None,
         }
     }
@@ -1757,6 +1856,12 @@ impl Agent {
         self.squash = (self.squash + self.squash_rate * dt).clamp(0.3, 2.0);
         self.gadget_cooldown -= dt;
         self.saw_cooldown -= dt;
+        // Moves and moods it used a while ago feel fresh again.
+        let fade = (-dt / STALE_TAU).exp();
+        self.used.iter_mut().for_each(|u| *u *= fade);
+        let fade = (-dt / 40.0).exp();
+        self.whim_used.iter_mut().for_each(|u| *u *= fade);
+        self.whim_left -= dt;
 
         let before_root = self.root_y(&self.rotated_pose(), self.anchored) + self.root_correction;
         let before_pos = self.pos.y;
@@ -1794,7 +1899,7 @@ impl Agent {
         if self.root_correction.abs() < 0.01 {
             self.root_correction = 0.0;
         }
-        if self.gadget == Some(Gadget::Eraser) && self.weapon.is_none() {
+        if self.gadget.and_then(Gadget::melee).is_some() && self.weapon.is_none() {
             // Dropped or thrown away, like a sword.
             self.gadget = None;
             self.gadget_cooldown = 6.0;
@@ -1885,7 +1990,8 @@ impl Agent {
         {
             self.air_attack = false;
             // Now and then it catches the arrow and hangs on instead.
-            if s.can_cling && self.random(0.0, 1.0) < 0.45 {
+            if s.can_cling && self.random(0.0, 1.0) < 0.45 * self.fresh(Move::Cling) {
+                self.note(Move::Cling);
                 return self.cling(s.cursor, events);
             }
             let aim = self.aim_at(s.cursor, -0.6, 0.8);
@@ -2251,13 +2357,15 @@ impl Agent {
                 self.spin = 0.0;
                 self.set_action(Action::Stand);
             }
-            Action::Doodle {
-                shape: Shape::Cannon,
-                ..
-            } => {
-                // Drawn: it lifts the cannon off the page.
-                self.arm(Gadget::Cannon);
-                events.push(Event::CannonReady { at: self.hands() });
+            Action::Doodle { shape, .. } if shape.weapon() => {
+                // Drawn: it lifts the weapon off the page.
+                if let Some(g) = Gadget::drawn_as(shape) {
+                    self.arm(g);
+                    events.push(Event::WeaponDrawn {
+                        at: self.hands(),
+                        gadget: g,
+                    });
+                }
                 self.set_action(Action::Stand);
             }
             Action::Think | Action::Taunt => self.t = 0.0, // loop until behaviour changes
@@ -2265,16 +2373,65 @@ impl Agent {
         }
     }
 
+    /// How fresh move `m` feels: 1 when unused lately, falling with each use.
+    fn fresh(&self, m: Move) -> f32 {
+        1.0 / (1.0 + self.used[m as usize])
+    }
+
+    /// It just used move `m`.
+    fn note(&mut self, m: Move) {
+        self.used[m as usize] += 1.0;
+    }
+
+    /// The fighting mood for now. The war's plan (`s.tactic`) is only a
+    /// leaning: every few seconds it picks a mood at random, favouring the
+    /// plan, avoiding the one it just had and ones it's had a lot lately.
+    fn plan(&mut self, s: &Senses) -> Tactic {
+        if self.strict_tactic {
+            return s.tactic;
+        }
+        if self.whim_left > 0.0 {
+            return self.whim;
+        }
+        let weights: Vec<f32> = WHIMS
+            .iter()
+            .zip(self.whim_used)
+            .map(|(t, used)| {
+                let mut w = if *t == Tactic::Any { 1.2 } else { 1.0 };
+                if *t == s.tactic && s.tactic != Tactic::Any {
+                    w *= 2.5;
+                }
+                if *t == self.whim {
+                    w *= 0.3;
+                }
+                w / (1.0 + used)
+            })
+            .collect();
+        let mut roll = self.random(0.0, weights.iter().sum());
+        let mut i = WHIMS.len() - 1;
+        for (k, w) in weights.iter().enumerate() {
+            if roll < *w {
+                i = k;
+                break;
+            }
+            roll -= w;
+        }
+        self.whim_used[i] += 1.0;
+        self.whim = WHIMS[i];
+        self.whim_left = self.random(4.0, 9.0);
+        self.whim
+    }
+
     /// A slow cursor within arm's reach, between hip and head height, is
     /// sometimes grabbed instead of punched.
-    fn wants_to_snatch(&mut self, s: &Senses) -> bool {
+    fn wants_to_snatch(&mut self, s: &Senses, t: Tactic) -> bool {
         let hip_y = self.pos.y - poses::STAND_HIP * self.scale;
         let head_y = self.pos.y - 240.0 * self.scale;
-        let chance = match s.tactic {
+        let chance = match t {
             Tactic::Grab => 0.9,
             Tactic::Any => self.snatch_chance,
             _ => 0.0,
-        };
+        } * self.fresh(Move::Snatch);
         s.can_grab_cursor
             && s.cursor_vel.length() < 350.0
             && (head_y..=hip_y).contains(&s.cursor.y)
@@ -2282,6 +2439,7 @@ impl Agent {
     }
 
     fn snatch(&mut self, target: V2) {
+        self.note(Move::Snatch);
         self.face((target.x - self.pos.x).signum());
         self.attack_cooldown = 1.5;
         let aim = self.aim_at(target, -0.7, 0.9);
@@ -2289,6 +2447,7 @@ impl Agent {
     }
 
     fn attack(&mut self, target: V2) {
+        self.note(Move::Fists);
         self.face((target.x - self.pos.x).signum());
         if self.weapon.is_some() {
             // Armed: cut, or throw it once it's worn out.
@@ -2610,10 +2769,11 @@ impl Agent {
         } else {
             base * (0.5 + self.traits.aggression)
         };
-        if self.random(0.0, 1.0) >= chance {
+        if self.random(0.0, 1.0) >= chance * self.fresh(Move::Powers) {
             self.tk_cooldown = if eager { 0.5 } else { 2.0 }; // not this time
             return false;
         }
+        self.note(Move::Powers);
         self.tk_cooldown = 7.0;
         self.face((s.cursor.x - self.pos.x).signum());
         self.set_action(Action::Telekinesis { on });
@@ -2654,19 +2814,24 @@ impl Agent {
                 if s.retreat {
                     return self.fall_back(s, events);
                 }
-                let t = s.tactic;
+                let t = self.plan(s);
                 if matches!(t, Tactic::Any | Tactic::Powers)
                     && self.mind_powers(s, t == Tactic::Powers)
                 {
                     return;
                 }
                 // A paint bucket or its cannon: keep its distance and shoot.
-                if let Some(g @ (Gadget::Bucket | Gadget::Cannon)) = self.gadget {
+                if let Some(g) = self.gadget.filter(|g| g.melee().is_none()) {
                     let close = (s.cursor - self.shoulder()).length() < 150.0;
                     if self.attack_cooldown <= 0.0 && !close {
                         let target = s.cursor + s.cursor_vel * 0.15;
                         self.face((target.x - self.pos.x).signum());
-                        self.attack_cooldown = if g == Gadget::Cannon { 0.75 } else { 1.2 };
+                        self.attack_cooldown = match g {
+                            Gadget::Cannon => 0.75,
+                            Gadget::Bow => 0.6,
+                            Gadget::Bomb => 1.3,
+                            _ => 1.2,
+                        };
                         self.set_action(Action::Fire { target });
                     } else if close {
                         let away = if s.cursor.x < self.pos.x { 1.0 } else { -1.0 };
@@ -2691,7 +2856,8 @@ impl Agent {
                 {
                     self.gadget_cooldown = if t == Tactic::Blade { 3.0 } else { 9.0 };
                     let chance = if t == Tactic::Blade { 0.6 } else { 0.3 };
-                    if self.random(0.0, 1.0) < chance {
+                    if self.random(0.0, 1.0) < chance * self.fresh(Move::Tool) {
+                        self.note(Move::Tool);
                         self.set_action(Action::Rummage);
                         return;
                     }
@@ -2705,7 +2871,8 @@ impl Agent {
                 {
                     self.rip_cooldown = if t == Tactic::Blade { 1.5 } else { 4.0 };
                     let chance = if t == Tactic::Blade { 1.0 } else { 0.45 };
-                    if self.random(0.0, 1.0) < chance {
+                    if self.random(0.0, 1.0) < chance * self.fresh(Move::Rip) {
+                        self.note(Move::Rip);
                         self.weapon_hits = 0;
                         self.set_action(Action::RipWeapon);
                         return;
@@ -2727,7 +2894,8 @@ impl Agent {
                     // sets a longer wait).
                     self.lasso_cooldown = if t == Tactic::Grab { 1.0 } else { 2.5 };
                     let chance = if t == Tactic::Grab { 0.7 } else { 0.35 };
-                    if self.random(0.0, 1.0) < chance {
+                    if self.random(0.0, 1.0) < chance * self.fresh(Move::Lasso) {
+                        self.note(Move::Lasso);
                         return self.lasso(events);
                     }
                 }
@@ -2737,6 +2905,7 @@ impl Agent {
                         let target = s.cursor + s.cursor_vel * 0.2;
                         self.face((target.x - self.pos.x).signum());
                         self.attack_cooldown = 0.6;
+                        self.note(Move::Words);
                         self.set_action(Action::Throw { target });
                         return;
                     }
@@ -2744,7 +2913,9 @@ impl Agent {
                     // Planning a sword with no scrollbar to rip off: words instead.
                     let unarmed =
                         t == Tactic::Blade && self.weapon.is_none() && !s.weapon_available;
-                    matches!(t, Tactic::Any | Tactic::Words) || unarmed
+                    // In no particular mood, it lets words rest after a volley.
+                    let tired = t == Tactic::Any && self.fresh(Move::Words) < 0.3;
+                    (matches!(t, Tactic::Any | Tactic::Words) && !tired) || unarmed
                 }) {
                     // Close-range fists beat fetching ammo, until a few hits
                     // in a row haven't driven the cursor off: then mix it up.
@@ -2774,7 +2945,7 @@ impl Agent {
                     }
                 } else if (s.cursor - self.shoulder()).length() < self.reach() + 25.0 {
                     if self.attack_cooldown <= 0.0 {
-                        if self.wants_to_snatch(s) {
+                        if self.wants_to_snatch(s, t) {
                             self.snatch(s.cursor);
                         } else {
                             self.attack(s.cursor);
@@ -3152,16 +3323,7 @@ impl Agent {
                 let i =
                     (self.random(0.0, Shape::ALL.len() as f32) as usize).min(Shape::ALL.len() - 1);
                 let shape = Shape::ALL[i];
-                self.set_action(Action::Doodle {
-                    shape,
-                    origin,
-                    size,
-                });
-                events.push(Event::DoodleStarted {
-                    shape,
-                    origin,
-                    size,
-                });
+                self.doodle(shape, origin, size, events);
                 return;
             }
         }
@@ -3478,6 +3640,7 @@ mod tests {
         let line = text_line(600.0, 1200.0, 900.0);
         let w = world(vec![line]);
         let mut a = agent();
+        a.strict_tactic = true;
         let mut s = senses(Mode::Combat);
         s.tactic = t;
         s.cursor = v2(200.0, 300.0);
@@ -3489,6 +3652,71 @@ mod tests {
         let mut ev = vec![];
         run(&mut a, &w, &s, 6.0, &mut ev);
         ev
+    }
+
+    #[test]
+    fn a_long_fight_mixes_its_moves_up() {
+        // The cursor wanders about; everything is allowed. Over a minute it
+        // should use several different moves, none of them most of the time.
+        let line = text_line(300.0, 1500.0, 900.0);
+        let w = world(vec![line]);
+        for seed in [3, 11, 29] {
+            let mut a = Agent::new(900.0, Platform::ground(1800.0, GROUND_Y), SCALE, seed);
+            let mut s = senses(Mode::Combat);
+            s.tactic = Tactic::Grab; // the war's plan: a leaning, not a rule
+            s.can_grab_cursor = true;
+            s.can_lasso = true;
+            s.can_cling = true;
+            s.can_gadget = true;
+            let mut moods = std::collections::HashSet::new();
+            let mut ev = vec![];
+            for k in 0..(60.0 / FIXED_DT) as usize {
+                let t = k as f32 * FIXED_DT;
+                s.cursor = v2(
+                    900.0 + 450.0 * (t * 0.37).sin(),
+                    GROUND_Y - 160.0 - 140.0 * (t * 0.23).sin().abs(),
+                );
+                s.ammo = Some(Ammo {
+                    id: 7,
+                    at: v2(1000.0, 908.0),
+                    line_y: 900.0,
+                });
+                a.update(&s, &w, &mut ev);
+                if a.holding_cursor {
+                    a.holding_cursor = false; // the app lets go
+                }
+                if let Some(at) = a.lasso_holds() {
+                    s.cursor = at;
+                }
+                moods.insert(format!("{:?}", a.whim));
+                if a.gadget.is_some() && a.t > 3.0 {
+                    a.gadget = None; // don't let one tool fill the minute
+                    a.weapon = None;
+                }
+            }
+            let mut kinds = std::collections::HashMap::new();
+            for e in &ev {
+                let k = match e {
+                    Event::StruckCursor { .. } => "fists",
+                    Event::CaughtCursor { .. } => "snatch",
+                    Event::LassoSpin { .. } => "lasso",
+                    Event::WantGadget { .. } => "tool",
+                    Event::Threw { .. } => "words",
+                    Event::Clung { .. } => "cling",
+                    Event::MindLiftCursor { .. } => "powers",
+                    _ => continue,
+                };
+                *kinds.entry(k).or_insert(0) += 1;
+            }
+            let total: i32 = kinds.values().sum();
+            let top = kinds.values().copied().max().unwrap_or(0);
+            assert!(kinds.len() >= 3, "seed {seed}: only {kinds:?}");
+            assert!(
+                top * 10 < total * 8,
+                "seed {seed}: one move dominates {kinds:?}"
+            );
+            assert!(moods.len() >= 3, "seed {seed}: moods {moods:?}");
+        }
     }
 
     #[test]
@@ -3903,35 +4131,66 @@ mod tests {
     }
 
     #[test]
-    fn it_draws_a_cannon_then_fires_it() {
+    fn it_draws_each_weapon_then_fights_with_it() {
         let w = world(vec![]);
-        let mut a = agent();
-        let mut ev = vec![];
-        a.draw_cannon(&mut ev);
-        assert!(ev.iter().any(|e| matches!(
-            e,
-            Event::DoodleStarted {
-                shape: Shape::Cannon,
-                ..
+        for g in Gadget::ALL.into_iter().filter(|g| g.shape().is_some()) {
+            let mut a = agent();
+            let mut ev = vec![];
+            a.draw_weapon(g, &mut ev);
+            assert!(
+                ev.iter().any(
+                    |e| matches!(e, Event::DoodleStarted { shape, .. } if Some(*shape) == g.shape())
+                ),
+                "{g:?}"
+            );
+            let mut s = senses(Mode::Combat);
+            s.cursor = if g.melee().is_some() {
+                a.pos + v2(60.0, -110.0)
+            } else {
+                v2(1500.0, GROUND_Y - 150.0)
+            };
+            run(&mut a, &w, &s, 10.0, &mut ev);
+            assert!(
+                ev.iter()
+                    .any(|e| matches!(e, Event::WeaponDrawn { gadget, .. } if *gadget == g)),
+                "{g:?} never finished"
+            );
+            if g.melee().is_some() {
+                assert!(
+                    ev.iter().any(|e| matches!(e, Event::Slashed { .. })),
+                    "{g:?} never hit"
+                );
+            } else {
+                let shots = ev
+                    .iter()
+                    .filter(|e| matches!(e, Event::Fired { gadget, .. } if *gadget == g))
+                    .count();
+                assert_eq!(shots, g.uses() as usize, "{g:?}");
             }
-        )));
-        let mut s = senses(Mode::Combat);
-        s.cursor = v2(1500.0, GROUND_Y - 150.0);
-        run(&mut a, &w, &s, 10.0, &mut ev);
-        assert!(ev.iter().any(|e| matches!(e, Event::CannonReady { .. })));
-        let shots = ev
-            .iter()
-            .filter(|e| {
-                matches!(
-                    e,
-                    Event::Fired {
-                        gadget: Gadget::Cannon,
-                        ..
-                    }
-                )
-            })
-            .count();
-        assert_eq!(shots, Gadget::Cannon.uses() as usize);
+        }
+    }
+
+    #[test]
+    fn it_draws_a_weapon_facing_its_way_with_the_pen_in_hand() {
+        let w = world(vec![]);
+        for facing in [1.0, -1.0] {
+            let mut a = agent();
+            a.face(facing);
+            let mut ev = vec![];
+            a.draw_weapon(Gadget::Sword, &mut ev);
+            let Some(Event::DoodleStarted { origin, mirror, .. }) = ev.last().copied() else {
+                panic!("no drawing");
+            };
+            assert_eq!(mirror, facing < 0.0);
+            assert!((origin.x - a.pos.x) * facing > 0.0, "drawn behind it");
+            let s = senses(Mode::Idle);
+            for _ in 0..((DOODLE_LEAD + DOODLE_DRAW) / FIXED_DT) as usize {
+                a.update(&s, &w, &mut ev);
+                if let Some((hand, pen)) = a.pen_stroke() {
+                    assert!((hand - pen).length() < 75.0, "pen far from the hand");
+                }
+            }
+        }
     }
 
     #[test]
@@ -4070,6 +4329,7 @@ mod tests {
         let roped = (1..30)
             .filter(|seed| {
                 let mut a = Agent::new(900.0, Platform::ground(1800.0, GROUND_Y), SCALE, *seed);
+                a.strict_tactic = true;
                 let mut s = senses(Mode::Combat);
                 s.cursor = v2(1300.0, GROUND_Y - 200.0);
                 s.can_lasso = true;
@@ -4125,6 +4385,7 @@ mod tests {
         let line = text_line(500.0, 1100.0, 800.0);
         let w = world(vec![line]);
         let mut a = Agent::new(700.0, line, SCALE, 5);
+        a.strict_tactic = true;
         let mut s = senses(Mode::Combat);
         s.cursor = v2(740.0, 800.0 - 110.0);
         s.ammo = Some(Ammo {
@@ -4260,6 +4521,7 @@ mod tests {
             shape: Shape::Star,
             origin,
             size: 26.0,
+            mirror: false,
         });
         let s = senses(Mode::Idle);
         let mut ev = vec![];
